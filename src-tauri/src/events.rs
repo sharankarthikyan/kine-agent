@@ -29,4 +29,11 @@ mod tests {
         let json = serde_json::to_string(&ev).unwrap();
         assert_eq!(json, r#"{"kind":"done","data":{"summary":"ok"}}"#);
     }
+
+    #[test]
+    fn serializes_tool_call_with_camelcase_tag_and_multiple_fields() {
+        let ev = AgentEvent::ToolCall { name: "Write".into(), input: "{}".into() };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert_eq!(json, r#"{"kind":"toolCall","data":{"name":"Write","input":"{}"}}"#);
+    }
 }
