@@ -15,6 +15,8 @@ export function EventStream({ events }: EventStreamProps) {
   }
   return (
     <ul style={{ listStyle: "none", margin: 0, padding: "var(--space-2)" }}>
+      {/* index key is safe: the stream is append-only (events are never
+          reordered or removed). Revisit if a clear/filter feature is added. */}
       {events.map((event, i) => (
         <li key={i} style={rowStyle}>
           {renderEvent(event)}
@@ -64,5 +66,11 @@ function renderEvent(event: AgentEvent) {
           {event.data.message}
         </span>
       );
+    default: {
+      // Exhaustiveness guard: adding a new AgentEvent variant without a case
+      // above becomes a compile error here instead of silently rendering nothing.
+      const _exhaustive: never = event;
+      return _exhaustive;
+    }
   }
 }

@@ -24,3 +24,15 @@ test("renders an error event with alert role", () => {
   render(<EventStream events={events} />);
   expect(screen.getByRole("alert")).toHaveTextContent("boom");
 });
+
+test("renders a done event with its summary", () => {
+  const events: AgentEvent[] = [{ kind: "done", data: { summary: "all set" } }];
+  render(<EventStream events={events} />);
+  expect(screen.getByText(/all set/)).toBeInTheDocument();
+});
+
+test("renders an approvalNeeded event with its prompt", () => {
+  const events: AgentEvent[] = [{ kind: "approvalNeeded", data: { prompt: "run rm?" } }];
+  render(<EventStream events={events} />);
+  expect(screen.getByText(/run rm\?/)).toBeInTheDocument();
+});
