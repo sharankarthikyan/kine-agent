@@ -1,0 +1,5 @@
+{"type":"system","subtype":"init","session_id":"abc123"}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Hello"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":"a.txt"}}]}}
+{"type":"result","subtype":"success","result":"Done writing a.txt"}
+not-json-garbage-line

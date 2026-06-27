@@ -1,5 +1,6 @@
-mod events;
-mod adapter;
+pub mod events;
+pub mod adapter;
+pub mod adapters;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
