@@ -21,3 +21,13 @@ test("does not call onStart when prompt is empty", async () => {
   await userEvent.click(screen.getByRole("button", { name: "Start" }));
   expect(onStart).not.toHaveBeenCalled();
 });
+
+test("submits on Enter key in the input", async () => {
+  const onStart = vi.fn();
+  render(<PromptBar onStart={onStart} running={false} />);
+  await userEvent.type(
+    screen.getByPlaceholderText("Ask the agent to do something…"),
+    "ship it{enter}",
+  );
+  expect(onStart).toHaveBeenCalledWith("ship it");
+});
