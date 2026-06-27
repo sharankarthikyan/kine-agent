@@ -1,5 +1,5 @@
-use crate::adapter::{EventSink, Prompt};
-use crate::adapters::claude;
+use crate::adapter::{AgentAdapter, EventSink, Prompt};
+use crate::adapters::claude::ClaudeAdapter;
 use crate::events::AgentEvent;
 use tauri::ipc::Channel;
 
@@ -20,7 +20,8 @@ pub async fn start_session(
     on_event: Channel<AgentEvent>,
 ) -> Result<(), String> {
     let sink = Box::new(ChannelSink(on_event));
-    claude::spawn_and_stream(Prompt { text: prompt }, cwd.into(), sink)
+    ClaudeAdapter
+        .run(Prompt { text: prompt }, cwd.into(), sink)
         .await
         .map_err(|e| e.to_string())
 }
