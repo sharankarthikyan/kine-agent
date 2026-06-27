@@ -1,51 +1,38 @@
 import { useState } from "react";
-import reactLogo from "./assets/react.svg";
-import { invoke } from "@tauri-apps/api/core";
-import "./App.css";
+import { PromptBar } from "./components/PromptBar";
+import { EventStream } from "./components/EventStream";
+import { startSession, type AgentEvent } from "./lib/agent";
 
-function App() {
-  const [greetMsg, setGreetMsg] = useState("");
-  const [name, setName] = useState("");
+export default function App() {
+  const [events, setEvents] = useState<AgentEvent[]>([]);
+  const [running, setRunning] = useState(false);
 
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreetMsg(await invoke("greet", { name }));
+  async function handleStart(prompt: string) {
+    setEvents([]);
+    setRunning(true);
+    try {
+      await startSession({
+        prompt,
+        cwd: ".", // MVP: current dir; later phases pick a repo + worktree
+        onEvent: (event) => setEvents((prev) => [...prev, event]),
+      });
+    } finally {
+      setRunning(false);
+    }
   }
 
   return (
-    <main className="container">
-      <h1>Welcome to Tauri + React</h1>
-
-      <div className="row">
-        <a href="https://vite.dev" target="_blank">
-          <img src="/vite.svg" className="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <p>Click on the Tauri, Vite, and React logos to learn more.</p>
-
-      <form
-        className="row"
-        onSubmit={(e) => {
-          e.preventDefault();
-          greet();
-        }}
-      >
-        <input
-          id="greet-input"
-          onChange={(e) => setName(e.currentTarget.value)}
-          placeholder="Enter a name..."
-        />
-        <button type="submit">Greet</button>
-      </form>
-      <p>{greetMsg}</p>
-    </main>
+    <div style={{ display: "grid", gridTemplateColumns: "var(--sidebar-w) 1fr", height: "100vh" }}>
+      <aside style={{ borderRight: "1px solid var(--border-hairline)", background: "var(--bg-surface)", padding: "var(--space-4)" }}>
+        <h1 style={{ fontSize: "var(--fs-14)", color: "var(--text-primary)" }}>agent-editor</h1>
+        <p style={{ color: "var(--text-muted)", fontSize: "var(--fs-13)" }}>Sessions (coming soon)</p>
+      </aside>
+      <main style={{ display: "flex", flexDirection: "column", height: "100vh" }}>
+        <PromptBar onStart={handleStart} running={running} />
+        <div style={{ flex: 1, overflow: "auto" }}>
+          <EventStream events={events} />
+        </div>
+      </main>
+    </div>
   );
 }
-
-export default App;
