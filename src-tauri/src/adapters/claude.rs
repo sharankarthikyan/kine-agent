@@ -53,6 +53,8 @@ pub async fn spawn_and_stream(
         .arg("stream-json")
         .arg("--verbose")
         .current_dir(&cwd)
+        // Close stdin: claude otherwise waits ~3s for piped stdin before proceeding.
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         // If this future is dropped (e.g. cancelled), kill the child instead of leaking it.
