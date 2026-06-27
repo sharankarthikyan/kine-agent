@@ -2,7 +2,7 @@ use crate::adapter::{EventSink, Prompt, SessionError};
 use crate::events::AgentEvent;
 use serde_json::Value;
 use std::path::PathBuf;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
 
 /// Parse one line of `claude --output-format stream-json` into an AgentEvent.
@@ -55,10 +55,26 @@ pub async fn spawn_and_stream(
         .current_dir(&cwd)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
+        // If this future is dropped (e.g. cancelled), kill the child instead of leaking it.
+        .kill_on_drop(true)
         .spawn()
         .map_err(|e| SessionError::Spawn(e.to_string()))?;
 
     let stdout = child.stdout.take().ok_or_else(|| SessionError::Spawn("no stdout".into()))?;
+    let stderr = child.stderr.take().ok_or_else(|| SessionError::Spawn("no stderr".into()))?;
+
+    // Drain stderr concurrently on a separate task. Without this, claude --verbose can
+    // write >64KB to stderr, fill the OS pipe buffer, block on write, and stop producing
+    // stdout — causing the stdout loop below to hang forever.
+    let stderr_task = tokio::spawn(async move {
+        let mut buf = String::new();
+        let _ = BufReader::new(stderr).read_to_string(&mut buf).await;
+        // Retain only the last 20 lines as a bounded diagnostic tail.
+        let lines: Vec<&str> = buf.lines().collect();
+        let start = lines.len().saturating_sub(20);
+        lines[start..].join("\n")
+    });
+
     let mut lines = BufReader::new(stdout).lines();
 
     while let Some(line) = lines.next_line().await? {
@@ -68,11 +84,17 @@ pub async fn spawn_and_stream(
         // Unparsed lines are intentionally skipped (logged by caller if needed).
     }
 
+    // Collect stderr tail before waiting on the child so the pipe is fully drained.
+    let stderr_tail = stderr_task.await.unwrap_or_default();
+
     let status = child.wait().await?;
     if !status.success() {
-        sink.emit(AgentEvent::Error {
-            message: format!("claude exited with {status}"),
-        });
+        let message = if stderr_tail.trim().is_empty() {
+            format!("claude exited with {status}")
+        } else {
+            format!("claude exited with {status}: {}", stderr_tail.trim())
+        };
+        sink.emit(AgentEvent::Error { message });
     }
     Ok(())
 }
