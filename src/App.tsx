@@ -16,6 +16,10 @@ export default function App() {
         cwd: ".", // MVP: current dir; later phases pick a repo + worktree
         onEvent: (event) => setEvents((prev) => [...prev, event]),
       });
+    } catch (err) {
+      // startSession rejects on fatal failures (e.g. the agent CLI can't spawn).
+      // Surface it in the stream instead of an uncaught rejection.
+      setEvents((prev) => [...prev, { kind: "error", data: { message: String(err) } }]);
     } finally {
       setRunning(false);
     }
