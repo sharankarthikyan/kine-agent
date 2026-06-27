@@ -6,6 +6,8 @@ pub struct Prompt {
     pub text: String,
 }
 
+/// Fatal session-level failure (the agent never ran or died). In-band errors the
+/// agent itself reports are delivered as `AgentEvent::Error` via the sink instead.
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
     #[error("failed to spawn agent: {0}")]
@@ -21,6 +23,11 @@ pub trait EventSink: Send {
 }
 
 /// Every agent integration implements this. MVP: Claude only.
+///
+/// NOTE: the RPITIT `run` return makes this trait non-dyn-compatible (no
+/// `Box<dyn AgentAdapter>`). Fine while there is a single adapter. When runtime
+/// selection across Codex/Gemini is added, switch to enum dispatch or
+/// `async-trait`/`Pin<Box<dyn Future>>`.
 pub trait AgentAdapter {
     /// Spawn the agent in `cwd`, stream normalized events into `sink`, return when done.
     fn run(
