@@ -2,6 +2,7 @@ pub mod adapter;
 pub mod adapters;
 mod commands;
 pub mod events;
+pub mod worktree;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
