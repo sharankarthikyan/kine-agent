@@ -13,7 +13,7 @@ export default function App() {
     try {
       await startSession({
         prompt,
-        cwd: ".", // MVP: current dir; later phases pick a repo + worktree
+        repo: ".", // MVP: current dir as the target repo; a repo picker comes later
         onEvent: (event) => setEvents((prev) => [...prev, event]),
       });
     } catch (err) {
