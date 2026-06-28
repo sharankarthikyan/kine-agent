@@ -15,8 +15,16 @@ impl EventSink for ChannelSink {
 }
 
 /// Root under which per-session worktrees are created (outside any target repo).
+///
+/// Uses a stable per-user directory (`$HOME/.agent-editor/worktrees`), NOT the system
+/// temp dir — worktrees hold unreviewed agent work that must survive across reboots
+/// until the user reviews and `cleanup_session`s them. Falls back to temp only if HOME
+/// is unset. (A later phase moves this to the Tauri app-data dir via AppHandle.)
 fn worktrees_root() -> PathBuf {
-    std::env::temp_dir().join("agent-editor").join("worktrees")
+    let base = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    base.join(".agent-editor").join("worktrees")
 }
 
 /// Start a session: create an isolated worktree off `repo` for `session_id`, then
@@ -38,8 +46,12 @@ pub async fn start_session(
         .map_err(|e| e.to_string())?;
 
     let sink = Box::new(ChannelSink(on_event));
+    // On error the worktree is left in place: a normal "agent ran then errored" session
+    // still has changes worth reviewing, and the frontend can always cleanup_session.
+    // (Plan 3/5: persist the repo↔session mapping, auto-clean empty spawn-failure
+    // worktrees, and reuse-or-error on a colliding session_id instead of a raw git error.)
     ClaudeAdapter
-        .run(Prompt { text: prompt }, wt.path.clone(), sink)
+        .run(Prompt { text: prompt }, wt.path, sink)
         .await
         .map_err(|e| e.to_string())
 }
