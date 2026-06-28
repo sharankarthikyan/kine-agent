@@ -1,4 +1,4 @@
-use agent_editor_lib::worktree::{create, remove};
+use agent_editor_lib::worktree::{create, remove, WorktreeError};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -65,6 +65,14 @@ fn remove_deletes_worktree_and_unregisters_it() {
     let listed = String::from_utf8_lossy(&list.stdout);
     assert!(!listed.contains("sess2"), "worktree still registered: {listed}");
 
+    // The branch was deleted too (best-effort branch cleanup ran).
+    let branches = Command::new("git").arg("-C").arg(&repo)
+        .args(["branch", "--list", "agent/sess2"]).output().unwrap();
+    assert!(
+        String::from_utf8_lossy(&branches.stdout).trim().is_empty(),
+        "branch agent/sess2 should be deleted after remove"
+    );
+
     std::fs::remove_dir_all(&root).ok();
 }
 
@@ -75,7 +83,10 @@ fn create_errors_on_non_repo() {
     std::fs::create_dir_all(&not_repo).unwrap();
 
     let result = create(&not_repo, &root.join("worktrees"), "sessX");
-    assert!(result.is_err(), "expected error creating worktree in a non-git dir");
+    assert!(
+        matches!(result, Err(WorktreeError::Git { .. })),
+        "expected WorktreeError::Git creating a worktree in a non-git dir, got {result:?}"
+    );
 
     std::fs::remove_dir_all(&root).ok();
 }

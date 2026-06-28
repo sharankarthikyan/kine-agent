@@ -77,8 +77,9 @@ pub fn create(
     Ok(Worktree { path, branch })
 }
 
-/// Remove a worktree and delete its branch. Idempotent-ish: a missing worktree
-/// surfaces as a Git error from `git worktree remove`.
+/// Remove a worktree and delete its branch. NOT idempotent: removing an
+/// already-removed worktree returns a `WorktreeError::Git` (callers needing
+/// idempotency should check existence first).
 pub fn remove(repo: &Path, wt: &Worktree) -> Result<(), WorktreeError> {
     let rm = Command::new("git")
         .arg("-C")
@@ -92,12 +93,13 @@ pub fn remove(repo: &Path, wt: &Worktree) -> Result<(), WorktreeError> {
             stderr: String::from_utf8_lossy(&rm.stderr).trim().to_string(),
         });
     }
-    // Best-effort branch delete; ignore failure (branch may be checked out elsewhere).
+    // Best-effort branch delete — ignore ALL failures (spawn error or non-zero exit):
+    // the branch may be checked out elsewhere, and the worktree is already gone.
     let _ = Command::new("git")
         .arg("-C")
         .arg(repo)
         .args(["branch", "-D", &wt.branch])
-        .output()?;
+        .output();
     Ok(())
 }
 

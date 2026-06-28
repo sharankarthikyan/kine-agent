@@ -38,6 +38,11 @@ pub async fn start_session(
     on_event: Channel<AgentEvent>,
 ) -> Result<(), String> {
     let repo_path = PathBuf::from(&repo);
+    // `repo` is WebView-supplied; reject anything that isn't an existing directory
+    // before handing it to git (symmetry with the validated session_id).
+    if !repo_path.is_dir() {
+        return Err(format!("repo is not an existing directory: {repo}"));
+    }
     let root = worktrees_root();
     // git worktree add is blocking I/O — keep it off the async runtime's worker.
     let wt = tokio::task::spawn_blocking(move || worktree::create(&repo_path, &root, &session_id))
@@ -60,6 +65,9 @@ pub async fn start_session(
 #[tauri::command]
 pub async fn cleanup_session(repo: String, session_id: String) -> Result<(), String> {
     let repo_path = PathBuf::from(&repo);
+    if !repo_path.is_dir() {
+        return Err(format!("repo is not an existing directory: {repo}"));
+    }
     let root = worktrees_root();
     // Resolve+validate the session→worktree mapping, then remove off the async runtime.
     tokio::task::spawn_blocking(move || {
