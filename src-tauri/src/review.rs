@@ -74,6 +74,8 @@ pub fn diff(worktree: &Path) -> Result<SessionDiff, ReviewError> {
     let mut status_by_path = std::collections::BTreeMap::new();
     for line in name_status.lines() {
         let mut parts = line.split('\t');
+        // next_back takes the LAST field = destination path, handling both "M\tpath"
+        // and rename "R100\told\tnew" correctly.
         let (Some(code), Some(path)) = (parts.next(), parts.next_back()) else { continue };
         let status = match code.chars().next() {
             Some('A') => ChangeStatus::Added,
@@ -98,7 +100,9 @@ pub fn diff(worktree: &Path) -> Result<SessionDiff, ReviewError> {
         });
     }
 
-    // Untracked files: count their lines as additions.
+    // Untracked files: count their lines as additions. Binary/non-UTF8 files fail
+    // read_to_string and report 0 additions (consistent with binary tracked files,
+    // whose numstat shows "-").
     for path in untracked.lines() {
         let abs = worktree.join(path);
         let additions = std::fs::read_to_string(&abs)
@@ -123,6 +127,11 @@ fn git(dir: &Path, args: &[&str], op: &'static str) -> Result<String, ReviewErro
         .arg(dir)
         .arg("-c")
         .arg("core.quotepath=false")
+        // Force color off: a user's color.ui=always would otherwise inject ANSI
+        // escapes into the patch (garbling the <pre>) and the parsed --name-status/
+        // --numstat lines.
+        .arg("-c")
+        .arg("color.ui=never")
         .args(args)
         .output()?;
     if !output.status.success() {

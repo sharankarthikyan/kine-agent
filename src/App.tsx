@@ -15,6 +15,7 @@ export default function App() {
   async function handleStart(prompt: string) {
     setEvents([]);
     setDiff(null);
+    setSessionId(null); // drop the previous session so a failed start can't be "reviewed"
     setRunning(true);
     try {
       const id = await startSession({
