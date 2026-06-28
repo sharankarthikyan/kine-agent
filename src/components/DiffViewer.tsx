@@ -1,0 +1,66 @@
+import type { CSSProperties } from "react";
+import type { ChangeStatus, SessionDiff } from "../lib/review";
+
+interface DiffViewerProps {
+  diff: SessionDiff;
+}
+
+const STATUS_COLOR: Record<ChangeStatus, string> = {
+  added: "var(--status-success)",
+  modified: "var(--status-running)",
+  deleted: "var(--status-error)",
+};
+
+const STATUS_LABEL: Record<ChangeStatus, string> = {
+  added: "A",
+  modified: "M",
+  deleted: "D",
+};
+
+export function DiffViewer({ diff }: DiffViewerProps) {
+  if (diff.files.length === 0) {
+    return <p style={{ color: "var(--text-muted)", padding: "var(--space-4)" }}>No changes.</p>;
+  }
+  const count = diff.files.length;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+      <header style={{ padding: "var(--space-2) var(--space-3)", color: "var(--text-muted)", fontSize: "var(--fs-13)" }}>
+        {count} file{count === 1 ? "" : "s"} changed
+      </header>
+      <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
+        {diff.files.map((file) => (
+          <li key={file.path} style={fileRow}>
+            <span style={{ color: STATUS_COLOR[file.status], fontFamily: "var(--font-mono)", width: "1.5em" }}>
+              {STATUS_LABEL[file.status]}
+            </span>
+            <span style={{ fontFamily: "var(--font-mono)", flex: 1 }}>{file.path}</span>
+            <span style={{ fontVariantNumeric: "tabular-nums", color: "var(--status-success)" }}>+{file.additions}</span>
+            <span style={{ fontVariantNumeric: "tabular-nums", color: "var(--status-error)" }}>-{file.deletions}</span>
+          </li>
+        ))}
+      </ul>
+      <pre style={patchBox}>{diff.patch}</pre>
+    </div>
+  );
+}
+
+const fileRow: CSSProperties = {
+  display: "flex",
+  gap: "var(--space-2)",
+  alignItems: "center",
+  padding: "var(--space-1) var(--space-3)",
+  borderBottom: "1px solid var(--border-hairline)",
+  fontSize: "var(--fs-13)",
+};
+
+const patchBox: CSSProperties = {
+  margin: 0,
+  padding: "var(--space-3)",
+  overflow: "auto",
+  flex: 1,
+  fontFamily: "var(--font-mono)",
+  fontSize: "var(--fs-13)",
+  color: "var(--text-body)",
+  background: "var(--bg-card)",
+  whiteSpace: "pre",
+};
