@@ -1,6 +1,7 @@
 use crate::adapter::{AgentAdapter, EventSink, Prompt};
 use crate::adapters::claude::ClaudeAdapter;
 use crate::events::AgentEvent;
+use crate::review::{self, SessionDiff};
 use crate::worktree;
 use std::path::PathBuf;
 use tauri::ipc::Channel;
@@ -77,4 +78,22 @@ pub async fn cleanup_session(repo: String, session_id: String) -> Result<(), Str
     .await
     .map_err(|e| e.to_string())?
     .map_err(|e| e.to_string())
+}
+
+/// Compute the diff of a session's worktree for review.
+#[tauri::command]
+pub async fn review_session(session_id: String) -> Result<SessionDiff, String> {
+    let root = worktrees_root();
+    tokio::task::spawn_blocking(move || {
+        let wt = review::diff(&worktree_resolve(&root, &session_id)?)?;
+        Ok::<SessionDiff, review::ReviewError>(wt)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())
+}
+
+/// Resolve a session's worktree path (validated), erroring via ReviewError.
+fn worktree_resolve(root: &std::path::Path, session_id: &str) -> Result<std::path::PathBuf, review::ReviewError> {
+    Ok(crate::worktree::worktree_for(root, session_id)?.path)
 }
