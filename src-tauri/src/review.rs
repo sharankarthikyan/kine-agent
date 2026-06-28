@@ -74,7 +74,7 @@ pub fn diff(worktree: &Path) -> Result<SessionDiff, ReviewError> {
     let mut status_by_path = std::collections::BTreeMap::new();
     for line in name_status.lines() {
         let mut parts = line.split('\t');
-        let (Some(code), Some(path)) = (parts.next(), parts.last()) else { continue };
+        let (Some(code), Some(path)) = (parts.next(), parts.next_back()) else { continue };
         let status = match code.chars().next() {
             Some('A') => ChangeStatus::Added,
             Some('D') => ChangeStatus::Deleted,
