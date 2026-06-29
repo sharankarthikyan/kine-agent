@@ -42,20 +42,24 @@ function renderEvent(event: AgentEvent, hasProse: boolean) {
       // Agent prose is Markdown and is the dominant element of the turn.
       return <Markdown>{event.data.text}</Markdown>;
 
-    case "toolCall":
+    case "toolCall": {
+      const summary = describeToolCall(event.data.name, event.data.input);
       return (
         <Badge
           variant="secondary"
-          className="gap-1 max-w-full overflow-hidden font-mono font-normal"
+          className="gap-1.5 max-w-full overflow-hidden font-normal"
           title={event.data.input}
         >
           <Wrench aria-hidden="true" className="size-3 shrink-0" />
           <span className="truncate">
-            {event.data.name}
-            {summarize(event.data.input)}
+            <span className="font-medium">{event.data.name}</span>
+            {summary && (
+              <span className="text-muted-foreground font-mono"> · {summary}</span>
+            )}
           </span>
         </Badge>
       );
+    }
 
     case "fileWrite":
       return (
@@ -102,10 +106,48 @@ function renderEvent(event: AgentEvent, hasProse: boolean) {
   }
 }
 
-/** Compact one-line preview of a tool's JSON input for the chip. */
-function summarize(input: string): string {
-  const trimmed = input.trim();
-  if (!trimmed || trimmed === "{}") return "";
-  const oneLine = trimmed.replace(/\s+/g, " ");
-  return ` ${oneLine.length > 60 ? `${oneLine.slice(0, 57)}…` : oneLine}`;
+/**
+ * Human-readable summary of a tool call's most meaningful argument — e.g.
+ * `Read · App.tsx`, `Bash · npm test`, `Agent · Review portfolio UI/UX`.
+ * Falls back to "" (chip shows just the tool name) when nothing useful parses.
+ */
+function describeToolCall(name: string, input: string): string {
+  let args: Record<string, unknown> = {};
+  try {
+    const parsed = JSON.parse(input);
+    if (parsed && typeof parsed === "object") args = parsed as Record<string, unknown>;
+  } catch {
+    return "";
+  }
+  const str = (value: unknown): string | undefined =>
+    typeof value === "string" && value.trim() !== "" ? value.trim() : undefined;
+  const basename = (path: string): string => path.replace(/\/+$/, "").split("/").pop() || path;
+
+  switch (name) {
+    case "Read":
+    case "Write":
+    case "Edit":
+    case "NotebookEdit": {
+      const path = str(args.file_path) ?? str(args.path) ?? str(args.notebook_path);
+      return path ? basename(path) : "";
+    }
+    case "Bash":
+      return str(args.command) ?? "";
+    case "Grep":
+    case "Glob":
+      return str(args.pattern) ?? "";
+    case "Task":
+    case "Agent":
+      return str(args.description) ?? str(args.subagent_type) ?? "";
+    case "WebFetch":
+      return str(args.url) ?? "";
+    case "WebSearch":
+      return str(args.query) ?? "";
+    default: {
+      const firstString = Object.values(args).find(
+        (value): value is string => typeof value === "string" && value.trim() !== ""
+      );
+      return firstString ?? "";
+    }
+  }
 }
