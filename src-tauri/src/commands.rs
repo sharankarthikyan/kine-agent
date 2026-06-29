@@ -2,6 +2,7 @@ use crate::adapter::{AgentAdapter, EventSink, Prompt};
 use crate::adapters::claude::ClaudeAdapter;
 use crate::events::AgentEvent;
 use crate::inspect::{self, Capabilities, CustomizationCounts, RuleFile};
+use crate::git::{self, BranchChanges, CommitResult, TreeEntry};
 use crate::review::{self, Diffstat, SessionDiff};
 use crate::store::{self, SessionStore, SessionSummary, StoredEvent};
 use crate::worktree;
@@ -325,6 +326,51 @@ pub async fn session_diffstat(session_id: String) -> Result<Diffstat, String> {
     tokio::task::spawn_blocking(move || {
         let wt = crate::worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
         Ok::<Diffstat, String>(review::diffstat(&wt.path))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Return a flat, sorted file tree for a session's worktree. Directories are derived
+/// from file paths and appear before files. Status ("modified" | "added" | "untracked" |
+/// "deleted") is attached per file; directories always carry `status: null`.
+/// Capped at 2000 entries; excess is logged server-side and truncated.
+#[tauri::command]
+pub async fn worktree_tree(session_id: String) -> Result<Vec<TreeEntry>, String> {
+    let root = worktrees_root();
+    tokio::task::spawn_blocking(move || {
+        let wt = crate::worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
+        Ok::<Vec<TreeEntry>, String>(git::worktree_tree(&wt.path))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Return how many commits the session branch is ahead of "main" and the list of
+/// files with uncommitted changes. Both are best-effort (0 / empty on error).
+#[tauri::command]
+pub async fn branch_changes(session_id: String) -> Result<BranchChanges, String> {
+    let root = worktrees_root();
+    tokio::task::spawn_blocking(move || {
+        let wt = crate::worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
+        Ok::<BranchChanges, String>(git::branch_changes(&wt.path, "main"))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Stage all changes in the session's worktree (`git add -A`) and commit them with
+/// `message`. Returns the new HEAD sha. Errors when the message is blank, the tree is
+/// clean, or git fails for any reason. Never pushes, merges, or switches branches.
+#[tauri::command]
+pub async fn commit_session(
+    session_id: String,
+    message: String,
+) -> Result<CommitResult, String> {
+    let root = worktrees_root();
+    tokio::task::spawn_blocking(move || {
+        let wt = crate::worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
+        git::commit_session(&wt.path, &message)
     })
     .await
     .map_err(|e| e.to_string())?
