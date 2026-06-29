@@ -1,4 +1,4 @@
-import { render, screen, within, fireEvent } from "@testing-library/react";
+import { render, screen, within, fireEvent, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { CustomizationsDialog } from "../CustomizationsDialog";
 import type { CustomizationCounts } from "../../lib/conductor";
@@ -165,9 +165,13 @@ test("file viewer shows file content after readTextFile resolves", async () => {
   const nav = getNav();
   await userEvent.click(within(nav).getByRole("button", { name: /instructions/i }));
   await userEvent.click(screen.getByText("CLAUDE.md"));
-  // Wait for async content to appear
-  expect(await screen.findByText("line one")).toBeInTheDocument();
-  expect(screen.getByText("line two")).toBeInTheDocument();
+  // react-syntax-highlighter wraps tokens in spans; check dialog textContent
+  // rather than exact element text to stay robust against DOM structure changes.
+  const dialog = screen.getByRole("dialog");
+  await waitFor(() => {
+    expect(dialog.textContent).toContain("line one");
+    expect(dialog.textContent).toContain("line two");
+  });
 });
 
 test("back button returns from file viewer to the section list", async () => {

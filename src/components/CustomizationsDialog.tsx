@@ -10,6 +10,8 @@ import {
   Webhook,
   Zap,
 } from "lucide-react";
+import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
+import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
@@ -141,6 +143,45 @@ function NavRow({ item, active, count, onClick }: NavRowProps) {
 
 // ─── File detail view ─────────────────────────────────────────────────────────
 
+// Maps file extension to a Prism language id. Defaults to "markdown" because
+// the majority of agent/skill files are .md. Falls back gracefully — Prism
+// renders unsupported languages as plain text.
+function detectLanguage(path: string): string {
+  const ext = path.split(".").pop()?.toLowerCase() ?? "";
+  switch (ext) {
+    case "md":
+    case "markdown":
+      return "markdown";
+    case "ts":
+    case "tsx":
+      return "tsx";
+    case "js":
+    case "jsx":
+    case "mjs":
+      return "jsx";
+    case "json":
+      return "json";
+    case "toml":
+      return "toml";
+    case "yaml":
+    case "yml":
+      return "yaml";
+    case "py":
+      return "python";
+    case "rs":
+      return "rust";
+    case "sh":
+    case "bash":
+      return "bash";
+    case "css":
+      return "css";
+    case "html":
+      return "markup";
+    default:
+      return "markdown";
+  }
+}
+
 interface FileDetailViewProps {
   detail: { name: string; path: string };
   loading: boolean;
@@ -150,9 +191,6 @@ interface FileDetailViewProps {
 }
 
 function FileDetailView({ detail, loading, error, content, onBack }: FileDetailViewProps) {
-  const lines = content?.split("\n") ?? [];
-  const lineNumWidth = Math.max(String(lines.length).length, 1);
-
   return (
     <div className="flex flex-col h-full min-h-0">
       {/* Header: back button + name + path */}
@@ -173,7 +211,7 @@ function FileDetailView({ detail, loading, error, content, onBack }: FileDetailV
           </span>
         </div>
       </div>
-      {/* Body: file contents, read-only */}
+      {/* Body: file contents, read-only with syntax highlighting */}
       <ScrollArea className="flex-1 min-h-0">
         <div className="p-4">
           {loading && (
@@ -183,19 +221,26 @@ function FileDetailView({ detail, loading, error, content, onBack }: FileDetailV
             <p className="text-sm text-muted-foreground">Couldn't read this file</p>
           )}
           {!loading && !error && content !== null && (
-            <div className="font-mono text-xs">
-              {lines.map((line, i) => (
-                <div key={i} className="flex gap-3">
-                  <span
-                    className="text-right text-muted-foreground select-none shrink-0 tabular-nums"
-                    style={{ minWidth: `${lineNumWidth}ch` }}
-                  >
-                    {i + 1}
-                  </span>
-                  <span className="whitespace-pre-wrap min-w-0">{line}</span>
-                </div>
-              ))}
-            </div>
+            <SyntaxHighlighter
+              language={detectLanguage(detail.path)}
+              style={oneDark}
+              showLineNumbers
+              wrapLongLines
+              customStyle={{
+                background: "transparent",
+                margin: 0,
+                padding: 0,
+                fontSize: "0.75rem",
+              }}
+              lineNumberStyle={{
+                color: "var(--muted-foreground)",
+                opacity: 0.5,
+                userSelect: "none",
+                minWidth: "2.5em",
+              }}
+            >
+              {content}
+            </SyntaxHighlighter>
           )}
         </div>
       </ScrollArea>
