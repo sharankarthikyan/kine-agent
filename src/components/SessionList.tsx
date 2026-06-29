@@ -65,7 +65,7 @@ export function SessionList({
 
   return (
     <nav
-      className="flex flex-col h-full border-r border-border bg-background min-h-0"
+      className="flex flex-col h-full bg-background min-h-0"
       aria-label="Sessions"
     >
       {/* Header */}
