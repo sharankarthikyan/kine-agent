@@ -481,9 +481,9 @@ export default function App() {
         onOpenEditor={() => void handleOpenEditor()}
         onOpenTerminal={() => void handleOpenTerminal()}
       />
-      <div className="flex flex-1 min-h-0">
+      <div className="flex flex-1 min-h-0 gap-2 px-2 pb-2">
         {!sidebarCollapsed && (
-          <div className="w-72 shrink-0">
+          <div className="w-72 shrink-0 flex flex-col rounded-xl border border-border overflow-hidden">
             <SessionList
               groups={groupByWorkspace(filteredSessions)}
               activeId={activeSessionId}
@@ -496,10 +496,10 @@ export default function App() {
             />
           </div>
         )}
-        <main className="flex flex-1 min-h-0">
+        <main className="flex flex-1 min-h-0 gap-2">
           {/* Chat column — hidden only while the right pane is expanded to fullscreen. */}
           {!rightExpanded && (
-            <section className="flex flex-1 flex-col min-w-0 min-h-0">
+            <section className="flex flex-1 flex-col min-w-0 min-h-0 rounded-xl border border-border bg-card overflow-hidden">
               {activeSessionId === null ? (
                 /* No active session — show the new-session composer. */
                 <NewSession
@@ -573,8 +573,8 @@ export default function App() {
           {rightTab && (
             <aside
               className={cn(
-                "flex flex-col min-w-0 min-h-0 border-l border-border",
-                rightExpanded ? "w-full border-l-0" : "w-[clamp(420px,46%,760px)]"
+                "flex flex-col min-w-0 min-h-0 rounded-xl border border-border bg-card overflow-hidden",
+                rightExpanded ? "w-full" : "w-[clamp(420px,46%,760px)]"
               )}
             >
               <Tabs
@@ -640,7 +640,7 @@ export default function App() {
 
       {/* Rule viewer Sheet — rendered once, controlled by ruleView state. */}
       <Sheet open={ruleView !== null} onOpenChange={(o) => { if (!o) setRuleView(null); }}>
-        <SheetContent className="w-[480px] sm:max-w-none flex flex-col">
+        <SheetContent className="w-[480px] sm:max-w-none flex flex-col rounded-l-xl">
           <SheetHeader>
             <SheetTitle className="font-mono text-sm">{ruleView?.label}</SheetTitle>
           </SheetHeader>
@@ -653,7 +653,7 @@ export default function App() {
       {/* File diff Sheet — opens when a file is clicked in Changes or Files tab.
           Shows the full session patch (DiffViewer has no per-file filter). */}
       <Sheet open={diffSheet !== null} onOpenChange={(o) => { if (!o) setDiffSheet(null); }}>
-        <SheetContent className="w-[640px] sm:max-w-none flex flex-col">
+        <SheetContent className="w-[640px] sm:max-w-none flex flex-col rounded-l-xl">
           <SheetHeader>
             <SheetTitle className="font-mono text-sm">{diffSheet?.path}</SheetTitle>
           </SheetHeader>
