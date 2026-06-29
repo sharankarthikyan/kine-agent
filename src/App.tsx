@@ -234,25 +234,27 @@ export default function App() {
                   <Conversation turns={turns} running={running} />
                 </div>
               </div>
-              <div className="flex items-center gap-2 px-4 py-2">
-                {showReviewChip && (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="rounded-full"
-                    onClick={() => setRightTab("diff")}
-                  >
-                    <FileDiff data-icon />
-                    {changedCount} file{changedCount === 1 ? "" : "s"} changed — Review
-                  </Button>
-                )}
-                {activeSessionId !== null && (
-                  <Button variant="ghost" size="sm" onClick={openContext}>
-                    <Info data-icon />
-                    Context
-                  </Button>
-                )}
-              </div>
+              {(showReviewChip || activeSessionId !== null) && (
+                <div className="flex items-center gap-2 px-4 py-2">
+                  {showReviewChip && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="rounded-full"
+                      onClick={() => setRightTab("diff")}
+                    >
+                      <FileDiff data-icon />
+                      {changedCount} file{changedCount === 1 ? "" : "s"} changed — Review
+                    </Button>
+                  )}
+                  {activeSessionId !== null && (
+                    <Button variant="ghost" size="sm" onClick={openContext}>
+                      <Info data-icon />
+                      Context
+                    </Button>
+                  )}
+                </div>
+              )}
               <PromptBar
                 onStart={handleSend}
                 running={running}
