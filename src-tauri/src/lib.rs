@@ -3,6 +3,7 @@ pub mod adapters;
 mod commands;
 pub mod events;
 pub mod review;
+pub mod store;
 pub mod worktree;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
