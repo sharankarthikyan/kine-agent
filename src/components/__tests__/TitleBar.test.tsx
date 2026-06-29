@@ -5,17 +5,17 @@ import { TitleBar } from "../TitleBar";
 
 test('renders "New Session" pill when title is null', () => {
   render(<TitleBar />);
-  expect(screen.getByText(/✳ New Session/)).toBeInTheDocument();
+  expect(screen.getByText("New Session")).toBeInTheDocument();
 });
 
 test("renders title and repo in the session pill", () => {
   render(<TitleBar title="Foo" repo="myrepo" />);
-  expect(screen.getByText("✳ Foo · myrepo")).toBeInTheDocument();
+  expect(screen.getByText("Foo · myrepo")).toBeInTheDocument();
 });
 
 test("renders title without repo suffix when repo is null", () => {
   render(<TitleBar title="My Task" />);
-  expect(screen.getByText("✳ My Task")).toBeInTheDocument();
+  expect(screen.getByText("My Task")).toBeInTheDocument();
 });
 
 // ── Sidebar toggle ────────────────────────────────────────────────────────────

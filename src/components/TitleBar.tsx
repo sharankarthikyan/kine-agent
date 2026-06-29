@@ -1,4 +1,4 @@
-import { CircleUser, PanelLeft, Play, SquareCode, SquareTerminal, SplitSquareHorizontal } from "lucide-react";
+import { Asterisk, CircleUser, PanelLeft, Play, SquareCode, SquareTerminal, SplitSquareHorizontal } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ThemeToggle } from "./ThemeToggle";
 import { cn } from "@/lib/utils";
@@ -60,7 +60,8 @@ export function TitleBar({
             "flex items-center gap-1 text-sm text-muted-foreground truncate max-w-xs select-none"
           )}
         >
-          ✳ {title ?? "New Session"}
+          <Asterisk data-icon aria-hidden className="size-3.5 shrink-0" />
+          {title ?? "New Session"}
           {repo != null && ` · ${repo}`}
         </span>
       </div>

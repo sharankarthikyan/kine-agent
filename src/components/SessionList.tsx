@@ -183,7 +183,9 @@ export function SessionList({
                           </span>
                           {/* Bottom row: diffstat + relative time */}
                           <span className="text-xs text-muted-foreground tabular-nums pl-4">
-                            {"\u{1F4C1}"} +{additions} −{deletions} &middot;{" "}
+                            <span style={{ color: "var(--status-success)" }}>+{additions}</span>{" "}
+                            <span style={{ color: "var(--status-error)" }}>−{deletions}</span>
+                            {" · "}
                             {relativeTime(session.updatedAt, now)}
                           </span>
                         </Button>

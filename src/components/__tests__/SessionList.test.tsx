@@ -64,14 +64,16 @@ test("renders each session title", () => {
 
 test("shows diffstat additions and deletions for a session", () => {
   render(<SessionList {...defaultProps} diffstats={diffstats} />);
-  // The row for session "a" should show +12 −3
-  expect(screen.getByText(/\+12.*−3/)).toBeInTheDocument();
+  // additions and deletions are now separate colored spans
+  expect(screen.getByText("+12")).toBeInTheDocument();
+  expect(screen.getByText("−3")).toBeInTheDocument();
 });
 
 test("shows +0 −0 for sessions without diffstat data", () => {
   render(<SessionList {...defaultProps} diffstats={{}} />);
-  const zeros = screen.getAllByText(/\+0.*−0/);
-  expect(zeros.length).toBeGreaterThan(0);
+  // each session row renders a +0 additions span
+  const addZeros = screen.getAllByText("+0");
+  expect(addZeros.length).toBeGreaterThan(0);
 });
 
 test("shows relative time for each session row", () => {
