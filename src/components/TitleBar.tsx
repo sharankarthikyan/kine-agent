@@ -34,7 +34,7 @@ export function TitleBar({
   return (
     <div
       data-tauri-drag-region
-      className="h-10 shrink-0 flex items-center border-b border-border bg-background"
+      className="h-10 shrink-0 flex items-center bg-background"
     >
       {/* LEFT zone: traffic-light inset + sidebar toggle */}
       <div className="flex items-center pl-[78px] shrink-0">
