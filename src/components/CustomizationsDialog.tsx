@@ -11,7 +11,8 @@ import {
   Zap,
 } from "lucide-react";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
-import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
+import { oneDark, oneLight } from "react-syntax-highlighter/dist/esm/styles/prism";
+import { useTheme } from "@/components/theme-provider";
 
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
@@ -190,6 +191,8 @@ interface FileDetailViewProps {
 }
 
 function FileDetailView({ detail, loading, error, content, onBack }: FileDetailViewProps) {
+  const { theme } = useTheme();
+  const codeStyle = theme === "dark" ? oneDark : oneLight;
   return (
     <div className="flex flex-col h-full min-h-0">
       {/* Header: back button + name + path */}
@@ -222,7 +225,7 @@ function FileDetailView({ detail, loading, error, content, onBack }: FileDetailV
           {!loading && !error && content !== null && (
             <SyntaxHighlighter
               language={detectLanguage(detail.path)}
-              style={oneDark}
+              style={codeStyle}
               showLineNumbers
               wrapLongLines
               customStyle={{
