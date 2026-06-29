@@ -682,6 +682,7 @@ export default function App() {
         capabilities={capabilities}
         rules={rules}
         onOpenRule={handleOpenRule}
+        sessionId={activeSessionId ?? ""}
       />
 
       <Toaster />

@@ -3,6 +3,11 @@ import userEvent from "@testing-library/user-event";
 import { CustomizationsDialog } from "../CustomizationsDialog";
 import type { CustomizationCounts } from "../../lib/conductor";
 import type { Capabilities, RuleFile } from "../../lib/inspect";
+import { readTextFile } from "../../lib/inspect";
+
+vi.mock("../../lib/inspect", () => ({
+  readTextFile: vi.fn(),
+}));
 
 const counts: CustomizationCounts = {
   agents: 2,
@@ -23,6 +28,19 @@ const capabilities: Capabilities = {
   commands: [],
 };
 
+// Capabilities with non-empty paths — used for detail-view tests.
+const capabilitiesWithPaths: Capabilities = {
+  skills: [
+    { name: "shadcn", description: "Add shadcn/ui components", source: "user", path: "/home/.claude/skills/shadcn/SKILL.md" },
+    { name: "deep-research", description: "Multi-source web research", source: "project", path: "" },
+  ],
+  subagents: [
+    { name: "code-reviewer", description: "Reviews code for bugs", source: "user", path: "/home/.claude/agents/code-reviewer.md" },
+    { name: "data-engineer", description: "Data pipelines", source: "project", path: "" },
+  ],
+  commands: [],
+};
+
 const rules: RuleFile[] = [
   { path: "/wt/CLAUDE.md", label: "CLAUDE.md", scope: "project", exists: true },
   { path: "/wt/global.md", label: "global.md", scope: "global", exists: true },
@@ -39,6 +57,7 @@ const defaultProps = {
   capabilities,
   rules,
   onOpenRule: noop,
+  sessionId: "s1",
 };
 
 // Helper that returns the left-nav element after confirming it exists.
@@ -48,6 +67,11 @@ function getNav() {
 
 // Radix Dialog renders into a portal (document.body). screen.* searches the full
 // document, so portal content is reachable from all queries.
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  vi.mocked(readTextFile).mockResolvedValue("");
+});
 
 test("renders the dialog when open is true", () => {
   render(<CustomizationsDialog {...defaultProps} />);
@@ -122,16 +146,196 @@ test("switching to Instructions shows existing rule files and hides non-existent
   expect(screen.queryByText("missing.md")).not.toBeInTheDocument();
 });
 
-test("clicking an instruction row calls onOpenRule with the rule", async () => {
-  const onOpenRule = vi.fn();
-  render(<CustomizationsDialog {...defaultProps} onOpenRule={onOpenRule} />);
+// ─── In-dialog file viewer ────────────────────────────────────────────────────
+
+test("clicking an instruction row opens the in-dialog file viewer", async () => {
+  vi.mocked(readTextFile).mockResolvedValue("# Project rules\nKeep it minimal.");
+  render(<CustomizationsDialog {...defaultProps} />);
   const nav = getNav();
   await userEvent.click(within(nav).getByRole("button", { name: /instructions/i }));
   await userEvent.click(screen.getByText("CLAUDE.md"));
-  expect(onOpenRule).toHaveBeenCalledWith(
-    expect.objectContaining({ label: "CLAUDE.md", path: "/wt/CLAUDE.md" })
-  );
+  expect(readTextFile).toHaveBeenCalledWith("s1", "/wt/CLAUDE.md");
+  expect(await screen.findByRole("button", { name: /back/i })).toBeInTheDocument();
 });
+
+test("file viewer shows file content after readTextFile resolves", async () => {
+  vi.mocked(readTextFile).mockResolvedValue("line one\nline two");
+  render(<CustomizationsDialog {...defaultProps} />);
+  const nav = getNav();
+  await userEvent.click(within(nav).getByRole("button", { name: /instructions/i }));
+  await userEvent.click(screen.getByText("CLAUDE.md"));
+  // Wait for async content to appear
+  expect(await screen.findByText("line one")).toBeInTheDocument();
+  expect(screen.getByText("line two")).toBeInTheDocument();
+});
+
+test("back button returns from file viewer to the section list", async () => {
+  vi.mocked(readTextFile).mockResolvedValue("some content");
+  render(<CustomizationsDialog {...defaultProps} />);
+  const nav = getNav();
+  await userEvent.click(within(nav).getByRole("button", { name: /instructions/i }));
+  await userEvent.click(screen.getByText("CLAUDE.md"));
+  const backBtn = await screen.findByRole("button", { name: /back/i });
+  await userEvent.click(backBtn);
+  // Back to the instructions list
+  expect(screen.getByText("CLAUDE.md")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /back/i })).not.toBeInTheDocument();
+});
+
+test("file viewer shows error message when readTextFile rejects", async () => {
+  vi.mocked(readTextFile).mockRejectedValue(new Error("permission denied"));
+  render(<CustomizationsDialog {...defaultProps} />);
+  const nav = getNav();
+  await userEvent.click(within(nav).getByRole("button", { name: /instructions/i }));
+  await userEvent.click(screen.getByText("CLAUDE.md"));
+  expect(await screen.findByText(/couldn't read this file/i)).toBeInTheDocument();
+});
+
+test("clicking an agent row with a path opens the file viewer", async () => {
+  vi.mocked(readTextFile).mockResolvedValue("agent spec content");
+  render(<CustomizationsDialog {...defaultProps} capabilities={capabilitiesWithPaths} />);
+  const nav = getNav();
+  await userEvent.click(within(nav).getByRole("button", { name: /agents/i }));
+  await userEvent.click(screen.getByText("code-reviewer"));
+  expect(readTextFile).toHaveBeenCalledWith("s1", "/home/.claude/agents/code-reviewer.md");
+  expect(await screen.findByRole("button", { name: /back/i })).toBeInTheDocument();
+});
+
+test("agent row with empty path is not rendered as a button", async () => {
+  render(<CustomizationsDialog {...defaultProps} />);
+  const nav = getNav();
+  await userEvent.click(within(nav).getByRole("button", { name: /agents/i }));
+  // "code-reviewer" has empty path — closest <button> ancestor should not exist
+  const textEl = screen.getByText("code-reviewer");
+  expect(textEl.closest("button")).toBeNull();
+});
+
+test("skill row with a path opens the file viewer", async () => {
+  vi.mocked(readTextFile).mockResolvedValue("skill content");
+  render(<CustomizationsDialog {...defaultProps} capabilities={capabilitiesWithPaths} />);
+  const nav = getNav();
+  await userEvent.click(within(nav).getByRole("button", { name: /skills/i }));
+  await userEvent.click(screen.getByText("shadcn"));
+  expect(readTextFile).toHaveBeenCalledWith("s1", "/home/.claude/skills/shadcn/SKILL.md");
+  expect(await screen.findByRole("button", { name: /back/i })).toBeInTheDocument();
+});
+
+test("switching sections resets the detail view", async () => {
+  vi.mocked(readTextFile).mockResolvedValue("content");
+  render(<CustomizationsDialog {...defaultProps} />);
+  const nav = getNav();
+  await userEvent.click(within(nav).getByRole("button", { name: /instructions/i }));
+  await userEvent.click(screen.getByText("CLAUDE.md"));
+  await screen.findByRole("button", { name: /back/i });
+  // Navigate away — detail should reset
+  await userEvent.click(within(nav).getByRole("button", { name: /skills/i }));
+  expect(screen.queryByRole("button", { name: /back/i })).not.toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: /^skills$/i })).toBeInTheDocument();
+});
+
+// ─── Per-section search ───────────────────────────────────────────────────────
+
+test("Agents search filters by agent name", async () => {
+  const manyAgents: Capabilities = {
+    skills: [],
+    subagents: [
+      { name: "code-reviewer", description: "Reviews code", source: "user", path: "" },
+      { name: "data-engineer", description: "Data pipelines", source: "project", path: "" },
+    ],
+    commands: [],
+  };
+  render(<CustomizationsDialog {...defaultProps} capabilities={manyAgents} />);
+  const nav = getNav();
+  await userEvent.click(within(nav).getByRole("button", { name: /agents/i }));
+  const searchInput = screen.getByPlaceholderText(/type to search/i);
+  await userEvent.type(searchInput, "code");
+  expect(screen.getByText("code-reviewer")).toBeInTheDocument();
+  expect(screen.queryByText("data-engineer")).not.toBeInTheDocument();
+});
+
+test("Agents search shows 'No matches' when filter empties the list", async () => {
+  render(<CustomizationsDialog {...defaultProps} />);
+  const nav = getNav();
+  await userEvent.click(within(nav).getByRole("button", { name: /agents/i }));
+  const searchInput = screen.getByPlaceholderText(/type to search/i);
+  await userEvent.type(searchInput, "zzzzz");
+  expect(screen.getByText("No matches")).toBeInTheDocument();
+});
+
+test("Skills search filters by skill name", async () => {
+  const manySkills: Capabilities = {
+    skills: [
+      { name: "shadcn", description: "Add shadcn/ui", source: "user", path: "" },
+      { name: "deep-research", description: "Multi-source research", source: "project", path: "" },
+      { name: "code-review", description: "Review code quality", source: "user", path: "" },
+    ],
+    subagents: [],
+    commands: [],
+  };
+  render(<CustomizationsDialog {...defaultProps} capabilities={manySkills} />);
+  const nav = getNav();
+  await userEvent.click(within(nav).getByRole("button", { name: /skills/i }));
+  const searchInput = screen.getByPlaceholderText(/type to search/i);
+  await userEvent.type(searchInput, "research");
+  expect(screen.getByText("deep-research")).toBeInTheDocument();
+  expect(screen.queryByText("shadcn")).not.toBeInTheDocument();
+  expect(screen.queryByText("code-review")).not.toBeInTheDocument();
+});
+
+test("Skills search shows 'No matches' when filter empties the list", async () => {
+  render(<CustomizationsDialog {...defaultProps} />);
+  const nav = getNav();
+  await userEvent.click(within(nav).getByRole("button", { name: /skills/i }));
+  const searchInput = screen.getByPlaceholderText(/type to search/i);
+  await userEvent.type(searchInput, "zzzzz");
+  expect(screen.getByText("No matches")).toBeInTheDocument();
+});
+
+test("Instructions search filters by label", async () => {
+  render(<CustomizationsDialog {...defaultProps} />);
+  const nav = getNav();
+  await userEvent.click(within(nav).getByRole("button", { name: /instructions/i }));
+  const searchInput = screen.getByPlaceholderText(/type to search/i);
+  await userEvent.type(searchInput, "global");
+  expect(screen.getByText("global.md")).toBeInTheDocument();
+  expect(screen.queryByText("CLAUDE.md")).not.toBeInTheDocument();
+});
+
+test("Instructions search shows 'No matches' when filter empties the list", async () => {
+  render(<CustomizationsDialog {...defaultProps} />);
+  const nav = getNav();
+  await userEvent.click(within(nav).getByRole("button", { name: /instructions/i }));
+  const searchInput = screen.getByPlaceholderText(/type to search/i);
+  await userEvent.type(searchInput, "zzzzz");
+  expect(screen.getByText("No matches")).toBeInTheDocument();
+});
+
+test("search query resets when switching sections", async () => {
+  const manyAgents: Capabilities = {
+    skills: [
+      { name: "shadcn", description: "Add shadcn/ui", source: "user", path: "" },
+      { name: "deep-research", description: "Research", source: "project", path: "" },
+    ],
+    subagents: [
+      { name: "code-reviewer", description: "Reviews code", source: "user", path: "" },
+      { name: "data-engineer", description: "Data", source: "project", path: "" },
+    ],
+    commands: [],
+  };
+  render(<CustomizationsDialog {...defaultProps} capabilities={manyAgents} />);
+  const nav = getNav();
+  await userEvent.click(within(nav).getByRole("button", { name: /agents/i }));
+  await userEvent.type(screen.getByPlaceholderText(/type to search/i), "code");
+  expect(screen.queryByText("data-engineer")).not.toBeInTheDocument();
+  // Switch to Skills — search should be cleared
+  await userEvent.click(within(nav).getByRole("button", { name: /skills/i }));
+  expect(screen.getByText("shadcn")).toBeInTheDocument();
+  expect(screen.getByText("deep-research")).toBeInTheDocument();
+  // Search input should be empty
+  expect(screen.getByPlaceholderText(/type to search/i)).toHaveValue("");
+});
+
+// ─── Existing tests ───────────────────────────────────────────────────────────
 
 test("Hooks section shows count and coming-soon message", async () => {
   render(<CustomizationsDialog {...defaultProps} />);
