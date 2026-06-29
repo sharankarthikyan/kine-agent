@@ -8,7 +8,13 @@ const sample: SessionDiff = {
     { path: "src/new.ts", status: "added", additions: 5, deletions: 0 },
     { path: "old.ts", status: "deleted", additions: 0, deletions: 4 },
   ],
-  patch: "diff --git a/src/a.ts b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n",
+  patch: [
+    "diff --git a/src/a.ts b/src/a.ts",
+    "@@ -1 +1,2 @@",
+    "-old",
+    "+new",
+    "+extra",
+  ].join("\n"),
 };
 
 test("shows empty state when no files changed", () => {
@@ -28,7 +34,8 @@ test("shows a summary count of changed files", () => {
   expect(screen.getByText(/3 files? changed/i)).toBeInTheDocument();
 });
 
-test("renders the patch text", () => {
+test("renders added and removed lines from the patch", () => {
   render(<DiffViewer diff={sample} />);
-  expect(screen.getByText(/diff --git a\/src\/a.ts/)).toBeInTheDocument();
+  expect(screen.getByText("+new")).toBeInTheDocument();
+  expect(screen.getByText("-old")).toBeInTheDocument();
 });
