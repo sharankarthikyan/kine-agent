@@ -53,6 +53,24 @@ describe("startSession", () => {
     );
   });
 
+  it("forwards permissionMode when provided", async () => {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await startSession({ prompt: "hi", repo: "/work/proj", sessionId: "sess-1", permissionMode: "bypassPermissions", onEvent: () => {} });
+    expect(invoke).toHaveBeenCalledWith(
+      "start_session",
+      expect.objectContaining({ permissionMode: "bypassPermissions" }),
+    );
+  });
+
+  it("omitting permissionMode still invokes without error", async () => {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await startSession({ prompt: "hi", repo: "/work/proj", sessionId: "sess-1", onEvent: () => {} });
+    expect(invoke).toHaveBeenCalledWith(
+      "start_session",
+      expect.objectContaining({ prompt: "hi", sessionId: "sess-1" }),
+    );
+  });
+
   it("wires onEvent to the channel's onmessage so streamed events are delivered", async () => {
     const { invoke } = await import("@tauri-apps/api/core");
     const received: AgentEvent[] = [];
@@ -99,6 +117,24 @@ describe("sendMessage", () => {
     expect(invoke).toHaveBeenCalledWith(
       "send_message",
       expect.objectContaining({ model: "sonnet" }),
+    );
+  });
+
+  it("forwards permissionMode when provided", async () => {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await sendMessage({ sessionId: "s1", prompt: "x", permissionMode: "acceptEdits", onEvent: () => {} });
+    expect(invoke).toHaveBeenCalledWith(
+      "send_message",
+      expect.objectContaining({ permissionMode: "acceptEdits" }),
+    );
+  });
+
+  it("omitting permissionMode still invokes without error", async () => {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await sendMessage({ sessionId: "s1", prompt: "x", onEvent: () => {} });
+    expect(invoke).toHaveBeenCalledWith(
+      "send_message",
+      expect.objectContaining({ sessionId: "s1", prompt: "x" }),
     );
   });
 

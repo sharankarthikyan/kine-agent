@@ -1,8 +1,9 @@
 use crate::adapter::{AgentAdapter, EventSink, Prompt};
 use crate::adapters::claude::ClaudeAdapter;
 use crate::events::AgentEvent;
-use crate::inspect::{self, Capabilities, RuleFile};
-use crate::review::{self, SessionDiff};
+use crate::inspect::{self, Capabilities, CustomizationCounts, HookEntry, McpServerEntry, PluginEntry, RuleFile};
+use crate::git::{self, BranchChanges, CommitResult, TreeEntry};
+use crate::review::{self, Diffstat, SessionDiff};
 use crate::store::{self, SessionStore, SessionSummary, StoredEvent};
 use crate::worktree;
 use std::path::PathBuf;
@@ -107,12 +108,16 @@ fn worktrees_root() -> PathBuf {
 ///
 /// `model` is optional: `Some("opus")` / `Some("claude-opus-4-5")` etc. pass `--model`
 /// to the CLI; `None` (omitted from the IPC call) uses the CLI's own default.
+///
+/// `permission_mode` is optional: `Some("acceptEdits")` / `Some("default")` etc. pass
+/// `--permission-mode` to the CLI; `None` omits the flag (CLI default applies).
 #[tauri::command]
 pub async fn start_session(
     prompt: String,
     repo: String,
     session_id: String,
     model: Option<String>,
+    permission_mode: Option<String>,
     on_event: Channel<AgentEvent>,
     store: State<'_, SessionStore>,
 ) -> Result<(), String> {
@@ -146,18 +151,20 @@ pub async fn start_session(
         eprintln!("failed to persist prompt for session {session_id}: {e}");
     }
 
-    run_persisting(&store, session_id, Prompt { text: prompt, model }, wt.path, false, on_event).await
+    run_persisting(&store, session_id, Prompt { text: prompt, model, permission_mode }, wt.path, false, on_event).await
 }
 
 /// Continue an existing session with a follow-up message (resumes the agent in the
 /// session's worktree, persisting the new prompt + streamed events).
 ///
 /// `model` is optional: passes `--model` to the CLI when `Some`, omitted when `None`.
+/// `permission_mode` is optional: passes `--permission-mode` to the CLI when `Some`, omitted when `None`.
 #[tauri::command]
 pub async fn send_message(
     prompt: String,
     session_id: String,
     model: Option<String>,
+    permission_mode: Option<String>,
     on_event: Channel<AgentEvent>,
     store: State<'_, SessionStore>,
 ) -> Result<(), String> {
@@ -182,7 +189,7 @@ pub async fn send_message(
         eprintln!("failed to persist prompt for session {session_id}: {e}");
     }
 
-    run_persisting(&store, session_id, Prompt { text: prompt, model }, wt_path, true, on_event).await
+    run_persisting(&store, session_id, Prompt { text: prompt, model, permission_mode }, wt_path, true, on_event).await
 }
 
 /// Remove the worktree (and branch) for a finished session.
@@ -281,6 +288,26 @@ pub async fn read_text_file(session_id: String, path: String) -> Result<String, 
     .map_err(|e| e.to_string())?
 }
 
+/// Write `content` to a rule/config or capability file that is already within the
+/// allowed set for this session's worktree. Uses the identical allowlist as
+/// `read_text_file` — only files discovered by `rule_candidates` or
+/// `list_capabilities` (filtered to the worktree / `~/.claude` roots) may be written.
+/// Content larger than 1 MiB or a path not in the allowlist is rejected.
+#[tauri::command]
+pub async fn write_text_file(
+    session_id: String,
+    path: String,
+    content: String,
+) -> Result<(), String> {
+    let root = worktrees_root();
+    tokio::task::spawn_blocking(move || {
+        let wt = crate::worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
+        inspect::write_text_file(&path, &content, &wt.path).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Discover an agent's available skills/subagents/commands for a session's worktree.
 ///
 /// Returns the three capability categories (`skills`, `subagents`, `commands`) as
@@ -293,6 +320,163 @@ pub async fn list_capabilities(session_id: String, agent: String) -> Result<Capa
     tokio::task::spawn_blocking(move || {
         let wt = crate::worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
         Ok::<Capabilities, String>(inspect::list_capabilities(&agent, &wt.path))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Count agents/skills/instructions/hooks/MCP servers for a session's worktree
+/// and the user's ~/.claude home. Best-effort: missing files contribute 0.
+#[tauri::command]
+pub async fn customizations_counts(session_id: String) -> Result<CustomizationCounts, String> {
+    let root = worktrees_root();
+    tokio::task::spawn_blocking(move || {
+        let wt = crate::worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
+        Ok::<CustomizationCounts, String>(inspect::customizations_counts(&wt.path))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Return the aggregate diffstat (additions, deletions, filesChanged) for a
+/// session's worktree. Best-effort: errors in the underlying diff return all zeros.
+#[tauri::command]
+pub async fn session_diffstat(session_id: String) -> Result<Diffstat, String> {
+    let root = worktrees_root();
+    tokio::task::spawn_blocking(move || {
+        let wt = crate::worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
+        Ok::<Diffstat, String>(review::diffstat(&wt.path))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Return a flat, sorted file tree for a session's worktree. Directories are derived
+/// from file paths and appear before files. Status ("modified" | "added" | "untracked" |
+/// "deleted") is attached per file; directories always carry `status: null`.
+/// Capped at 2000 entries; excess is logged server-side and truncated.
+#[tauri::command]
+pub async fn worktree_tree(session_id: String) -> Result<Vec<TreeEntry>, String> {
+    let root = worktrees_root();
+    tokio::task::spawn_blocking(move || {
+        let wt = crate::worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
+        Ok::<Vec<TreeEntry>, String>(git::worktree_tree(&wt.path))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Return how many commits the session branch is ahead of its default base branch
+/// (derived via `git::default_base`, e.g. main/master) and the list of files with
+/// uncommitted changes. Both are best-effort (0 / empty on error).
+#[tauri::command]
+pub async fn branch_changes(session_id: String) -> Result<BranchChanges, String> {
+    let root = worktrees_root();
+    tokio::task::spawn_blocking(move || {
+        let wt = crate::worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
+        let base = git::default_base(&wt.path);
+        Ok::<BranchChanges, String>(git::branch_changes(&wt.path, &base))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Open the session's worktree in VS Code by spawning `code <path>`. Returns a
+/// friendly error if `code` is not on PATH; does not wait for VS Code to exit.
+#[tauri::command]
+pub async fn open_in_editor(session_id: String) -> Result<(), String> {
+    let root = worktrees_root();
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let wt = worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
+        std::process::Command::new("code")
+            .arg(&wt.path)
+            .spawn()
+            .map_err(|_| "VS Code (code) not found on PATH".to_string())?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Open a terminal at the session's worktree. macOS only (uses `open -a Terminal`);
+/// returns a friendly error on other platforms.
+#[tauri::command]
+pub async fn open_terminal(session_id: String) -> Result<(), String> {
+    let root = worktrees_root();
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let wt = worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
+        #[cfg(target_os = "macos")]
+        {
+            std::process::Command::new("open")
+                .arg("-a")
+                .arg("Terminal")
+                .arg(&wt.path)
+                .spawn()
+                .map_err(|e| format!("failed to open Terminal: {e}"))?;
+            Ok(())
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            drop(wt);
+            Err("Opening a terminal is only supported on macOS for now".into())
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Return all hook rules configured for a session's worktree (project) and
+/// `~/.claude/settings.json` (user). Each leaf command in the hooks object becomes one
+/// entry. Best-effort: missing or unparseable files contribute an empty list.
+#[tauri::command]
+pub async fn list_hooks(session_id: String) -> Result<Vec<HookEntry>, String> {
+    let root = worktrees_root();
+    tokio::task::spawn_blocking(move || {
+        let wt = crate::worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
+        Ok::<Vec<HookEntry>, String>(inspect::list_hooks(&wt.path))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Return all MCP servers declared for a session's worktree (`.mcp.json`) and
+/// `~/.claude.json` (user). Best-effort: missing or unparseable files contribute nothing.
+#[tauri::command]
+pub async fn list_mcp_servers(session_id: String) -> Result<Vec<McpServerEntry>, String> {
+    let root = worktrees_root();
+    tokio::task::spawn_blocking(move || {
+        let wt = crate::worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
+        Ok::<Vec<McpServerEntry>, String>(inspect::list_mcp_servers(&wt.path))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Return installed Claude Code plugins from `~/.claude/plugins/installed_plugins.json`.
+/// Best-effort: returns an empty list when the file is missing or unparseable.
+#[tauri::command]
+pub async fn list_plugins(session_id: String) -> Result<Vec<PluginEntry>, String> {
+    let root = worktrees_root();
+    tokio::task::spawn_blocking(move || {
+        let wt = crate::worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
+        Ok::<Vec<PluginEntry>, String>(inspect::list_plugins(&wt.path))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Stage all changes in the session's worktree (`git add -A`) and commit them with
+/// `message`. Returns the new HEAD sha. Errors when the message is blank, the tree is
+/// clean, or git fails for any reason. Never pushes, merges, or switches branches.
+#[tauri::command]
+pub async fn commit_session(
+    session_id: String,
+    message: String,
+) -> Result<CommitResult, String> {
+    let root = worktrees_root();
+    tokio::task::spawn_blocking(move || {
+        let wt = crate::worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
+        git::commit_session(&wt.path, &message)
     })
     .await
     .map_err(|e| e.to_string())?

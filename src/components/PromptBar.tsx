@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowUp, Bot, ChevronDown, Check, Paperclip } from "lucide-react";
+import { ArrowUp, Bot, ChevronDown, Check, Lock, LockOpen, Paperclip } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
+import { Switch } from "@/components/ui/switch";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -21,6 +22,10 @@ interface PromptBarProps {
   models: ModelInfo[];
   model: ModelInfo | null;
   onModelChange: (m: ModelInfo) => void;
+  /** Whether follow-up messages auto-accept edits without approval prompts. */
+  autoEdit?: boolean;
+  /** Called when the user toggles the "Edit automatically" switch. */
+  onAutoEditChange?: (v: boolean) => void;
 }
 
 /** Capitalize the first letter of an agent id for use as a group label. */
@@ -39,7 +44,15 @@ function groupByAgent(models: ModelInfo[]): [string, ModelInfo[]][] {
   return [...map.entries()];
 }
 
-export function PromptBar({ onStart, running, models, model, onModelChange }: PromptBarProps) {
+export function PromptBar({
+  onStart,
+  running,
+  models,
+  model,
+  onModelChange,
+  autoEdit = false,
+  onAutoEditChange = () => {},
+}: PromptBarProps) {
   const [text, setText] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const canSend = !running && text.trim().length > 0;
@@ -86,12 +99,27 @@ export function PromptBar({ onStart, running, models, model, onModelChange }: Pr
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="Message the agent…"
+          placeholder="Run local tasks with Claude, type # for adding context"
           aria-label="Message the agent"
           disabled={running}
           rows={1}
           className="min-h-0 resize-none border-0 bg-transparent p-0 shadow-none focus-visible:ring-0 focus-visible:ring-offset-0"
         />
+
+        {/* Edit automatically — controls autonomy for follow-up messages */}
+        <div className="flex items-center gap-2 px-1">
+          <Switch
+            checked={autoEdit}
+            onCheckedChange={onAutoEditChange}
+            aria-label="Edit automatically"
+          />
+          {autoEdit ? (
+            <LockOpen className="size-3.5 text-muted-foreground" aria-hidden />
+          ) : (
+            <Lock className="size-3.5 text-muted-foreground" aria-hidden />
+          )}
+          <span className="text-xs text-muted-foreground select-none">Edit automatically</span>
+        </div>
 
         {/* Bottom action row */}
         <div className="flex items-center justify-between">

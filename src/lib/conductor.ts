@@ -1,0 +1,123 @@
+import { invoke } from "@tauri-apps/api/core";
+import { assertDesktop } from "./agent";
+import type { FileChange } from "./review";
+
+export type { FileChange };
+
+/** Counts of per-session Claude customization files discovered in the worktree. */
+export interface CustomizationCounts {
+  agents: number;
+  skills: number;
+  instructions: number;
+  hooks: number;
+  mcpServers: number;
+}
+
+/** Aggregate line-count diff for the session's worktree against its base branch. */
+export interface Diffstat {
+  additions: number;
+  deletions: number;
+  filesChanged: number;
+}
+
+/** A single entry in the worktree file tree. */
+export interface TreeEntry {
+  path: string;
+  isDir: boolean;
+  /** Full-word git status ("modified" | "added" | "deleted" | "untracked"), or null for clean entries and directories. */
+  status: string | null;
+}
+
+/** Branch-level changes relative to the session's base branch. */
+export interface BranchChanges {
+  aheadCount: number;
+  files: FileChange[];
+}
+
+/** Result of a successful commit operation. */
+export interface CommitResult {
+  sha: string;
+}
+
+/** A single configured hook rule (leaf command) from a Claude settings file. */
+export interface HookEntry {
+  event: string;
+  matcher: string | null;
+  command: string;
+  source: "project" | "user";
+}
+
+/** A single MCP server declaration from `.mcp.json` or `~/.claude.json`. */
+export interface McpServerEntry {
+  name: string;
+  detail: string | null;
+  source: "project" | "user";
+}
+
+/** A single installed Claude Code plugin from `~/.claude/plugins/installed_plugins.json`. */
+export interface PluginEntry {
+  name: string;
+  /** Marketplace identifier (e.g. "claude-plugins-official"), or null when unavailable. */
+  detail: string | null;
+  source: "project" | "user";
+}
+
+/** Return all hook rules configured for a session (worktree project + user ~/.claude). */
+export async function listHooks(sessionId: string): Promise<HookEntry[]> {
+  assertDesktop();
+  return invoke<HookEntry[]>("list_hooks", { sessionId });
+}
+
+/** Return all MCP servers declared for a session (worktree .mcp.json + user ~/.claude.json). */
+export async function listMcpServers(sessionId: string): Promise<McpServerEntry[]> {
+  assertDesktop();
+  return invoke<McpServerEntry[]>("list_mcp_servers", { sessionId });
+}
+
+/** Return installed Claude Code plugins from ~/.claude/plugins/installed_plugins.json. */
+export async function listPlugins(sessionId: string): Promise<PluginEntry[]> {
+  assertDesktop();
+  return invoke<PluginEntry[]>("list_plugins", { sessionId });
+}
+
+/** Return customization file counts (agents, skills, instructions, hooks, MCP servers) for a session. */
+export async function customizationsCounts(sessionId: string): Promise<CustomizationCounts> {
+  assertDesktop();
+  return invoke<CustomizationCounts>("customizations_counts", { sessionId });
+}
+
+/** Return the aggregate additions/deletions/files-changed diffstat for a session's worktree. */
+export async function sessionDiffstat(sessionId: string): Promise<Diffstat> {
+  assertDesktop();
+  return invoke<Diffstat>("session_diffstat", { sessionId });
+}
+
+/** Return the flat file tree for a session's worktree. */
+export async function worktreeTree(sessionId: string): Promise<TreeEntry[]> {
+  assertDesktop();
+  return invoke<TreeEntry[]>("worktree_tree", { sessionId });
+}
+
+/** Return the changed files and ahead-count for the session's branch relative to its base. */
+export async function branchChanges(sessionId: string): Promise<BranchChanges> {
+  assertDesktop();
+  return invoke<BranchChanges>("branch_changes", { sessionId });
+}
+
+/** Commit all staged and unstaged changes in the session's worktree with the given message. */
+export async function commitSession(sessionId: string, message: string): Promise<CommitResult> {
+  assertDesktop();
+  return invoke<CommitResult>("commit_session", { sessionId, message });
+}
+
+/** Open the session's worktree in the system's default editor (e.g. VS Code). */
+export async function openInEditor(sessionId: string): Promise<void> {
+  assertDesktop();
+  return invoke<void>("open_in_editor", { sessionId });
+}
+
+/** Open a terminal pointed at the session's worktree directory. */
+export async function openTerminal(sessionId: string): Promise<void> {
+  assertDesktop();
+  return invoke<void>("open_terminal", { sessionId });
+}

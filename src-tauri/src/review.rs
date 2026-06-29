@@ -120,6 +120,31 @@ pub fn diff(worktree: &Path) -> Result<SessionDiff, ReviewError> {
     Ok(SessionDiff { files, patch })
 }
 
+/// Aggregate line/file counts for a session's worktree diff. Best-effort:
+/// errors in `diff()` (e.g. no git repo yet) yield all-zero counts.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Diffstat {
+    pub additions: u32,
+    pub deletions: u32,
+    /// `filesChanged` on the wire.
+    pub files_changed: u32,
+}
+
+/// Return additions, deletions, and changed-file count for a worktree by
+/// reusing the existing `diff()` result. Returns all-zero on any error.
+pub fn diffstat(worktree: &Path) -> Diffstat {
+    match diff(worktree) {
+        Ok(session_diff) => {
+            let additions: u32 = session_diff.files.iter().map(|f| f.additions).sum();
+            let deletions: u32 = session_diff.files.iter().map(|f| f.deletions).sum();
+            let files_changed = session_diff.files.len() as u32;
+            Diffstat { additions, deletions, files_changed }
+        }
+        Err(_) => Diffstat { additions: 0, deletions: 0, files_changed: 0 },
+    }
+}
+
 /// Run a git command in `dir`, returning stdout on success or a ReviewError::Git.
 fn git(dir: &Path, args: &[&str], op: &'static str) -> Result<String, ReviewError> {
     let output = Command::new("git")
@@ -164,5 +189,37 @@ mod tests {
     #[test]
     fn change_status_serializes_camelcase() {
         assert_eq!(serde_json::to_string(&ChangeStatus::Modified).unwrap(), "\"modified\"");
+    }
+
+    #[test]
+    fn diffstat_nonzero_for_modified_and_untracked() {
+        let dir = std::env::temp_dir().join(format!("ae-diffstat-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Bootstrap a git repo with a committed file.
+        let git_in = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C").arg(&dir)
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        git_in(&["init"]);
+        git_in(&["config", "user.email", "test@test.com"]);
+        git_in(&["config", "user.name", "Test"]);
+        std::fs::write(dir.join("main.rs"), "fn main() {}\n").unwrap();
+        git_in(&["add", "main.rs"]);
+        git_in(&["commit", "-m", "init"]);
+
+        // Modify the tracked file so HEAD diff shows additions.
+        std::fs::write(dir.join("main.rs"), "fn main() {\n    println!(\"hello\");\n}\n").unwrap();
+        // Untracked file — counted as additions by `diff()`.
+        std::fs::write(dir.join("new.rs"), "// new\n").unwrap();
+
+        let ds = diffstat(&dir);
+        assert!(ds.additions > 0, "expected non-zero additions, got {}", ds.additions);
+        assert!(ds.files_changed > 0, "expected non-zero files_changed, got {}", ds.files_changed);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

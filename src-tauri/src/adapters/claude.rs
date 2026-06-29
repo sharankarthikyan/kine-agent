@@ -102,11 +102,13 @@ pub async fn spawn_and_stream(
     resume: bool,
     sink: Box<dyn EventSink>,
 ) -> Result<(), SessionError> {
-    // Extract model before building the command so borrows on prompt fields don't
-    // conflict with each other. The adapter forwards the caller-supplied string verbatim;
-    // valid values are short aliases (e.g. "opus", "sonnet", "haiku", "fable") or a full
-    // model id (e.g. "claude-opus-4-5"). No default is injected — None omits the flag.
+    // Extract model and permission_mode before building the command so borrows on prompt
+    // fields don't conflict with each other. Both are forwarded verbatim; None omits the flag.
+    // Valid model values: short aliases (e.g. "opus", "sonnet", "haiku", "fable") or a full
+    // model id (e.g. "claude-opus-4-5"). Valid permission_mode values: "default",
+    // "acceptEdits", "plan", "bypassPermissions".
     let model = prompt.model.as_deref();
+    let permission_mode = prompt.permission_mode.as_deref();
 
     let mut command = Command::new("claude");
     command
@@ -122,6 +124,9 @@ pub async fn spawn_and_stream(
     }
     if let Some(m) = model {
         command.arg("--model").arg(m);
+    }
+    if let Some(pm) = permission_mode {
+        command.arg("--permission-mode").arg(pm);
     }
     let mut child = command
         .current_dir(&cwd)
@@ -269,13 +274,31 @@ mod tests {
 
     #[test]
     fn prompt_model_some_carries_through() {
-        let p = Prompt { text: "build it".into(), model: Some("opus".into()) };
+        let p = Prompt { text: "build it".into(), model: Some("opus".into()), permission_mode: None };
         assert_eq!(p.model.as_deref(), Some("opus"));
     }
 
     #[test]
     fn prompt_model_none_is_absent() {
-        let p = Prompt { text: "build it".into(), model: None };
+        let p = Prompt { text: "build it".into(), model: None, permission_mode: None };
         assert!(p.model.is_none());
+    }
+
+    // ---- permission_mode field on Prompt ----
+
+    #[test]
+    fn prompt_permission_mode_some_carries_through() {
+        let p = Prompt {
+            text: "build it".into(),
+            model: None,
+            permission_mode: Some("acceptEdits".into()),
+        };
+        assert_eq!(p.permission_mode.as_deref(), Some("acceptEdits"));
+    }
+
+    #[test]
+    fn prompt_permission_mode_none_is_absent() {
+        let p = Prompt { text: "build it".into(), model: None, permission_mode: None };
+        assert!(p.permission_mode.is_none());
     }
 }

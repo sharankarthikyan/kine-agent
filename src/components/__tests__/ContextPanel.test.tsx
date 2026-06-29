@@ -44,7 +44,7 @@ test("renders window usage with total tokens, progress, and cost", () => {
   expect(screen.getByText(/51,000|51000/)).toBeInTheDocument(); // total tokens
 });
 
-test("lists files this session with paths", () => {
+test("shows changed files up front and collapses reads behind a toggle", async () => {
   render(
     <ContextPanel
       {...base}
@@ -54,7 +54,11 @@ test("lists files this session with paths", () => {
       ]}
     />,
   );
+  // Changed file is visible immediately; read file is collapsed.
   expect(screen.getByText("src/a.ts")).toBeInTheDocument();
+  expect(screen.queryByText("src/b.ts")).not.toBeInTheDocument();
+  // Expanding the reads toggle reveals the read file.
+  await userEvent.click(screen.getByText(/show 1 read file/i));
   expect(screen.getByText("src/b.ts")).toBeInTheDocument();
 });
 
@@ -86,7 +90,7 @@ test("renders capability names", () => {
     <ContextPanel
       {...base}
       capabilities={{
-        skills: [{ name: "shadcn", description: "ui", source: "user" }],
+        skills: [{ name: "shadcn", description: "ui", source: "user", path: "" }],
         subagents: [],
         commands: [],
       }}

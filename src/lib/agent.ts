@@ -39,6 +39,8 @@ export interface StartSessionArgs {
   sessionId: string;
   /** Claude CLI model alias (e.g. "opus", "sonnet", "haiku"). Omit to use the CLI default. */
   model?: string;
+  /** Permission mode forwarded to the agent CLI (e.g. "default", "acceptEdits", "bypassPermissions"). */
+  permissionMode?: string;
   onEvent: (event: AgentEvent) => void;
 }
 
@@ -48,11 +50,11 @@ export interface StartSessionArgs {
  * render an optimistic row immediately). The backend creates an isolated
  * worktree for the session and events stream back via `onEvent`.
  */
-export async function startSession({ prompt, repo, sessionId, model, onEvent }: StartSessionArgs): Promise<void> {
+export async function startSession({ prompt, repo, sessionId, model, permissionMode, onEvent }: StartSessionArgs): Promise<void> {
   assertDesktop();
   const channel = new Channel<AgentEvent>();
   channel.onmessage = onEvent;
-  await invoke("start_session", { prompt, repo, sessionId, model, onEvent: channel });
+  await invoke("start_session", { prompt, repo, sessionId, model, permissionMode, onEvent: channel });
 }
 
 export interface CleanupSessionArgs {
@@ -71,13 +73,15 @@ export interface SendMessageArgs {
   prompt: string;
   /** Claude CLI model alias (e.g. "opus", "sonnet", "haiku"). Omit to use the CLI default. */
   model?: string;
+  /** Permission mode forwarded to the agent CLI (e.g. "default", "acceptEdits", "bypassPermissions"). */
+  permissionMode?: string;
   onEvent: (event: AgentEvent) => void;
 }
 
 /** Continue an existing session with a follow-up message. */
-export async function sendMessage({ sessionId, prompt, model, onEvent }: SendMessageArgs): Promise<void> {
+export async function sendMessage({ sessionId, prompt, model, permissionMode, onEvent }: SendMessageArgs): Promise<void> {
   assertDesktop();
   const channel = new Channel<AgentEvent>();
   channel.onmessage = onEvent;
-  await invoke("send_message", { sessionId, prompt, model, onEvent: channel });
+  await invoke("send_message", { sessionId, prompt, model, permissionMode, onEvent: channel });
 }
