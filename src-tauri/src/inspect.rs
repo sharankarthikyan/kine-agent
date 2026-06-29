@@ -230,6 +230,83 @@ fn first_description(path: &Path) -> Option<String> {
     None
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// Customization counts
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Aggregate count of per-workspace and user-level customizations. All fields are
+/// best-effort: missing or unparseable files contribute 0 rather than an error.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomizationCounts {
+    pub agents: u32,
+    pub skills: u32,
+    pub instructions: u32,
+    pub hooks: u32,
+    pub mcp_servers: u32,
+}
+
+/// Count customizations for a worktree + the user's ~/.claude home. Best-effort:
+/// any parse failure silently contributes 0 to the relevant field.
+pub fn customizations_counts(worktree: &Path) -> CustomizationCounts {
+    let caps = list_capabilities("claude", worktree);
+    let instructions = rule_candidates(worktree).into_iter().filter(|r| r.exists).count() as u32;
+    let hooks = count_hooks(worktree);
+    let mcp_servers = count_mcp(worktree);
+    CustomizationCounts {
+        agents: caps.subagents.len() as u32,
+        skills: caps.skills.len() as u32,
+        instructions,
+        hooks,
+        mcp_servers,
+    }
+}
+
+/// Sum the number of hook rules configured in `<wt>/.claude/settings.json` and
+/// `~/.claude/settings.json`. Each top-level entry inside the `hooks` object's
+/// per-event arrays counts as one rule. Returns 0 on any missing/parse error.
+fn count_hooks(worktree: &Path) -> u32 {
+    let mut total = 0u32;
+    total += hooks_from_settings(&worktree.join(".claude/settings.json"));
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        total += hooks_from_settings(&home.join(".claude/settings.json"));
+    }
+    total
+}
+
+fn hooks_from_settings(path: &Path) -> u32 {
+    (|| -> Option<u32> {
+        let content = std::fs::read_to_string(path).ok()?;
+        let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+        let hooks = json.get("hooks")?.as_object()?;
+        // Each element of each per-event array is one hook rule.
+        let count: usize = hooks.values().filter_map(|v| v.as_array()).map(|a| a.len()).sum();
+        Some(count as u32)
+    })()
+    .unwrap_or(0)
+}
+
+/// Count MCP servers declared in `<wt>/.mcp.json` + `~/.claude.json`. Returns 0
+/// on any missing/parse error.
+fn count_mcp(worktree: &Path) -> u32 {
+    let mut total = 0u32;
+    total += mcp_servers_from_file(&worktree.join(".mcp.json"));
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        total += mcp_servers_from_file(&home.join(".claude.json"));
+    }
+    total
+}
+
+fn mcp_servers_from_file(path: &Path) -> u32 {
+    (|| -> Option<u32> {
+        let content = std::fs::read_to_string(path).ok()?;
+        let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+        let servers = json.get("mcpServers")?.as_object()?;
+        Some(servers.len() as u32)
+    })()
+    .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -351,5 +428,42 @@ mod tests {
         assert!(caps.subagents.is_empty());
         assert!(caps.commands.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn customizations_counts_detects_agent_and_mcp() {
+        let dir = std::env::temp_dir().join(format!("ae-cust-{}", std::process::id()));
+        // Use an empty fake home so ~/.claude.json and ~/.claude/settings.json
+        // from the developer's real home don't leak into the counts.
+        let fake_home = std::env::temp_dir().join(format!("ae-cust-home-{}", std::process::id()));
+        std::fs::create_dir_all(&fake_home).unwrap();
+
+        // .claude/agents/foo.md — counts as one subagent.
+        let agents_dir = dir.join(".claude/agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(agents_dir.join("foo.md"), "---\ndescription: Foo agent\n---\n").unwrap();
+
+        // .mcp.json with exactly 1 MCP server.
+        std::fs::write(
+            dir.join(".mcp.json"),
+            r#"{"mcpServers":{"my-server":{"command":"node","args":["server.js"]}}}"#,
+        )
+        .unwrap();
+
+        let orig_home = std::env::var_os("HOME");
+        // SAFETY: test-only override to isolate from the developer's real global config.
+        // No other thread is reading HOME concurrently for this test's scope.
+        unsafe { std::env::set_var("HOME", &fake_home) };
+        let counts = customizations_counts(&dir);
+        match orig_home {
+            Some(h) => unsafe { std::env::set_var("HOME", h) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+
+        assert!(counts.agents >= 1, "expected at least 1 agent, got {}", counts.agents);
+        assert_eq!(counts.mcp_servers, 1, "expected exactly 1 MCP server");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&fake_home);
     }
 }

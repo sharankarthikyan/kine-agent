@@ -1,8 +1,8 @@
 use crate::adapter::{AgentAdapter, EventSink, Prompt};
 use crate::adapters::claude::ClaudeAdapter;
 use crate::events::AgentEvent;
-use crate::inspect::{self, Capabilities, RuleFile};
-use crate::review::{self, SessionDiff};
+use crate::inspect::{self, Capabilities, CustomizationCounts, RuleFile};
+use crate::review::{self, Diffstat, SessionDiff};
 use crate::store::{self, SessionStore, SessionSummary, StoredEvent};
 use crate::worktree;
 use std::path::PathBuf;
@@ -299,6 +299,32 @@ pub async fn list_capabilities(session_id: String, agent: String) -> Result<Capa
     tokio::task::spawn_blocking(move || {
         let wt = crate::worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
         Ok::<Capabilities, String>(inspect::list_capabilities(&agent, &wt.path))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Count agents/skills/instructions/hooks/MCP servers for a session's worktree
+/// and the user's ~/.claude home. Best-effort: missing files contribute 0.
+#[tauri::command]
+pub async fn customizations_counts(session_id: String) -> Result<CustomizationCounts, String> {
+    let root = worktrees_root();
+    tokio::task::spawn_blocking(move || {
+        let wt = crate::worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
+        Ok::<CustomizationCounts, String>(inspect::customizations_counts(&wt.path))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Return the aggregate diffstat (additions, deletions, filesChanged) for a
+/// session's worktree. Best-effort: errors in the underlying diff return all zeros.
+#[tauri::command]
+pub async fn session_diffstat(session_id: String) -> Result<Diffstat, String> {
+    let root = worktrees_root();
+    tokio::task::spawn_blocking(move || {
+        let wt = crate::worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
+        Ok::<Diffstat, String>(review::diffstat(&wt.path))
     })
     .await
     .map_err(|e| e.to_string())?

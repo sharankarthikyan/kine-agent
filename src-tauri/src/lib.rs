@@ -31,7 +31,9 @@ pub fn run() {
             commands::list_models,
             commands::inspect_rules,
             commands::read_text_file,
-            commands::list_capabilities
+            commands::list_capabilities,
+            commands::customizations_counts,
+            commands::session_diffstat
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
