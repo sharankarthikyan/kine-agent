@@ -13,18 +13,22 @@ export function PromptBar({ onStart, running }: PromptBarProps) {
     event.preventDefault();
     if (!canStart) return;
     onStart(text.trim());
+    setText(""); // clear the composer after sending, like a chat input
   }
 
   return (
     <form
       onSubmit={handleSubmit}
-      style={{ display: "flex", gap: "var(--space-2)", padding: "var(--space-3)" }}
+      style={{
+        display: "flex", gap: "var(--space-2)", padding: "var(--space-3)",
+        borderTop: "1px solid var(--border-hairline)", background: "var(--bg-surface)",
+      }}
     >
       <input
         value={text}
         onChange={(e) => setText(e.target.value)}
-        placeholder="Ask the agent to do something…"
-        aria-label="Agent prompt"
+        placeholder="Message the agent…"
+        aria-label="Message the agent"
         disabled={running}
         style={{
           flex: 1, padding: "var(--space-3)", borderRadius: "var(--radius-md)",
@@ -42,7 +46,7 @@ export function PromptBar({ onStart, running }: PromptBarProps) {
           opacity: canStart ? 1 : 0.45, transition: "opacity var(--dur-fast) var(--ease-out)",
         }}
       >
-        {running ? "Running…" : "Start"}
+        Send
       </button>
     </form>
   );
