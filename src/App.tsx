@@ -36,9 +36,15 @@ import {
   sessionDiffstat,
   openInEditor,
   openTerminal,
+  listHooks,
+  listMcpServers,
+  listPlugins,
   type BranchChanges,
   type CustomizationCounts,
   type Diffstat,
+  type HookEntry,
+  type McpServerEntry,
+  type PluginEntry,
 } from "./lib/conductor";
 import { buildTree, type TreeNode } from "./lib/tree";
 
@@ -74,6 +80,11 @@ export default function App() {
   });
   // Customization counts for the active session, fetched best-effort.
   const [counts, setCounts] = useState<CustomizationCounts | null>(null);
+  // Hooks, MCP servers, and plugins for the active session — fetched when the
+  // customizations dialog opens and reset on session change.
+  const [hooks, setHooks] = useState<HookEntry[]>([]);
+  const [mcpServers, setMcpServers] = useState<McpServerEntry[]>([]);
+  const [plugins, setPlugins] = useState<PluginEntry[]>([]);
   // Customizations dialog state — section defaults to "overview" until set by the sidebar row click.
   const [custDialogOpen, setCustDialogOpen] = useState(false);
   const [custSection, setCustSection] = useState<CustomizationSection>("overview");
@@ -264,9 +275,10 @@ export default function App() {
     })();
   }, [rightTab, activeSessionId, selectedModel?.agent]);
 
-  // Fetch rules + capabilities when the Customizations dialog opens for an active session.
-  // Best-effort, mirrors the Context-tab logic. If the Context tab has already fetched
-  // these, the setters are idempotent and the IPC round-trip is cheap.
+  // Fetch rules, capabilities, hooks, MCP servers, and plugins when the Customizations
+  // dialog opens for an active session. All best-effort — failures produce empty state
+  // rather than errors. If the Context tab has already fetched rules/capabilities, the
+  // setters are idempotent and the IPC round-trip is cheap.
   useEffect(() => {
     if (!custDialogOpen || !activeSessionId) return;
     const sessionId = activeSessionId;
@@ -278,6 +290,18 @@ export default function App() {
       try {
         const c = await listCapabilities(sessionId, selectedModel?.agent ?? "claude");
         if (activeSessionIdRef.current === sessionId) setCapabilities(c);
+      } catch { /* best-effort */ }
+      try {
+        const h = await listHooks(sessionId);
+        if (activeSessionIdRef.current === sessionId) setHooks(h);
+      } catch { /* best-effort */ }
+      try {
+        const m = await listMcpServers(sessionId);
+        if (activeSessionIdRef.current === sessionId) setMcpServers(m);
+      } catch { /* best-effort */ }
+      try {
+        const p = await listPlugins(sessionId);
+        if (activeSessionIdRef.current === sessionId) setPlugins(p);
       } catch { /* best-effort */ }
     })();
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -433,6 +457,9 @@ export default function App() {
     setBranchChanges(null);
     setTreeNodes([]);
     setDiffSheet(null);
+    setHooks([]);
+    setMcpServers([]);
+    setPlugins([]);
     try {
       const ev = await sessionEvents(id);
       setStoredEvents(ev);
@@ -455,6 +482,9 @@ export default function App() {
     setBranchChanges(null);
     setTreeNodes([]);
     setDiffSheet(null);
+    setHooks([]);
+    setMcpServers([]);
+    setPlugins([]);
     closeRight();
   }
 
@@ -682,6 +712,9 @@ export default function App() {
         capabilities={capabilities}
         rules={rules}
         sessionId={activeSessionId ?? ""}
+        hooks={hooks}
+        mcpServers={mcpServers}
+        plugins={plugins}
       />
 
       <Toaster />

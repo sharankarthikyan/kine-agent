@@ -5,6 +5,7 @@ import {
   FileCode,
   FileText,
   LayoutGrid,
+  Pencil,
   Puzzle,
   Server,
   Webhook,
@@ -12,6 +13,7 @@ import {
 } from "lucide-react";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark, oneLight } from "react-syntax-highlighter/dist/esm/styles/prism";
+import { toast } from "sonner";
 import { useTheme } from "@/components/theme-provider";
 
 import { cn } from "@/lib/utils";
@@ -25,9 +27,9 @@ import {
   DialogDescription,
   DialogTitle,
 } from "@/components/ui/dialog";
-import type { CustomizationCounts } from "@/lib/conductor";
+import type { CustomizationCounts, HookEntry, McpServerEntry, PluginEntry } from "@/lib/conductor";
 import type { Capabilities, Capability, RuleFile } from "@/lib/inspect";
-import { readTextFile } from "@/lib/inspect";
+import { readTextFile, writeTextFile } from "@/lib/inspect";
 
 export type CustomizationSection =
   | "overview"
@@ -46,6 +48,9 @@ export interface CustomizationsDialogProps {
   capabilities: Capabilities | null;
   rules: RuleFile[];
   sessionId: string;
+  hooks: HookEntry[];
+  mcpServers: McpServerEntry[];
+  plugins: PluginEntry[];
 }
 
 // ─── Nav config ───────────────────────────────────────────────────────────────
@@ -187,15 +192,56 @@ interface FileDetailViewProps {
   loading: boolean;
   error: boolean;
   content: string | null;
+  sessionId: string;
   onBack: () => void;
+  onSaved: (newContent: string) => void;
 }
 
-function FileDetailView({ detail, loading, error, content, onBack }: FileDetailViewProps) {
+function FileDetailView({ detail, loading, error, content, sessionId, onBack, onSaved }: FileDetailViewProps) {
   const { theme } = useTheme();
   const codeStyle = theme === "dark" ? oneDark : oneLight;
+
+  const [isEditing, setIsEditing] = useState(false);
+  const [editedContent, setEditedContent] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  // Reset edit state when a different file is opened.
+  useEffect(() => {
+    setIsEditing(false);
+    setEditedContent("");
+    setSaving(false);
+  }, [detail.path]);
+
+  function handleEditClick() {
+    setEditedContent(content ?? "");
+    setIsEditing(true);
+  }
+
+  function handleCancel() {
+    setIsEditing(false);
+    setEditedContent("");
+  }
+
+  async function handleSave() {
+    setSaving(true);
+    try {
+      await writeTextFile(sessionId, detail.path, editedContent);
+      const basename = detail.path.split("/").pop() ?? detail.name;
+      toast.success(`Saved ${basename}`);
+      onSaved(editedContent);
+      setIsEditing(false);
+    } catch (err) {
+      toast.error(String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const canEdit = !loading && !error && content !== null;
+
   return (
     <div className="flex flex-col h-full min-h-0">
-      {/* Header: back button + name + path */}
+      {/* Header: back button + name + path + edit/save/cancel */}
       <div className="flex items-start gap-2 p-3 border-b border-border shrink-0">
         <Button
           variant="ghost"
@@ -206,52 +252,94 @@ function FileDetailView({ detail, loading, error, content, onBack }: FileDetailV
         >
           <ArrowLeft className="size-4" />
         </Button>
-        <div className="flex flex-col min-w-0 gap-0.5">
+        <div className="flex flex-col min-w-0 gap-0.5 flex-1">
           <span className="text-sm font-bold leading-tight truncate">{detail.name}</span>
           <span className="text-xs text-muted-foreground font-mono leading-tight truncate">
             {detail.path}
           </span>
         </div>
-      </div>
-      {/* Body: file contents, read-only with syntax highlighting */}
-      <ScrollArea className="flex-1 min-h-0">
-        <div className="p-4">
-          {loading && (
-            <p className="text-sm text-muted-foreground">Loading…</p>
-          )}
-          {!loading && error && (
-            <p className="text-sm text-muted-foreground">Couldn't read this file</p>
-          )}
-          {!loading && !error && content !== null && (
-            <SyntaxHighlighter
-              language={detectLanguage(detail.path)}
-              style={codeStyle}
-              showLineNumbers
-              wrapLongLines
-              customStyle={{
-                background: "transparent",
-                margin: 0,
-                padding: 0,
-                fontSize: "0.75rem",
-                whiteSpace: "pre-wrap",
-                wordBreak: "break-word",
-                overflowWrap: "anywhere",
-              }}
-              codeTagProps={{
-                style: { whiteSpace: "pre-wrap", wordBreak: "break-word" },
-              }}
-              lineNumberStyle={{
-                color: "var(--muted-foreground)",
-                opacity: 0.5,
-                userSelect: "none",
-                minWidth: "2.5em",
-              }}
+        {canEdit && (
+          isEditing ? (
+            <div className="flex items-center gap-1 shrink-0">
+              <Button
+                variant="default"
+                size="sm"
+                onClick={() => void handleSave()}
+                disabled={saving}
+              >
+                {saving ? "Saving…" : "Save"}
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={handleCancel}
+                disabled={saving}
+              >
+                Cancel
+              </Button>
+            </div>
+          ) : (
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              aria-label="Edit"
+              onClick={handleEditClick}
+              className="shrink-0 mt-0.5"
             >
-              {content}
-            </SyntaxHighlighter>
-          )}
-        </div>
-      </ScrollArea>
+              <Pencil className="size-4" />
+            </Button>
+          )
+        )}
+      </div>
+      {/* Body: edit textarea or syntax-highlighted read view */}
+      {isEditing ? (
+        <textarea
+          className="flex-1 min-h-0 resize-none font-mono text-xs p-4 bg-muted/30 border-0 outline-none w-full"
+          value={editedContent}
+          onChange={(e) => setEditedContent(e.target.value)}
+          spellCheck={false}
+          aria-label="File content editor"
+        />
+      ) : (
+        <ScrollArea className="flex-1 min-h-0">
+          <div className="p-4">
+            {loading && (
+              <p className="text-sm text-muted-foreground">Loading…</p>
+            )}
+            {!loading && error && (
+              <p className="text-sm text-muted-foreground">Couldn't read this file</p>
+            )}
+            {!loading && !error && content !== null && (
+              <SyntaxHighlighter
+                language={detectLanguage(detail.path)}
+                style={codeStyle}
+                showLineNumbers
+                wrapLongLines
+                customStyle={{
+                  background: "transparent",
+                  margin: 0,
+                  padding: 0,
+                  fontSize: "0.75rem",
+                  whiteSpace: "pre-wrap",
+                  wordBreak: "break-word",
+                  overflowWrap: "anywhere",
+                }}
+                codeTagProps={{
+                  style: { whiteSpace: "pre-wrap", wordBreak: "break-word" },
+                }}
+                lineNumberStyle={{
+                  color: "var(--muted-foreground)",
+                  opacity: 0.5,
+                  userSelect: "none",
+                  minWidth: "2.5em",
+                }}
+              >
+                {content}
+              </SyntaxHighlighter>
+            )}
+          </div>
+        </ScrollArea>
+      )}
     </div>
   );
 }
@@ -295,12 +383,15 @@ function OverviewCard({ item, count, onNavigate }: OverviewCardProps) {
 
 function OverviewSection({
   counts,
+  pluginsCount,
   onNavigate,
 }: {
   counts: CustomizationCounts | null;
+  pluginsCount: number;
   onNavigate: (id: CustomizationSection) => void;
 }) {
   const getCount = (item: NavItem): number | null => {
+    if (item.id === "plugins") return pluginsCount;
     if (!item.countKey || counts === null) return null;
     return counts[item.countKey];
   };
@@ -529,27 +620,173 @@ function InstructionsSection({
   );
 }
 
-// ─── Coming-soon section (Hooks / MCP Servers / Plugins) ──────────────────────
+// ─── Hooks section ────────────────────────────────────────────────────────────
 
-interface ComingSoonSectionProps {
-  title: string;
-  description: string;
-  count: number | null;
-  countLabel: string;
+function HooksSection({
+  hooks,
+  search,
+  onSearchChange,
+}: {
+  hooks: HookEntry[];
+  search: string;
+  onSearchChange: (s: string) => void;
+}) {
+  const filtered = search
+    ? hooks.filter(
+        (h) =>
+          h.event.toLowerCase().includes(search.toLowerCase()) ||
+          h.command.toLowerCase().includes(search.toLowerCase())
+      )
+    : hooks;
+
+  return (
+    <SectionShell
+      title="Hooks"
+      description="Lifecycle hooks that run before and after agent operations."
+      search={search}
+      onSearchChange={onSearchChange}
+    >
+      {filtered.length === 0 ? (
+        <p className="px-4 py-2 text-sm text-muted-foreground">
+          {hooks.length === 0 ? "No hooks configured." : "No matches"}
+        </p>
+      ) : (
+        <div className="flex flex-col gap-0.5 px-2">
+          {filtered.map((hook, i) => (
+            <div
+              key={`${hook.event}-${i}`}
+              className="flex items-center gap-2 px-2 py-1.5 rounded-md min-w-0"
+            >
+              <span className="text-sm font-medium shrink-0 whitespace-nowrap">
+                {hook.event}
+              </span>
+              {hook.matcher && (
+                <span className="text-xs text-muted-foreground shrink-0">
+                  {hook.matcher}
+                </span>
+              )}
+              <span className="flex-1 min-w-0 truncate text-xs text-muted-foreground font-mono">
+                {hook.command}
+              </span>
+              <Badge variant="outline" className="ml-auto shrink-0 text-xs font-normal">
+                {hook.source}
+              </Badge>
+            </div>
+          ))}
+        </div>
+      )}
+    </SectionShell>
+  );
 }
 
-function ComingSoonSection({ title, description, count, countLabel }: ComingSoonSectionProps) {
+// ─── MCP Servers section ──────────────────────────────────────────────────────
+
+function McpServersSection({
+  mcpServers,
+  search,
+  onSearchChange,
+}: {
+  mcpServers: McpServerEntry[];
+  search: string;
+  onSearchChange: (s: string) => void;
+}) {
+  const filtered = search
+    ? mcpServers.filter(
+        (s) =>
+          s.name.toLowerCase().includes(search.toLowerCase()) ||
+          (s.detail?.toLowerCase().includes(search.toLowerCase()) ?? false)
+      )
+    : mcpServers;
+
   return (
-    <SectionShell title={title} description={description}>
-      <div className="px-4 py-2 flex flex-col gap-1">
-        {count !== null && (
-          <p className="text-sm tabular-nums">
-            <span className="font-medium">{count}</span>{" "}
-            <span className="text-muted-foreground">{countLabel}</span>
-          </p>
-        )}
-        <p className="text-xs text-muted-foreground">Detailed listing coming soon.</p>
-      </div>
+    <SectionShell
+      title="MCP Servers"
+      description="Model Context Protocol servers providing tools and resources to the agent."
+      search={search}
+      onSearchChange={onSearchChange}
+    >
+      {filtered.length === 0 ? (
+        <p className="px-4 py-2 text-sm text-muted-foreground">
+          {mcpServers.length === 0 ? "No MCP servers configured." : "No matches"}
+        </p>
+      ) : (
+        <div className="flex flex-col gap-0.5 px-2">
+          {filtered.map((server, i) => (
+            <div
+              key={`${server.name}-${i}`}
+              className="flex items-center gap-2 px-2 py-1.5 rounded-md min-w-0"
+            >
+              <span className="text-sm font-medium shrink-0 whitespace-nowrap">
+                {server.name}
+              </span>
+              {server.detail && (
+                <span className="flex-1 min-w-0 truncate text-xs text-muted-foreground font-mono">
+                  {server.detail}
+                </span>
+              )}
+              <Badge variant="outline" className="ml-auto shrink-0 text-xs font-normal">
+                {server.source}
+              </Badge>
+            </div>
+          ))}
+        </div>
+      )}
+    </SectionShell>
+  );
+}
+
+// ─── Plugins section ──────────────────────────────────────────────────────────
+
+function PluginsSection({
+  plugins,
+  search,
+  onSearchChange,
+}: {
+  plugins: PluginEntry[];
+  search: string;
+  onSearchChange: (s: string) => void;
+}) {
+  const filtered = search
+    ? plugins.filter(
+        (p) =>
+          p.name.toLowerCase().includes(search.toLowerCase()) ||
+          (p.detail?.toLowerCase().includes(search.toLowerCase()) ?? false)
+      )
+    : plugins;
+
+  return (
+    <SectionShell
+      title="Plugins"
+      description="Installed Claude Code plugins that extend agent capabilities."
+      search={search}
+      onSearchChange={onSearchChange}
+    >
+      {filtered.length === 0 ? (
+        <p className="px-4 py-2 text-sm text-muted-foreground">
+          {plugins.length === 0 ? "No plugins installed." : "No matches"}
+        </p>
+      ) : (
+        <div className="flex flex-col gap-0.5 px-2">
+          {filtered.map((plugin, i) => (
+            <div
+              key={`${plugin.name}-${i}`}
+              className="flex items-center gap-2 px-2 py-1.5 rounded-md min-w-0"
+            >
+              <span className="text-sm font-medium shrink-0 whitespace-nowrap">
+                {plugin.name}
+              </span>
+              {plugin.detail && (
+                <span className="flex-1 min-w-0 truncate text-xs text-muted-foreground">
+                  {plugin.detail}
+                </span>
+              )}
+              <Badge variant="outline" className="ml-auto shrink-0 text-xs font-normal">
+                {plugin.source}
+              </Badge>
+            </div>
+          ))}
+        </div>
+      )}
     </SectionShell>
   );
 }
@@ -598,6 +835,9 @@ export function CustomizationsDialog({
   capabilities,
   rules,
   sessionId,
+  hooks,
+  mcpServers,
+  plugins,
 }: CustomizationsDialogProps) {
   const [activeSection, setActiveSection] = useState<CustomizationSection>(initialSection);
 
@@ -625,6 +865,7 @@ export function CustomizationsDialog({
   }, [activeSection]);
 
   const getNavCount = (item: NavItem): number | null => {
+    if (item.id === "plugins") return plugins.length;
     if (!item.countKey || counts === null) return null;
     return counts[item.countKey];
   };
@@ -689,12 +930,18 @@ export function CustomizationsDialog({
                 loading={fileLoading}
                 error={fileError}
                 content={fileContent}
+                sessionId={sessionId}
                 onBack={handleBack}
+                onSaved={(newContent) => setFileContent(newContent)}
               />
             ) : (
               <ScrollArea className="h-full">
                 {activeSection === "overview" && (
-                  <OverviewSection counts={counts} onNavigate={setActiveSection} />
+                  <OverviewSection
+                    counts={counts}
+                    pluginsCount={plugins.length}
+                    onNavigate={setActiveSection}
+                  />
                 )}
                 {activeSection === "agents" && (
                   <AgentsSection
@@ -721,27 +968,24 @@ export function CustomizationsDialog({
                   />
                 )}
                 {activeSection === "hooks" && (
-                  <ComingSoonSection
-                    title="Hooks"
-                    description="Lifecycle hooks that run before and after agent operations."
-                    count={counts?.hooks ?? null}
-                    countLabel={counts?.hooks === 1 ? "hook configured" : "hooks configured"}
+                  <HooksSection
+                    hooks={hooks}
+                    search={search}
+                    onSearchChange={setSearch}
                   />
                 )}
                 {activeSection === "mcp" && (
-                  <ComingSoonSection
-                    title="MCP Servers"
-                    description="Model Context Protocol servers providing tools and resources to the agent."
-                    count={counts?.mcpServers ?? null}
-                    countLabel={counts?.mcpServers === 1 ? "MCP server configured" : "MCP servers configured"}
+                  <McpServersSection
+                    mcpServers={mcpServers}
+                    search={search}
+                    onSearchChange={setSearch}
                   />
                 )}
                 {activeSection === "plugins" && (
-                  <ComingSoonSection
-                    title="Plugins"
-                    description="Installed Claude Code plugins that extend agent capabilities."
-                    count={0}
-                    countLabel="plugins installed"
+                  <PluginsSection
+                    plugins={plugins}
+                    search={search}
+                    onSearchChange={setSearch}
                   />
                 )}
               </ScrollArea>

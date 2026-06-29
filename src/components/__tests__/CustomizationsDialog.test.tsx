@@ -1,12 +1,18 @@
 import { render, screen, within, fireEvent, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { CustomizationsDialog } from "../CustomizationsDialog";
-import type { CustomizationCounts } from "../../lib/conductor";
+import type { CustomizationCounts, HookEntry, McpServerEntry, PluginEntry } from "../../lib/conductor";
 import type { Capabilities, RuleFile } from "../../lib/inspect";
-import { readTextFile } from "../../lib/inspect";
+import { readTextFile, writeTextFile } from "../../lib/inspect";
+import { toast } from "sonner";
 
 vi.mock("../../lib/inspect", () => ({
   readTextFile: vi.fn(),
+  writeTextFile: vi.fn(),
+}));
+
+vi.mock("sonner", () => ({
+  toast: { success: vi.fn(), error: vi.fn() },
 }));
 
 const counts: CustomizationCounts = {
@@ -47,6 +53,21 @@ const rules: RuleFile[] = [
   { path: "/wt/missing.md", label: "missing.md", scope: "project", exists: false },
 ];
 
+const sampleHooks: HookEntry[] = [
+  { event: "PreToolUse", matcher: null, command: "echo pre", source: "project" },
+  { event: "PostToolUse", matcher: "/edit", command: "git add -A && git commit -m auto", source: "user" },
+];
+
+const sampleMcpServers: McpServerEntry[] = [
+  { name: "context7", detail: "npx @context7/mcp", source: "project" },
+  { name: "playwright", detail: null, source: "user" },
+];
+
+const samplePlugins: PluginEntry[] = [
+  { name: "memory-plugin", detail: "claude-plugins-official", source: "user" },
+  { name: "search-plugin", detail: null, source: "project" },
+];
+
 const noop = () => {};
 
 const defaultProps = {
@@ -57,6 +78,9 @@ const defaultProps = {
   capabilities,
   rules,
   sessionId: "s1",
+  hooks: [],
+  mcpServers: [],
+  plugins: [],
 };
 
 // Helper that returns the left-nav element after confirming it exists.
@@ -70,6 +94,7 @@ function getNav() {
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(readTextFile).mockResolvedValue("");
+  vi.mocked(writeTextFile).mockResolvedValue(undefined);
 });
 
 test("renders the dialog when open is true", () => {
@@ -237,6 +262,100 @@ test("switching sections resets the detail view", async () => {
   expect(screen.getByRole("heading", { name: /^skills$/i })).toBeInTheDocument();
 });
 
+// ─── File viewer edit mode ────────────────────────────────────────────────────
+
+test("Edit button appears in file viewer header", async () => {
+  vi.mocked(readTextFile).mockResolvedValue("original content");
+  render(<CustomizationsDialog {...defaultProps} />);
+  const nav = getNav();
+  await userEvent.click(within(nav).getByRole("button", { name: /instructions/i }));
+  await userEvent.click(screen.getByText("CLAUDE.md"));
+  expect(await screen.findByRole("button", { name: /edit/i })).toBeInTheDocument();
+});
+
+test("clicking Edit switches to textarea mode with Save and Cancel buttons", async () => {
+  vi.mocked(readTextFile).mockResolvedValue("original content");
+  render(<CustomizationsDialog {...defaultProps} />);
+  const nav = getNav();
+  await userEvent.click(within(nav).getByRole("button", { name: /instructions/i }));
+  await userEvent.click(screen.getByText("CLAUDE.md"));
+  await screen.findByRole("button", { name: /edit/i });
+  await userEvent.click(screen.getByRole("button", { name: /edit/i }));
+  expect(screen.getByRole("textbox", { name: /file content editor/i })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: /^save$/i })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: /^cancel$/i })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /^edit$/i })).not.toBeInTheDocument();
+});
+
+test("textarea is prefilled with current file content", async () => {
+  vi.mocked(readTextFile).mockResolvedValue("hello world");
+  render(<CustomizationsDialog {...defaultProps} />);
+  const nav = getNav();
+  await userEvent.click(within(nav).getByRole("button", { name: /instructions/i }));
+  await userEvent.click(screen.getByText("CLAUDE.md"));
+  await screen.findByRole("button", { name: /edit/i });
+  await userEvent.click(screen.getByRole("button", { name: /edit/i }));
+  const textarea = screen.getByRole("textbox", { name: /file content editor/i });
+  expect(textarea).toHaveValue("hello world");
+});
+
+test("Save calls writeTextFile, shows toast, and returns to read view", async () => {
+  vi.mocked(readTextFile).mockResolvedValue("original");
+  vi.mocked(writeTextFile).mockResolvedValue(undefined);
+  render(<CustomizationsDialog {...defaultProps} />);
+  const nav = getNav();
+  await userEvent.click(within(nav).getByRole("button", { name: /instructions/i }));
+  await userEvent.click(screen.getByText("CLAUDE.md"));
+  await screen.findByRole("button", { name: /edit/i });
+  await userEvent.click(screen.getByRole("button", { name: /edit/i }));
+  const textarea = screen.getByRole("textbox", { name: /file content editor/i });
+  await userEvent.clear(textarea);
+  await userEvent.type(textarea, "updated content");
+  await userEvent.click(screen.getByRole("button", { name: /^save$/i }));
+  await waitFor(() => {
+    expect(writeTextFile).toHaveBeenCalledWith("s1", "/wt/CLAUDE.md", "updated content");
+  });
+  expect(vi.mocked(toast.success)).toHaveBeenCalledWith("Saved CLAUDE.md");
+  // Returns to read view — textarea gone, Edit button back
+  await waitFor(() => {
+    expect(screen.queryByRole("textbox", { name: /file content editor/i })).not.toBeInTheDocument();
+  });
+  expect(screen.getByRole("button", { name: /edit/i })).toBeInTheDocument();
+});
+
+test("Save error shows toast.error and stays in edit mode", async () => {
+  vi.mocked(readTextFile).mockResolvedValue("original");
+  vi.mocked(writeTextFile).mockRejectedValue(new Error("write denied"));
+  render(<CustomizationsDialog {...defaultProps} />);
+  const nav = getNav();
+  await userEvent.click(within(nav).getByRole("button", { name: /instructions/i }));
+  await userEvent.click(screen.getByText("CLAUDE.md"));
+  await screen.findByRole("button", { name: /edit/i });
+  await userEvent.click(screen.getByRole("button", { name: /edit/i }));
+  await userEvent.click(screen.getByRole("button", { name: /^save$/i }));
+  await waitFor(() => {
+    expect(vi.mocked(toast.error)).toHaveBeenCalledWith("Error: write denied");
+  });
+  // Still in edit mode
+  expect(screen.getByRole("textbox", { name: /file content editor/i })).toBeInTheDocument();
+});
+
+test("Cancel discards edits and returns to read view", async () => {
+  vi.mocked(readTextFile).mockResolvedValue("original");
+  render(<CustomizationsDialog {...defaultProps} />);
+  const nav = getNav();
+  await userEvent.click(within(nav).getByRole("button", { name: /instructions/i }));
+  await userEvent.click(screen.getByText("CLAUDE.md"));
+  await screen.findByRole("button", { name: /edit/i });
+  await userEvent.click(screen.getByRole("button", { name: /edit/i }));
+  const textarea = screen.getByRole("textbox", { name: /file content editor/i });
+  await userEvent.type(textarea, "do not save this");
+  await userEvent.click(screen.getByRole("button", { name: /^cancel$/i }));
+  expect(screen.queryByRole("textbox", { name: /file content editor/i })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: /edit/i })).toBeInTheDocument();
+  expect(writeTextFile).not.toHaveBeenCalled();
+});
+
 // ─── Per-section search ───────────────────────────────────────────────────────
 
 test("Agents search filters by agent name", async () => {
@@ -339,33 +458,131 @@ test("search query resets when switching sections", async () => {
   expect(screen.getByPlaceholderText(/type to search/i)).toHaveValue("");
 });
 
-// ─── Existing tests ───────────────────────────────────────────────────────────
+// ─── Hooks section ────────────────────────────────────────────────────────────
 
-test("Hooks section shows count and coming-soon message", async () => {
-  render(<CustomizationsDialog {...defaultProps} />);
+test("Hooks section renders rows from props", async () => {
+  render(<CustomizationsDialog {...defaultProps} hooks={sampleHooks} />);
   const nav = getNav();
   await userEvent.click(within(nav).getByRole("button", { name: /hooks/i }));
-  // counts.hooks = 3 — check the count-label text which is unique to the content area
-  expect(screen.getByText("hooks configured")).toBeInTheDocument();
-  expect(screen.getByText(/coming soon/i)).toBeInTheDocument();
+  expect(screen.getByText("PreToolUse")).toBeInTheDocument();
+  expect(screen.getByText("echo pre")).toBeInTheDocument();
+  expect(screen.getByText("PostToolUse")).toBeInTheDocument();
+  expect(screen.getByText("/edit")).toBeInTheDocument();
+  expect(screen.getByText("git add -A && git commit -m auto")).toBeInTheDocument();
 });
 
-test("MCP Servers section shows count and coming-soon message", async () => {
-  render(<CustomizationsDialog {...defaultProps} />);
+test("Hooks section shows empty state when no hooks configured", async () => {
+  render(<CustomizationsDialog {...defaultProps} hooks={[]} />);
+  const nav = getNav();
+  await userEvent.click(within(nav).getByRole("button", { name: /hooks/i }));
+  expect(screen.getByText("No hooks configured.")).toBeInTheDocument();
+});
+
+test("Hooks section search filters by event name", async () => {
+  render(<CustomizationsDialog {...defaultProps} hooks={sampleHooks} />);
+  const nav = getNav();
+  await userEvent.click(within(nav).getByRole("button", { name: /hooks/i }));
+  await userEvent.type(screen.getByPlaceholderText(/type to search/i), "Pre");
+  expect(screen.getByText("PreToolUse")).toBeInTheDocument();
+  expect(screen.queryByText("PostToolUse")).not.toBeInTheDocument();
+});
+
+test("Hooks section search filters by command", async () => {
+  render(<CustomizationsDialog {...defaultProps} hooks={sampleHooks} />);
+  const nav = getNav();
+  await userEvent.click(within(nav).getByRole("button", { name: /hooks/i }));
+  await userEvent.type(screen.getByPlaceholderText(/type to search/i), "echo");
+  expect(screen.getByText("PreToolUse")).toBeInTheDocument();
+  expect(screen.queryByText("PostToolUse")).not.toBeInTheDocument();
+});
+
+test("Hooks section source badge is shown", async () => {
+  render(<CustomizationsDialog {...defaultProps} hooks={sampleHooks} />);
+  const nav = getNav();
+  await userEvent.click(within(nav).getByRole("button", { name: /hooks/i }));
+  expect(screen.getByText("project")).toBeInTheDocument();
+  expect(screen.getByText("user")).toBeInTheDocument();
+});
+
+// ─── MCP Servers section ──────────────────────────────────────────────────────
+
+test("MCP Servers section renders rows from props", async () => {
+  render(<CustomizationsDialog {...defaultProps} mcpServers={sampleMcpServers} />);
   const nav = getNav();
   await userEvent.click(within(nav).getByRole("button", { name: /mcp servers/i }));
-  // counts.mcpServers = 4 — check the count-label text which is unique to the content area
-  expect(screen.getByText("MCP servers configured")).toBeInTheDocument();
-  expect(screen.getByText(/coming soon/i)).toBeInTheDocument();
+  expect(screen.getByText("context7")).toBeInTheDocument();
+  expect(screen.getByText("npx @context7/mcp")).toBeInTheDocument();
+  expect(screen.getByText("playwright")).toBeInTheDocument();
 });
 
-test("Plugins section shows 0 count and coming-soon message", async () => {
-  render(<CustomizationsDialog {...defaultProps} />);
+test("MCP Servers section shows empty state when no servers configured", async () => {
+  render(<CustomizationsDialog {...defaultProps} mcpServers={[]} />);
+  const nav = getNav();
+  await userEvent.click(within(nav).getByRole("button", { name: /mcp servers/i }));
+  expect(screen.getByText("No MCP servers configured.")).toBeInTheDocument();
+});
+
+test("MCP Servers search filters by server name", async () => {
+  render(<CustomizationsDialog {...defaultProps} mcpServers={sampleMcpServers} />);
+  const nav = getNav();
+  await userEvent.click(within(nav).getByRole("button", { name: /mcp servers/i }));
+  await userEvent.type(screen.getByPlaceholderText(/type to search/i), "context");
+  expect(screen.getByText("context7")).toBeInTheDocument();
+  expect(screen.queryByText("playwright")).not.toBeInTheDocument();
+});
+
+test("MCP Servers search filters by detail", async () => {
+  render(<CustomizationsDialog {...defaultProps} mcpServers={sampleMcpServers} />);
+  const nav = getNav();
+  await userEvent.click(within(nav).getByRole("button", { name: /mcp servers/i }));
+  await userEvent.type(screen.getByPlaceholderText(/type to search/i), "npx");
+  expect(screen.getByText("context7")).toBeInTheDocument();
+  expect(screen.queryByText("playwright")).not.toBeInTheDocument();
+});
+
+// ─── Plugins section ──────────────────────────────────────────────────────────
+
+test("Plugins section renders rows from props", async () => {
+  render(<CustomizationsDialog {...defaultProps} plugins={samplePlugins} />);
   const nav = getNav();
   await userEvent.click(within(nav).getByRole("button", { name: /plugins/i }));
-  expect(screen.getByText(/coming soon/i)).toBeInTheDocument();
-  expect(screen.getByText("0")).toBeInTheDocument();
+  expect(screen.getByText("memory-plugin")).toBeInTheDocument();
+  expect(screen.getByText("claude-plugins-official")).toBeInTheDocument();
+  expect(screen.getByText("search-plugin")).toBeInTheDocument();
 });
+
+test("Plugins section shows empty state when no plugins installed", async () => {
+  render(<CustomizationsDialog {...defaultProps} plugins={[]} />);
+  const nav = getNav();
+  await userEvent.click(within(nav).getByRole("button", { name: /plugins/i }));
+  expect(screen.getByText("No plugins installed.")).toBeInTheDocument();
+});
+
+test("Plugins section search filters by name", async () => {
+  render(<CustomizationsDialog {...defaultProps} plugins={samplePlugins} />);
+  const nav = getNav();
+  await userEvent.click(within(nav).getByRole("button", { name: /plugins/i }));
+  await userEvent.type(screen.getByPlaceholderText(/type to search/i), "memory");
+  expect(screen.getByText("memory-plugin")).toBeInTheDocument();
+  expect(screen.queryByText("search-plugin")).not.toBeInTheDocument();
+});
+
+test("Plugins nav count shows plugins.length", () => {
+  render(<CustomizationsDialog {...defaultProps} plugins={samplePlugins} />);
+  const nav = getNav();
+  // samplePlugins has 2 entries — nav should show "2" for plugins
+  const pluginsBtn = within(nav).getByRole("button", { name: /plugins/i });
+  expect(pluginsBtn.textContent).toContain("2");
+});
+
+test("Plugins nav count shows 0 when no plugins", () => {
+  render(<CustomizationsDialog {...defaultProps} plugins={[]} />);
+  const nav = getNav();
+  const pluginsBtn = within(nav).getByRole("button", { name: /plugins/i });
+  expect(pluginsBtn.textContent).toContain("0");
+});
+
+// ─── Existing general tests ───────────────────────────────────────────────────
 
 test("empty Agents list shows 'No agents found' message", async () => {
   render(
