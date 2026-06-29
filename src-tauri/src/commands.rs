@@ -103,11 +103,15 @@ fn worktrees_root() -> PathBuf {
 /// Start a session: create an isolated worktree off `repo` for `session_id`, persist
 /// the session + prompt, then run the Claude agent inside it (streaming + persisting
 /// events). The worktree is left in place for review; `cleanup_session` removes it.
+///
+/// `model` is optional: `Some("opus")` / `Some("claude-opus-4-5")` etc. pass `--model`
+/// to the CLI; `None` (omitted from the IPC call) uses the CLI's own default.
 #[tauri::command]
 pub async fn start_session(
     prompt: String,
     repo: String,
     session_id: String,
+    model: Option<String>,
     on_event: Channel<AgentEvent>,
     store: State<'_, SessionStore>,
 ) -> Result<(), String> {
@@ -141,15 +145,18 @@ pub async fn start_session(
         eprintln!("failed to persist prompt for session {session_id}: {e}");
     }
 
-    run_persisting(&store, session_id, Prompt { text: prompt }, wt.path, false, on_event).await
+    run_persisting(&store, session_id, Prompt { text: prompt, model }, wt.path, false, on_event).await
 }
 
 /// Continue an existing session with a follow-up message (resumes the agent in the
 /// session's worktree, persisting the new prompt + streamed events).
+///
+/// `model` is optional: passes `--model` to the CLI when `Some`, omitted when `None`.
 #[tauri::command]
 pub async fn send_message(
     prompt: String,
     session_id: String,
+    model: Option<String>,
     on_event: Channel<AgentEvent>,
     store: State<'_, SessionStore>,
 ) -> Result<(), String> {
@@ -174,7 +181,7 @@ pub async fn send_message(
         eprintln!("failed to persist prompt for session {session_id}: {e}");
     }
 
-    run_persisting(&store, session_id, Prompt { text: prompt }, wt_path, true, on_event).await
+    run_persisting(&store, session_id, Prompt { text: prompt, model }, wt_path, true, on_event).await
 }
 
 /// Remove the worktree (and branch) for a finished session.

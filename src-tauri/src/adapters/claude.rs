@@ -83,6 +83,12 @@ pub async fn spawn_and_stream(
     resume: bool,
     sink: Box<dyn EventSink>,
 ) -> Result<(), SessionError> {
+    // Extract model before building the command so borrows on prompt fields don't
+    // conflict with each other. The adapter forwards the caller-supplied string verbatim;
+    // valid values are short aliases (e.g. "opus", "sonnet", "haiku", "fable") or a full
+    // model id (e.g. "claude-opus-4-5"). No default is injected — None omits the flag.
+    let model = prompt.model.as_deref();
+
     let mut command = Command::new("claude");
     command
         .arg("-p")
@@ -94,6 +100,9 @@ pub async fn spawn_and_stream(
         command.arg("--resume").arg(&session_id);
     } else {
         command.arg("--session-id").arg(&session_id);
+    }
+    if let Some(m) = model {
+        command.arg("--model").arg(m);
     }
     let mut child = command
         .current_dir(&cwd)
@@ -143,4 +152,61 @@ pub async fn spawn_and_stream(
         sink.emit(AgentEvent::Error { message });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::adapter::Prompt;
+
+    // ---- parse_line tests ----
+
+    #[test]
+    fn parse_blank_line_returns_empty() {
+        assert!(parse_line("").is_empty());
+        assert!(parse_line("   ").is_empty());
+    }
+
+    #[test]
+    fn parse_non_json_returns_empty() {
+        assert!(parse_line("not json").is_empty());
+    }
+
+    #[test]
+    fn parse_result_ok_emits_done() {
+        let line = r#"{"type":"result","is_error":false,"result":"all done"}"#;
+        let events = parse_line(line);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], AgentEvent::Done { summary } if summary == "all done"));
+    }
+
+    #[test]
+    fn parse_result_error_emits_error() {
+        let line = r#"{"type":"result","is_error":true,"result":"boom"}"#;
+        let events = parse_line(line);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], AgentEvent::Error { message } if message == "boom"));
+    }
+
+    #[test]
+    fn parse_assistant_text_block_emits_token() {
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hello"}]}}"#;
+        let events = parse_line(line);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], AgentEvent::Token { text } if text == "hello"));
+    }
+
+    // ---- model field on Prompt ----
+
+    #[test]
+    fn prompt_model_some_carries_through() {
+        let p = Prompt { text: "build it".into(), model: Some("opus".into()) };
+        assert_eq!(p.model.as_deref(), Some("opus"));
+    }
+
+    #[test]
+    fn prompt_model_none_is_absent() {
+        let p = Prompt { text: "build it".into(), model: None };
+        assert!(p.model.is_none());
+    }
 }
