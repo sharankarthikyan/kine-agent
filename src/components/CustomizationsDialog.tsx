@@ -417,11 +417,11 @@ export function CustomizationsDialog({
           Browse agents, skills, instructions, hooks, MCP servers, and plugins configured for this session.
         </DialogDescription>
 
-        {/* Two-column layout: left nav + right content */}
-        <div className="flex flex-1 min-h-0 overflow-hidden">
+        {/* Two-column layout: left nav + inset rounded content panel */}
+        <div className="flex flex-1 min-h-0 overflow-hidden gap-2 p-2">
           {/* Left nav */}
           <nav
-            className="w-48 shrink-0 border-r border-border flex flex-col py-3 px-2 gap-0.5 overflow-y-auto"
+            className="w-48 shrink-0 flex flex-col py-1 px-1 gap-0.5 overflow-y-auto"
             aria-label="Customization sections"
           >
             {NAV_ITEMS.map((item) => (
@@ -435,8 +435,9 @@ export function CustomizationsDialog({
             ))}
           </nav>
 
-          {/* Right content */}
-          <ScrollArea className="flex-1 min-w-0 min-h-0">
+          {/* Right content — inset rounded panel */}
+          <div className="flex-1 min-w-0 min-h-0 rounded-xl border border-border overflow-hidden">
+            <ScrollArea className="h-full">
             {activeSection === "overview" && (
               <OverviewSection counts={counts} onNavigate={setActiveSection} />
             )}
@@ -473,7 +474,8 @@ export function CustomizationsDialog({
                 countLabel="plugins installed"
               />
             )}
-          </ScrollArea>
+            </ScrollArea>
+          </div>
         </div>
       </DialogContent>
     </Dialog>
