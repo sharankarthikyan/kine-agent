@@ -20,7 +20,18 @@ export type AgentEvent =
   | { kind: "fileWrite"; data: { path: string } }
   | { kind: "approvalNeeded"; data: { prompt: string } }
   | { kind: "done"; data: { summary: string } }
-  | { kind: "error"; data: { message: string } };
+  | { kind: "error"; data: { message: string } }
+  | {
+      kind: "usage";
+      data: {
+        inputTokens: number;
+        outputTokens: number;
+        cacheReadTokens: number;
+        cacheCreationTokens: number;
+        costUsd: number | null;
+        model: string | null;
+      };
+    };
 
 export interface StartSessionArgs {
   prompt: string;

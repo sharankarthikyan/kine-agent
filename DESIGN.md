@@ -34,8 +34,8 @@
 - Framework: React 19 + Vite + TypeScript, inside Tauri 2 (system WebView).
 - Styling: **Tailwind CSS** (v4).
 - Components: **shadcn/ui** (Radix primitives + `cva` variants), copied into `src/components/ui/`.
-- Installed: alert, badge, button, card, dropdown-menu, empty, scroll-area, separator, skeleton,
-  sonner (toast), textarea, tooltip.
+- Installed: alert, badge, button, card, dropdown-menu, empty, progress, scroll-area, separator,
+  sheet, skeleton, sonner (toast), tabs, textarea, tooltip.
 - Extension: custom variants via `cva()` in the component file; never fork a primitive unnecessarily.
 - Composition: every component accepts `className` and merges via `cn()` (`src/lib/utils.ts`).
 
@@ -54,6 +54,7 @@
 - **Errors:** inline, scoped to the turn/session (`destructive` accent); never blank the whole view.
 - **Empty state:** centered icon + short heading + one CTA ("Start a session").
 - **States:** every interactive component defines default / hover / focus-visible / disabled (+ loading/error where apt).
+- **Context panel:** a tabbed right pane (`Context | Diff`, shadcn `Tabs`) in the same collapsible/expandable slot; Context tab shows window-usage (`Progress`) + cost, files this session, loaded rules/config (open in a `Sheet`), discovered skills/subagents/commands, and settings — all read-only, derived headless.
 - **Responsive:** desktop-first; panes collapse gracefully on narrow widths (diff → tab fallback).
 - **Dark mode:** default dark (calm zinc); light available via class toggle; theme-aware tokens only (no hardcoded hex).
 

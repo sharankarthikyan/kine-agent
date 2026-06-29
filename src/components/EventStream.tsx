@@ -89,6 +89,10 @@ function renderEvent(event: AgentEvent, hasProse: boolean) {
         </Alert>
       );
 
+    case "usage":
+      // Rendered by the Context panel, not the chat stream. Ignore here.
+      return null;
+
     default: {
       // Exhaustiveness guard: a new AgentEvent variant without a case becomes a
       // compile error here instead of silently rendering nothing.

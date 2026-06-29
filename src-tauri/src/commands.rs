@@ -1,6 +1,7 @@
 use crate::adapter::{AgentAdapter, EventSink, Prompt};
 use crate::adapters::claude::ClaudeAdapter;
 use crate::events::AgentEvent;
+use crate::inspect::{self, Capabilities, RuleFile};
 use crate::review::{self, SessionDiff};
 use crate::store::{self, SessionStore, SessionSummary, StoredEvent};
 use crate::worktree;
@@ -254,4 +255,45 @@ pub async fn list_models(agent: String) -> Result<Vec<crate::models::ModelInfo>,
     tokio::task::spawn_blocking(move || crate::models::list_models(&agent))
         .await
         .map_err(|e| e.to_string())
+}
+
+/// List candidate rule/config files for a session's worktree + global config dirs.
+#[tauri::command]
+pub async fn inspect_rules(session_id: String) -> Result<Vec<RuleFile>, String> {
+    let root = worktrees_root();
+    tokio::task::spawn_blocking(move || {
+        let wt = crate::worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
+        Ok::<Vec<RuleFile>, String>(inspect::rule_candidates(&wt.path))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Read a rule/config file (validated to the session's worktree or known config dirs).
+#[tauri::command]
+pub async fn read_text_file(session_id: String, path: String) -> Result<String, String> {
+    let root = worktrees_root();
+    tokio::task::spawn_blocking(move || {
+        let wt = crate::worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
+        inspect::read_text_file(&path, &wt.path).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Discover an agent's available skills/subagents/commands for a session's worktree.
+///
+/// Returns the three capability categories (`skills`, `subagents`, `commands`) as
+/// discovered from `.claude/` subdirectories inside the session worktree and the user's
+/// `~/.claude/` home directory. Only `"claude"` is mapped today; all other agents return
+/// empty lists. Missing directories are silently ignored (best-effort discovery).
+#[tauri::command]
+pub async fn list_capabilities(session_id: String, agent: String) -> Result<Capabilities, String> {
+    let root = worktrees_root();
+    tokio::task::spawn_blocking(move || {
+        let wt = crate::worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
+        Ok::<Capabilities, String>(inspect::list_capabilities(&agent, &wt.path))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }

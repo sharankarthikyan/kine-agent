@@ -26,6 +26,10 @@ pub struct ModelInfo {
     pub description: Option<String>,
     pub source: String,
     pub disabled: bool,
+    /// Maximum input tokens for this model as reported by the Anthropic API
+    /// (`max_input_tokens`). `None` when the information is unavailable (e.g.
+    /// fallback list, other agents). Serialized as `contextWindow` for the UI.
+    pub context_window: Option<u32>,
 }
 
 /// Probe PATH for each supported agent CLI and return all three with their
@@ -87,6 +91,7 @@ pub fn claude_fallback() -> Vec<ModelInfo> {
         description: Some(description.to_string()),
         source: "fallback".to_string(),
         disabled: false,
+        context_window: Some(200_000),
     })
     .collect()
 }
@@ -105,6 +110,10 @@ fn parse_models(body: &serde_json::Value) -> Option<Vec<ModelInfo>> {
             let id = item.get("id")?.as_str()?;
             // display_name is optional: fall back to the id string when absent.
             let label = item.get("display_name").and_then(|v| v.as_str()).unwrap_or(id);
+            let context_window = item
+                .get("max_input_tokens")
+                .and_then(|v| v.as_u64())
+                .map(|n| n as u32);
             Some(ModelInfo {
                 value: id.to_string(),
                 label: label.to_string(),
@@ -112,6 +121,7 @@ fn parse_models(body: &serde_json::Value) -> Option<Vec<ModelInfo>> {
                 description: None,
                 source: "api".to_string(),
                 disabled: false,
+                context_window,
             })
         })
         .collect();
@@ -165,6 +175,10 @@ mod tests {
             "all models must be source=fallback, agent=claude, disabled=false"
         );
         assert_eq!(models[0].value, "opus", "opus must be first (default)");
+        assert!(
+            models.iter().all(|m| m.context_window == Some(200_000)),
+            "all fallback models must report context_window = 200_000"
+        );
     }
 
     #[test]
@@ -181,21 +195,23 @@ mod tests {
     fn parse_models_maps_data_with_display_name_fallback_to_id() {
         let json = serde_json::json!({
             "data": [
-                { "id": "claude-opus-4-6", "display_name": "Claude Opus 4.6" },
-                { "id": "claude-x" }   // no display_name — must fall back to id
+                { "id": "claude-opus-4-6", "display_name": "Claude Opus 4.6", "max_input_tokens": 200000 },
+                { "id": "claude-x" }   // no display_name or max_input_tokens — must fall back gracefully
             ]
         });
         let models = parse_models(&json).expect("should parse non-empty data array");
         assert_eq!(models.len(), 2);
-        // first entry: display_name present
+        // first entry: display_name + max_input_tokens present
         assert_eq!(models[0].value, "claude-opus-4-6");
         assert_eq!(models[0].label, "Claude Opus 4.6");
         assert_eq!(models[0].source, "api");
         assert!(!models[0].disabled);
-        // second entry: display_name absent — label must equal id
+        assert_eq!(models[0].context_window, Some(200_000));
+        // second entry: display_name absent — label must equal id; context_window None
         assert_eq!(models[1].value, "claude-x");
         assert_eq!(models[1].label, "claude-x");
         assert_eq!(models[1].source, "api");
+        assert_eq!(models[1].context_window, None);
     }
 
     #[test]

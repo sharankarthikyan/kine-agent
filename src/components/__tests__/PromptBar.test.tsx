@@ -14,6 +14,7 @@ const opus: ModelInfo = {
   description: null,
   source: "fallback",
   disabled: false,
+  contextWindow: null,
 };
 
 const sonnet: ModelInfo = {
@@ -23,6 +24,7 @@ const sonnet: ModelInfo = {
   description: null,
   source: "fallback",
   disabled: false,
+  contextWindow: null,
 };
 
 const disabledCodex: ModelInfo = {
@@ -32,6 +34,7 @@ const disabledCodex: ModelInfo = {
   description: null,
   source: "fallback",
   disabled: true,
+  contextWindow: null,
 };
 
 const FIXTURE_MODELS: ModelInfo[] = [opus, sonnet, disabledCodex];
