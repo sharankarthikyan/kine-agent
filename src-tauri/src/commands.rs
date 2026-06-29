@@ -5,6 +5,8 @@ use crate::review::{self, SessionDiff};
 use crate::store::{self, SessionStore, SessionSummary, StoredEvent};
 use crate::worktree;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tauri::ipc::Channel;
 use tauri::State;
 use tokio::sync::mpsc;
@@ -12,13 +14,21 @@ use tokio::sync::mpsc;
 /// Sink that fans each event two ways: to the live UI Channel AND to an mpsc queue
 /// that a drain task persists to the store. Keeps the IPC path non-blocking — DB
 /// writes happen on the drain task, not in `emit`.
+///
+/// `saw_error` is set when any `AgentEvent::Error` flows through, so `run_persisting`
+/// can stamp the session status correctly even when the adapter returns `Ok` (i.e.
+/// the agent ran to completion but reported an in-band error).
 struct StoreSink {
     channel: Channel<AgentEvent>,
     tx: mpsc::UnboundedSender<AgentEvent>,
+    saw_error: Arc<AtomicBool>,
 }
 
 impl EventSink for StoreSink {
     fn emit(&self, event: AgentEvent) {
+        if matches!(event, AgentEvent::Error { .. }) {
+            self.saw_error.store(true, Ordering::Relaxed);
+        }
         let _ = self.channel.send(event.clone());
         let _ = self.tx.send(event);
     }
@@ -27,6 +37,9 @@ impl EventSink for StoreSink {
 /// Run the adapter while persisting every streamed event, then stamp the session
 /// status ("idle" on success, "error" on failure). The prompt row must already be
 /// written by the caller so it gets seq 0 before any streamed event.
+///
+/// Status is "error" if EITHER the run returned `Err` OR any `AgentEvent::Error`
+/// flowed through the sink — covering in-band agent failures that still return `Ok`.
 async fn run_persisting(
     store: &SessionStore,
     session_id: String,
@@ -36,7 +49,8 @@ async fn run_persisting(
     on_event: Channel<AgentEvent>,
 ) -> Result<(), String> {
     let (tx, mut rx) = mpsc::unbounded_channel::<AgentEvent>();
-    let sink = Box::new(StoreSink { channel: on_event, tx });
+    let saw_error = Arc::new(AtomicBool::new(false));
+    let sink = Box::new(StoreSink { channel: on_event, tx, saw_error: Arc::clone(&saw_error) });
 
     // Drain task: persist events as they arrive. Ends when the sink (and its tx)
     // is dropped at the end of `.run()`.
@@ -45,7 +59,9 @@ async fn run_persisting(
     let drain = tokio::spawn(async move {
         while let Some(event) = rx.recv().await {
             let (kind, payload) = store::split_event(&event);
-            let _ = drain_store.append_event(&drain_sid, &kind, &payload).await;
+            if let Err(e) = drain_store.append_event(&drain_sid, &kind, &payload).await {
+                eprintln!("failed to persist event for session {drain_sid}: {e}");
+            }
         }
     });
 
@@ -53,7 +69,7 @@ async fn run_persisting(
         .run(prompt, cwd, session_id.clone(), resume, sink)
         .await;
     let _ = drain.await; // flush all persisted events before stamping status
-    let status = if result.is_ok() { "idle" } else { "error" };
+    let status = if result.is_ok() && !saw_error.load(Ordering::Relaxed) { "idle" } else { "error" };
     let _ = store.set_status(&session_id, status).await;
     result.map_err(|e| e.to_string())
 }
