@@ -30,7 +30,8 @@ pub fn run() {
             commands::detect_agents,
             commands::list_models,
             commands::inspect_rules,
-            commands::read_text_file
+            commands::read_text_file,
+            commands::list_capabilities
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -81,6 +81,123 @@ pub fn read_text_file(path: &str, worktree: &Path) -> Result<String, InspectErro
     Ok(String::from_utf8_lossy(&buf).to_string())
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// Capability discovery
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// A single discoverable capability (skill, subagent, or slash command).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Capability {
+    pub name: String,
+    pub description: Option<String>,
+    /// `"project"` when found in the worktree, `"user"` when found in `~/.claude/`.
+    pub source: String,
+}
+
+/// All capability categories discovered for an agent in a worktree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Capabilities {
+    pub skills: Vec<Capability>,
+    pub subagents: Vec<Capability>,
+    pub commands: Vec<Capability>,
+}
+
+/// Discover an agent's skills/subagents/commands from known on-disk locations.
+/// Only Claude is mapped today; others return empty (their adapters land later).
+pub fn list_capabilities(agent: &str, worktree: &Path) -> Capabilities {
+    if agent != "claude" {
+        return Capabilities { skills: vec![], subagents: vec![], commands: vec![] };
+    }
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let mut subagents = Vec::new();
+    let mut skills = Vec::new();
+    let mut commands = Vec::new();
+
+    collect_md(&worktree.join(".claude/agents"), "project", &mut subagents);
+    if let Some(h) = &home {
+        collect_md(&h.join(".claude/agents"), "user", &mut subagents);
+    }
+    collect_skill_dirs(&worktree.join(".claude/skills"), "project", &mut skills);
+    if let Some(h) = &home {
+        collect_skill_dirs(&h.join(".claude/skills"), "user", &mut skills);
+    }
+    collect_md(&worktree.join(".claude/commands"), "project", &mut commands);
+    if let Some(h) = &home {
+        collect_md(&h.join(".claude/commands"), "user", &mut commands);
+    }
+
+    Capabilities { skills, subagents, commands }
+}
+
+/// Push one `Capability` per `*.md` file found in `dir`.
+/// Name = file stem; description is extracted best-effort.
+fn collect_md(dir: &Path, source: &str, out: &mut Vec<Capability>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let Some(name) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+        out.push(Capability {
+            name: name.to_string(),
+            description: first_description(&path),
+            source: source.to_string(),
+        });
+    }
+}
+
+/// Push one `Capability` per subdirectory of `dir` that contains a `SKILL.md`.
+fn collect_skill_dirs(dir: &Path, source: &str, out: &mut Vec<Capability>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let skill_md = entry.path().join("SKILL.md");
+        if !skill_md.is_file() {
+            continue;
+        }
+        let Some(name) = entry.path().file_name().and_then(|s| s.to_str()).map(String::from)
+        else {
+            continue;
+        };
+        out.push(Capability {
+            name,
+            description: first_description(&skill_md),
+            source: source.to_string(),
+        });
+    }
+}
+
+/// Extract the first useful description line from a markdown or frontmatter file.
+///
+/// Scanning order:
+///  1. A `description:` key on any line (YAML frontmatter or inline), stripping
+///     surrounding double-quotes. This pass runs over the whole file first.
+///  2. The first non-empty, non-heading (`#`), non-separator (`---`) line,
+///     capped at 140 characters.
+///
+/// Returns `None` when the file is empty or unreadable.
+fn first_description(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    // Pass 1: look for an explicit `description:` key anywhere in the file.
+    for line in text.lines() {
+        let l = line.trim();
+        if let Some(rest) = l.strip_prefix("description:") {
+            return Some(rest.trim().trim_matches('"').to_string());
+        }
+    }
+    // Pass 2: first non-empty, non-heading, non-separator line.
+    for line in text.lines() {
+        let l = line.trim();
+        if l.is_empty() || l.starts_with('#') || l.starts_with("---") {
+            continue;
+        }
+        return Some(l.chars().take(140).collect());
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,6 +242,55 @@ mod tests {
             Err(InspectError::Forbidden(_))
         ));
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_capabilities_discovers_subagent_and_skill_for_claude() {
+        let dir =
+            std::env::temp_dir().join(format!("ae-caps-{}", std::process::id()));
+
+        // Create .claude/agents/foo.md (subagent)
+        let agents_dir = dir.join(".claude/agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(
+            agents_dir.join("foo.md"),
+            "---\nname: foo\ndescription: Does foo\n---\n",
+        )
+        .unwrap();
+
+        // Create .claude/skills/bar/SKILL.md (skill)
+        let skill_dir = dir.join(".claude/skills/bar");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "---\ndescription: Bar skill\n---\n").unwrap();
+
+        let caps = list_capabilities("claude", &dir);
+
+        // Subagent "foo" must be found with the right description and source.
+        let foo = caps.subagents.iter().find(|c| c.name == "foo")
+            .expect("subagent 'foo' not found");
+        assert_eq!(foo.description.as_deref(), Some("Does foo"));
+        assert_eq!(foo.source, "project");
+
+        // Skill "bar" must be found via SKILL.md.
+        let bar = caps.skills.iter().find(|c| c.name == "bar")
+            .expect("skill 'bar' not found");
+        assert_eq!(bar.description.as_deref(), Some("Bar skill"));
+        assert_eq!(bar.source, "project");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_capabilities_returns_empty_for_non_claude_agents() {
+        let dir =
+            std::env::temp_dir().join(format!("ae-caps-nc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Even if there happened to be claude dirs, codex should still return empty.
+        let caps = list_capabilities("codex", &dir);
+        assert!(caps.skills.is_empty());
+        assert!(caps.subagents.is_empty());
+        assert!(caps.commands.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
