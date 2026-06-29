@@ -6,9 +6,9 @@ use std::path::PathBuf;
 /// `haiku`, `fable`; or a full model id like `claude-opus-4-5`). `None` leaves the flag
 /// absent, deferring to the CLI's own default — today's behaviour is preserved.
 ///
-/// `permission_mode` is forwarded verbatim to `--permission-mode` on the CLI (valid values:
-/// `"default"`, `"acceptEdits"`, `"plan"`, `"bypassPermissions"`). `None` omits the flag,
-/// preserving today's behaviour (CLI default, which is `"default"`).
+/// `permission_mode` is forwarded to `--permission-mode` on the CLI after command-layer
+/// validation. Allowed values are `"default"`, `"acceptEdits"`, and `"plan"`. `None`
+/// omits the flag, preserving the CLI default.
 #[derive(Debug, Clone)]
 pub struct Prompt {
     pub text: String,
@@ -57,14 +57,22 @@ mod tests {
 
     #[test]
     fn prompt_holds_text() {
-        let p = Prompt { text: "do it".into(), model: None, permission_mode: None };
+        let p = Prompt {
+            text: "do it".into(),
+            model: None,
+            permission_mode: None,
+        };
         assert_eq!(p.text, "do it");
         assert!(p.model.is_none());
     }
 
     #[test]
     fn prompt_holds_model() {
-        let p = Prompt { text: "do it".into(), model: Some("opus".into()), permission_mode: None };
+        let p = Prompt {
+            text: "do it".into(),
+            model: Some("opus".into()),
+            permission_mode: None,
+        };
         assert_eq!(p.model.as_deref(), Some("opus"));
     }
 }

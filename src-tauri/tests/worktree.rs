@@ -13,7 +13,12 @@ fn init_repo(dir: &Path) {
 }
 
 fn run(dir: &Path, args: &[&str]) {
-    let status = Command::new("git").arg("-C").arg(dir).args(args).status().unwrap();
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .status()
+        .unwrap();
     assert!(status.success(), "git {:?} failed", args);
 }
 
@@ -39,8 +44,12 @@ fn create_makes_worktree_with_repo_content_and_branch() {
     assert!(wt.path.join("README.md").exists());
     assert_eq!(wt.branch, "agent/sess1");
 
-    let out = Command::new("git").arg("-C").arg(&wt.path)
-        .args(["rev-parse", "--abbrev-ref", "HEAD"]).output().unwrap();
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(&wt.path)
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .unwrap();
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "agent/sess1");
 
     std::fs::remove_dir_all(&root).ok();
@@ -60,14 +69,25 @@ fn remove_deletes_worktree_and_unregisters_it() {
     remove(&repo, &wt).unwrap();
 
     assert!(!wt.path.exists());
-    let list = Command::new("git").arg("-C").arg(&repo)
-        .args(["worktree", "list"]).output().unwrap();
+    let list = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["worktree", "list"])
+        .output()
+        .unwrap();
     let listed = String::from_utf8_lossy(&list.stdout);
-    assert!(!listed.contains("sess2"), "worktree still registered: {listed}");
+    assert!(
+        !listed.contains("sess2"),
+        "worktree still registered: {listed}"
+    );
 
     // The branch was deleted too (best-effort branch cleanup ran).
-    let branches = Command::new("git").arg("-C").arg(&repo)
-        .args(["branch", "--list", "agent/sess2"]).output().unwrap();
+    let branches = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["branch", "--list", "agent/sess2"])
+        .output()
+        .unwrap();
     assert!(
         String::from_utf8_lossy(&branches.stdout).trim().is_empty(),
         "branch agent/sess2 should be deleted after remove"

@@ -48,47 +48,11 @@ test("calls onOpenTerminal when the open-terminal button is clicked", () => {
   expect(onOpenTerminal).toHaveBeenCalledTimes(1);
 });
 
-// ── Inert stubs ───────────────────────────────────────────────────────────────
+// ── Unimplemented actions ─────────────────────────────────────────────────────
 
-test("renders the run stub with aria-disabled and tabIndex=-1 (skipped by keyboard Tab)", () => {
+test("does not expose placeholder actions as controls", () => {
   render(<TitleBar />);
-  const stub = screen.getByRole("button", { name: "Run (coming soon)" });
-  expect(stub).toHaveAttribute("aria-disabled", "true");
-  expect(stub).toHaveAttribute("tabindex", "-1");
-});
-
-test("renders the split stub with aria-disabled", () => {
-  render(<TitleBar />);
-  expect(screen.getByRole("button", { name: "Split (coming soon)" })).toHaveAttribute(
-    "aria-disabled",
-    "true"
-  );
-});
-
-test("renders the account stub with aria-disabled", () => {
-  render(<TitleBar />);
-  expect(screen.getByRole("button", { name: "Account (coming soon)" })).toHaveAttribute(
-    "aria-disabled",
-    "true"
-  );
-});
-
-test("clicking an inert stub does not invoke any handler", () => {
-  const onToggleSidebar = vi.fn();
-  const onOpenEditor = vi.fn();
-  const onOpenTerminal = vi.fn();
-  render(
-    <TitleBar
-      onToggleSidebar={onToggleSidebar}
-      onOpenEditor={onOpenEditor}
-      onOpenTerminal={onOpenTerminal}
-    />
-  );
-  fireEvent.click(screen.getByRole("button", { name: "Run (coming soon)" }));
-  fireEvent.click(screen.getByRole("button", { name: "Split (coming soon)" }));
-  fireEvent.click(screen.getByRole("button", { name: "Account (coming soon)" }));
-  // No provided callbacks should have fired
-  expect(onToggleSidebar).not.toHaveBeenCalled();
-  expect(onOpenEditor).not.toHaveBeenCalled();
-  expect(onOpenTerminal).not.toHaveBeenCalled();
+  expect(screen.queryByRole("button", { name: "Run (coming soon)" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Split (coming soon)" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Account (coming soon)" })).not.toBeInTheDocument();
 });

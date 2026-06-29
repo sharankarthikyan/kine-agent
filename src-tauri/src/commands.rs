@@ -1,17 +1,56 @@
 use crate::adapter::{AgentAdapter, EventSink, Prompt};
 use crate::adapters::claude::ClaudeAdapter;
 use crate::events::AgentEvent;
-use crate::inspect::{self, Capabilities, CustomizationCounts, HookEntry, McpServerEntry, PluginEntry, RuleFile};
 use crate::git::{self, BranchChanges, CommitResult, TreeEntry};
+use crate::inspect::{
+    self, Capabilities, CustomizationCounts, HookEntry, McpServerEntry, PluginEntry, RuleFile,
+};
 use crate::review::{self, Diffstat, SessionDiff};
 use crate::store::{self, SessionStore, SessionSummary, StoredEvent};
 use crate::worktree;
-use std::path::PathBuf;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tauri::ipc::Channel;
+use tauri::AppHandle;
 use tauri::State;
+use tauri_plugin_dialog::DialogExt;
 use tokio::sync::mpsc;
+
+#[derive(Default)]
+pub struct RunRegistry {
+    active: Mutex<HashSet<String>>,
+}
+
+struct RunGuard<'a> {
+    registry: &'a RunRegistry,
+    session_id: String,
+}
+
+impl RunRegistry {
+    fn acquire(&self, session_id: &str) -> Result<RunGuard<'_>, String> {
+        let mut active = self
+            .active
+            .lock()
+            .map_err(|_| "session lock registry is poisoned".to_string())?;
+        if !active.insert(session_id.to_string()) {
+            return Err("session is already running".to_string());
+        }
+        Ok(RunGuard {
+            registry: self,
+            session_id: session_id.to_string(),
+        })
+    }
+}
+
+impl Drop for RunGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut active) = self.registry.active.lock() {
+            active.remove(&self.session_id);
+        }
+    }
+}
 
 /// Sink that fans each event two ways: to the live UI Channel AND to an mpsc queue
 /// that a drain task persists to the store. Keeps the IPC path non-blocking — DB
@@ -52,7 +91,11 @@ async fn run_persisting(
 ) -> Result<(), String> {
     let (tx, mut rx) = mpsc::unbounded_channel::<AgentEvent>();
     let saw_error = Arc::new(AtomicBool::new(false));
-    let sink = Box::new(StoreSink { channel: on_event, tx, saw_error: Arc::clone(&saw_error) });
+    let sink = Box::new(StoreSink {
+        channel: on_event,
+        tx,
+        saw_error: Arc::clone(&saw_error),
+    });
 
     // Drain task: persist events as they arrive. Ends when the sink (and its tx)
     // is dropped at the end of `.run()`.
@@ -71,14 +114,22 @@ async fn run_persisting(
         .run(prompt, cwd, session_id.clone(), resume, sink)
         .await;
     let _ = drain.await; // flush all persisted events before stamping status
-    let status = if result.is_ok() && !saw_error.load(Ordering::Acquire) { "idle" } else { "error" };
+    let status = if result.is_ok() && !saw_error.load(Ordering::Acquire) {
+        "idle"
+    } else {
+        "error"
+    };
     let _ = store.set_status(&session_id, status).await;
     result.map_err(|e| e.to_string())
 }
 
 /// A session's display title: first non-empty line of the prompt, trimmed to 60 chars.
 fn title_from_prompt(prompt: &str) -> String {
-    let line = prompt.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
+    let line = prompt
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .trim();
     if line.chars().count() > 60 {
         let truncated: String = line.chars().take(59).collect(); // 59 chars + ellipsis = 60 displayed
         format!("{truncated}…")
@@ -102,6 +153,103 @@ fn worktrees_root() -> PathBuf {
     base.join(".agent-editor").join("worktrees")
 }
 
+/// Resolve which directory to inspect for customizations.
+///
+/// With an active session, that session's worktree (project + user scope merge).
+/// Without one (`None` / empty — e.g. the New Session screen), an app-owned empty
+/// directory: it contains no `.claude` config, so only the user's `~/.claude/`
+/// global-scope customizations surface. The directory is created so that
+/// `read_text_file` can still canonicalize a worktree root for its allowlist check.
+fn inspect_scope(root: &Path, session_id: Option<String>) -> Result<PathBuf, String> {
+    match session_id.filter(|s| !s.is_empty()) {
+        Some(id) => Ok(worktree::worktree_for(root, &id)
+            .map_err(|e| e.to_string())?
+            .path),
+        None => {
+            let dir = root.join(".global-scope");
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            Ok(dir)
+        }
+    }
+}
+
+fn validate_permission_mode(mode: Option<String>) -> Result<Option<String>, String> {
+    match mode.as_deref() {
+        None | Some("default") | Some("acceptEdits") | Some("plan") => Ok(mode),
+        Some("bypassPermissions") => {
+            Err("bypassPermissions is not allowed from the app UI".to_string())
+        }
+        Some(other) => Err(format!("unsupported permission mode: {other}")),
+    }
+}
+
+fn canonical_repo_path(repo: impl AsRef<Path>) -> Result<PathBuf, String> {
+    let path = std::fs::canonicalize(repo.as_ref())
+        .map_err(|_| "repository folder was not found".to_string())?;
+    if !path.is_dir() {
+        return Err("repository path is not a directory".to_string());
+    }
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&path)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .map_err(|e| format!("failed to inspect repository: {e}"))?;
+    if !output.status.success() {
+        return Err("selected folder is not a git repository".to_string());
+    }
+    let top = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if top.is_empty() {
+        return Err("git returned an empty repository path".to_string());
+    }
+    std::fs::canonicalize(top).map_err(|_| "repository root could not be resolved".to_string())
+}
+
+async fn ensure_trusted_repo(store: &SessionStore, repo_path: &Path) -> Result<String, String> {
+    let repo = repo_path.display().to_string();
+    let trusted = store
+        .is_trusted_repo(&repo)
+        .await
+        .map_err(|e| e.to_string())?;
+    if !trusted {
+        return Err(
+            "repository must be selected with the native folder picker before starting a session"
+                .to_string(),
+        );
+    }
+    Ok(repo)
+}
+
+/// Open the native folder picker from the privileged backend, canonicalize the selected
+/// git repository root, and persist it as trusted for future sessions.
+#[tauri::command]
+pub async fn pick_repository(
+    app: AppHandle,
+    store: State<'_, SessionStore>,
+) -> Result<Option<String>, String> {
+    let selected = tokio::task::spawn_blocking(move || app.dialog().file().blocking_pick_folder())
+        .await
+        .map_err(|e| e.to_string())?;
+    let Some(folder) = selected else {
+        return Ok(None);
+    };
+    let path = folder
+        .into_path()
+        .map_err(|e| format!("selected folder path is not local: {e}"))?;
+    let repo = canonical_repo_path(path)?;
+    let repo_string = repo.display().to_string();
+    store
+        .trust_repo(&repo_string)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(Some(repo_string))
+}
+
+#[tauri::command]
+pub async fn list_trusted_repos(store: State<'_, SessionStore>) -> Result<Vec<String>, String> {
+    store.trusted_repos().await.map_err(|e| e.to_string())
+}
+
 /// Start a session: create an isolated worktree off `repo` for `session_id`, persist
 /// the session + prompt, then run the Claude agent inside it (streaming + persisting
 /// events). The worktree is left in place for review; `cleanup_session` removes it.
@@ -120,14 +268,16 @@ pub async fn start_session(
     permission_mode: Option<String>,
     on_event: Channel<AgentEvent>,
     store: State<'_, SessionStore>,
+    runs: State<'_, RunRegistry>,
 ) -> Result<(), String> {
-    let repo_path = PathBuf::from(&repo);
-    if !repo_path.is_dir() {
-        return Err(format!("repo is not an existing directory: {repo}"));
-    }
+    let _guard = runs.acquire(&session_id)?;
+    let permission_mode = validate_permission_mode(permission_mode)?;
+    let repo_path = canonical_repo_path(&repo)?;
+    let repo = ensure_trusted_repo(&store, &repo_path).await?;
     let root = worktrees_root();
     let sid = session_id.clone();
-    let wt = tokio::task::spawn_blocking(move || worktree::create(&repo_path, &root, &sid))
+    let create_repo_path = repo_path.clone();
+    let wt = tokio::task::spawn_blocking(move || worktree::create(&create_repo_path, &root, &sid))
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())?;
@@ -143,15 +293,34 @@ pub async fn start_session(
             &title_from_prompt(&prompt),
         )
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            let _ = worktree::remove(&repo_path, &wt);
+            e.to_string()
+        })?;
     if let Err(e) = store
-        .append_event(&session_id, "prompt", &serde_json::json!({ "text": prompt }).to_string())
+        .append_event(
+            &session_id,
+            "prompt",
+            &serde_json::json!({ "text": prompt }).to_string(),
+        )
         .await
     {
         eprintln!("failed to persist prompt for session {session_id}: {e}");
     }
 
-    run_persisting(&store, session_id, Prompt { text: prompt, model, permission_mode }, wt.path, false, on_event).await
+    run_persisting(
+        &store,
+        session_id,
+        Prompt {
+            text: prompt,
+            model,
+            permission_mode,
+        },
+        wt.path,
+        false,
+        on_event,
+    )
+    .await
 }
 
 /// Continue an existing session with a follow-up message (resumes the agent in the
@@ -167,7 +336,10 @@ pub async fn send_message(
     permission_mode: Option<String>,
     on_event: Channel<AgentEvent>,
     store: State<'_, SessionStore>,
+    runs: State<'_, RunRegistry>,
 ) -> Result<(), String> {
+    let _guard = runs.acquire(&session_id)?;
+    let permission_mode = validate_permission_mode(permission_mode)?;
     let root = worktrees_root();
     let sid = session_id.clone();
     let wt_path = tokio::task::spawn_blocking(move || -> Result<PathBuf, String> {
@@ -183,22 +355,43 @@ pub async fn send_message(
 
     let _ = store.set_status(&session_id, "running").await;
     if let Err(e) = store
-        .append_event(&session_id, "prompt", &serde_json::json!({ "text": prompt }).to_string())
+        .append_event(
+            &session_id,
+            "prompt",
+            &serde_json::json!({ "text": prompt }).to_string(),
+        )
         .await
     {
         eprintln!("failed to persist prompt for session {session_id}: {e}");
     }
 
-    run_persisting(&store, session_id, Prompt { text: prompt, model, permission_mode }, wt_path, true, on_event).await
+    run_persisting(
+        &store,
+        session_id,
+        Prompt {
+            text: prompt,
+            model,
+            permission_mode,
+        },
+        wt_path,
+        true,
+        on_event,
+    )
+    .await
 }
 
 /// Remove the worktree (and branch) for a finished session.
 #[tauri::command]
-pub async fn cleanup_session(repo: String, session_id: String) -> Result<(), String> {
-    let repo_path = PathBuf::from(&repo);
-    if !repo_path.is_dir() {
-        return Err(format!("repo is not an existing directory: {repo}"));
-    }
+pub async fn cleanup_session(
+    session_id: String,
+    store: State<'_, SessionStore>,
+) -> Result<(), String> {
+    let repo = store
+        .session_repo(&session_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "session not found".to_string())?;
+    let repo_path = canonical_repo_path(repo)?;
     let root = worktrees_root();
     // Resolve+validate the session→worktree mapping, then remove off the async runtime.
     tokio::task::spawn_blocking(move || {
@@ -215,7 +408,9 @@ pub async fn cleanup_session(repo: String, session_id: String) -> Result<(), Str
 pub async fn review_session(session_id: String) -> Result<SessionDiff, String> {
     let root = worktrees_root();
     tokio::task::spawn_blocking(move || {
-        let wt = review::diff(&worktree_resolve(&root, &session_id)?)?;
+        let wt_path = worktree_resolve(&root, &session_id)?;
+        let base = git::default_base(&wt_path);
+        let wt = review::diff_from_base(&wt_path, &base)?;
         Ok::<SessionDiff, review::ReviewError>(wt)
     })
     .await
@@ -235,11 +430,17 @@ pub async fn session_events(
     session_id: String,
     store: State<'_, SessionStore>,
 ) -> Result<Vec<StoredEvent>, String> {
-    store.session_events(&session_id).await.map_err(|e| e.to_string())
+    store
+        .session_events(&session_id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Resolve a session's worktree path (validated), erroring via ReviewError.
-fn worktree_resolve(root: &std::path::Path, session_id: &str) -> Result<std::path::PathBuf, review::ReviewError> {
+fn worktree_resolve(
+    root: &std::path::Path,
+    session_id: &str,
+) -> Result<std::path::PathBuf, review::ReviewError> {
     Ok(crate::worktree::worktree_for(root, session_id)?.path)
 }
 
@@ -266,11 +467,11 @@ pub async fn list_models(agent: String) -> Result<Vec<crate::models::ModelInfo>,
 
 /// List candidate rule/config files for a session's worktree + global config dirs.
 #[tauri::command]
-pub async fn inspect_rules(session_id: String) -> Result<Vec<RuleFile>, String> {
+pub async fn inspect_rules(session_id: Option<String>) -> Result<Vec<RuleFile>, String> {
     let root = worktrees_root();
     tokio::task::spawn_blocking(move || {
-        let wt = crate::worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
-        Ok::<Vec<RuleFile>, String>(inspect::rule_candidates(&wt.path))
+        let path = inspect_scope(&root, session_id)?;
+        Ok::<Vec<RuleFile>, String>(inspect::rule_candidates(&path))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -278,11 +479,11 @@ pub async fn inspect_rules(session_id: String) -> Result<Vec<RuleFile>, String> 
 
 /// Read a rule/config file (validated to the session's worktree or known config dirs).
 #[tauri::command]
-pub async fn read_text_file(session_id: String, path: String) -> Result<String, String> {
+pub async fn read_text_file(session_id: Option<String>, path: String) -> Result<String, String> {
     let root = worktrees_root();
     tokio::task::spawn_blocking(move || {
-        let wt = crate::worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
-        inspect::read_text_file(&path, &wt.path).map_err(|e| e.to_string())
+        let scope = inspect_scope(&root, session_id)?;
+        inspect::read_text_file(&path, &scope).map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -302,7 +503,7 @@ pub async fn write_text_file(
     let root = worktrees_root();
     tokio::task::spawn_blocking(move || {
         let wt = crate::worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
-        inspect::write_text_file(&path, &content, &wt.path).map_err(|e| e.to_string())
+        inspect::write_project_text_file(&path, &content, &wt.path).map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -315,11 +516,14 @@ pub async fn write_text_file(
 /// `~/.claude/` home directory. Only `"claude"` is mapped today; all other agents return
 /// empty lists. Missing directories are silently ignored (best-effort discovery).
 #[tauri::command]
-pub async fn list_capabilities(session_id: String, agent: String) -> Result<Capabilities, String> {
+pub async fn list_capabilities(
+    session_id: Option<String>,
+    agent: String,
+) -> Result<Capabilities, String> {
     let root = worktrees_root();
     tokio::task::spawn_blocking(move || {
-        let wt = crate::worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
-        Ok::<Capabilities, String>(inspect::list_capabilities(&agent, &wt.path))
+        let path = inspect_scope(&root, session_id)?;
+        Ok::<Capabilities, String>(inspect::list_capabilities(&agent, &path))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -328,11 +532,13 @@ pub async fn list_capabilities(session_id: String, agent: String) -> Result<Capa
 /// Count agents/skills/instructions/hooks/MCP servers for a session's worktree
 /// and the user's ~/.claude home. Best-effort: missing files contribute 0.
 #[tauri::command]
-pub async fn customizations_counts(session_id: String) -> Result<CustomizationCounts, String> {
+pub async fn customizations_counts(
+    session_id: Option<String>,
+) -> Result<CustomizationCounts, String> {
     let root = worktrees_root();
     tokio::task::spawn_blocking(move || {
-        let wt = crate::worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
-        Ok::<CustomizationCounts, String>(inspect::customizations_counts(&wt.path))
+        let path = inspect_scope(&root, session_id)?;
+        Ok::<CustomizationCounts, String>(inspect::customizations_counts(&path))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -345,7 +551,8 @@ pub async fn session_diffstat(session_id: String) -> Result<Diffstat, String> {
     let root = worktrees_root();
     tokio::task::spawn_blocking(move || {
         let wt = crate::worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
-        Ok::<Diffstat, String>(review::diffstat(&wt.path))
+        let base = git::default_base(&wt.path);
+        Ok::<Diffstat, String>(review::diffstat_from_base(&wt.path, &base))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -429,11 +636,11 @@ pub async fn open_terminal(session_id: String) -> Result<(), String> {
 /// `~/.claude/settings.json` (user). Each leaf command in the hooks object becomes one
 /// entry. Best-effort: missing or unparseable files contribute an empty list.
 #[tauri::command]
-pub async fn list_hooks(session_id: String) -> Result<Vec<HookEntry>, String> {
+pub async fn list_hooks(session_id: Option<String>) -> Result<Vec<HookEntry>, String> {
     let root = worktrees_root();
     tokio::task::spawn_blocking(move || {
-        let wt = crate::worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
-        Ok::<Vec<HookEntry>, String>(inspect::list_hooks(&wt.path))
+        let path = inspect_scope(&root, session_id)?;
+        Ok::<Vec<HookEntry>, String>(inspect::list_hooks(&path))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -442,11 +649,11 @@ pub async fn list_hooks(session_id: String) -> Result<Vec<HookEntry>, String> {
 /// Return all MCP servers declared for a session's worktree (`.mcp.json`) and
 /// `~/.claude.json` (user). Best-effort: missing or unparseable files contribute nothing.
 #[tauri::command]
-pub async fn list_mcp_servers(session_id: String) -> Result<Vec<McpServerEntry>, String> {
+pub async fn list_mcp_servers(session_id: Option<String>) -> Result<Vec<McpServerEntry>, String> {
     let root = worktrees_root();
     tokio::task::spawn_blocking(move || {
-        let wt = crate::worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
-        Ok::<Vec<McpServerEntry>, String>(inspect::list_mcp_servers(&wt.path))
+        let path = inspect_scope(&root, session_id)?;
+        Ok::<Vec<McpServerEntry>, String>(inspect::list_mcp_servers(&path))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -455,11 +662,11 @@ pub async fn list_mcp_servers(session_id: String) -> Result<Vec<McpServerEntry>,
 /// Return installed Claude Code plugins from `~/.claude/plugins/installed_plugins.json`.
 /// Best-effort: returns an empty list when the file is missing or unparseable.
 #[tauri::command]
-pub async fn list_plugins(session_id: String) -> Result<Vec<PluginEntry>, String> {
+pub async fn list_plugins(session_id: Option<String>) -> Result<Vec<PluginEntry>, String> {
     let root = worktrees_root();
     tokio::task::spawn_blocking(move || {
-        let wt = crate::worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
-        Ok::<Vec<PluginEntry>, String>(inspect::list_plugins(&wt.path))
+        let path = inspect_scope(&root, session_id)?;
+        Ok::<Vec<PluginEntry>, String>(inspect::list_plugins(&path))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -469,10 +676,7 @@ pub async fn list_plugins(session_id: String) -> Result<Vec<PluginEntry>, String
 /// `message`. Returns the new HEAD sha. Errors when the message is blank, the tree is
 /// clean, or git fails for any reason. Never pushes, merges, or switches branches.
 #[tauri::command]
-pub async fn commit_session(
-    session_id: String,
-    message: String,
-) -> Result<CommitResult, String> {
+pub async fn commit_session(session_id: String, message: String) -> Result<CommitResult, String> {
     let root = worktrees_root();
     tokio::task::spawn_blocking(move || {
         let wt = crate::worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;

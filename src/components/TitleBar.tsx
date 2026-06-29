@@ -1,4 +1,4 @@
-import { Asterisk, CircleUser, PanelLeft, Play, SquareCode, SquareTerminal, SplitSquareHorizontal } from "lucide-react";
+import { Asterisk, PanelLeft, SquareCode, SquareTerminal } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ThemeToggle } from "./ThemeToggle";
 import { cn } from "@/lib/utils";
@@ -86,37 +86,6 @@ export function TitleBar({
             <SquareTerminal data-icon />
           </Button>
           <ThemeToggle />
-          {/* Inert placeholders — visual only, no handlers */}
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            aria-disabled="true"
-            tabIndex={-1}
-            aria-label="Run (coming soon)"
-            className="opacity-50"
-          >
-            <Play data-icon />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            aria-disabled="true"
-            tabIndex={-1}
-            aria-label="Split (coming soon)"
-            className="opacity-50"
-          >
-            <SplitSquareHorizontal data-icon />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            aria-disabled="true"
-            tabIndex={-1}
-            aria-label="Account (coming soon)"
-            className="opacity-50"
-          >
-            <CircleUser data-icon />
-          </Button>
         </span>
       </div>
     </div>

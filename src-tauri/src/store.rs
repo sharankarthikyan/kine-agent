@@ -1,6 +1,8 @@
 use crate::events::AgentEvent;
 use serde::Serialize;
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions, SqliteSynchronous};
+use sqlx::sqlite::{
+    SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions, SqliteSynchronous,
+};
 use sqlx::Row;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -9,6 +11,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub enum StoreError {
     #[error("db error: {0}")]
     Db(#[from] sqlx::Error),
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 /// One row of the session list (wire type for `list_sessions`).
@@ -47,7 +51,7 @@ impl SessionStore {
     /// Open (creating if needed) the database at `db_path` and run migrations.
     pub async fn connect(db_path: &Path) -> Result<Self, StoreError> {
         if let Some(parent) = db_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            ensure_private_dir(parent)?;
         }
         let opts = SqliteConnectOptions::new()
             .filename(db_path)
@@ -61,6 +65,7 @@ impl SessionStore {
             .await?;
         let store = Self { pool };
         store.migrate().await?;
+        harden_file_permissions(db_path)?;
         Ok(store)
     }
 
@@ -105,9 +110,19 @@ impl SessionStore {
         )
         .execute(&self.pool)
         .await?;
-        sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS idx_events_session ON events(session_id, seq)")
-            .execute(&self.pool)
-            .await?;
+        sqlx::query(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_events_session ON events(session_id, seq)",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS trusted_repos (
+                path TEXT PRIMARY KEY,
+                trusted_at INTEGER NOT NULL
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -158,22 +173,50 @@ impl SessionStore {
         kind: &str,
         payload_json: &str,
     ) -> Result<i64, StoreError> {
-        let seq: i64 =
-            sqlx::query_scalar::<_, i64>("SELECT COALESCE(MAX(seq), -1) + 1 FROM events WHERE session_id = ?")
-                .bind(session_id)
-                .fetch_one(&self.pool)
-                .await?;
-        sqlx::query(
-            "INSERT INTO events (session_id, seq, kind, payload_json, ts) VALUES (?, ?, ?, ?, ?)",
+        let seq = sqlx::query_scalar::<_, i64>(
+            "INSERT INTO events (session_id, seq, kind, payload_json, ts)
+             SELECT ?, COALESCE(MAX(seq), -1) + 1, ?, ?, ?
+             FROM events WHERE session_id = ?
+             RETURNING seq",
         )
         .bind(session_id)
-        .bind(seq)
         .bind(kind)
         .bind(payload_json)
         .bind(now_ms())
-        .execute(&self.pool)
+        .bind(session_id)
+        .fetch_one(&self.pool)
         .await?;
         Ok(seq)
+    }
+
+    /// Persist a repository path that was selected through the native backend dialog.
+    pub async fn trust_repo(&self, path: &str) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO trusted_repos (path, trusted_at)
+             VALUES (?, ?)
+             ON CONFLICT(path) DO UPDATE SET trusted_at = excluded.trusted_at",
+        )
+        .bind(path)
+        .bind(now_ms())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// True only for repository paths previously selected through the native dialog.
+    pub async fn is_trusted_repo(&self, path: &str) -> Result<bool, StoreError> {
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM trusted_repos WHERE path = ?")
+            .bind(path)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(count > 0)
+    }
+
+    pub async fn trusted_repos(&self) -> Result<Vec<String>, StoreError> {
+        let rows = sqlx::query("SELECT path FROM trusted_repos ORDER BY trusted_at DESC LIMIT 8")
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows.iter().map(|r| r.get("path")).collect())
     }
 
     /// All sessions, most-recently-updated first.
@@ -218,6 +261,14 @@ impl SessionStore {
             })
             .collect())
     }
+
+    pub async fn session_repo(&self, session_id: &str) -> Result<Option<String>, StoreError> {
+        let repo = sqlx::query_scalar::<_, String>("SELECT repo FROM sessions WHERE id = ?")
+            .bind(session_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(repo)
+    }
 }
 
 /// Default on-disk DB location: `$HOME/.agent-editor/agent-editor.db` (mirrors the
@@ -232,14 +283,18 @@ pub fn default_db_path() -> PathBuf {
 /// Split an AgentEvent into its persisted (kind, payload_json) — payload is the `data`
 /// sub-object so it round-trips back into `{ kind, data }` on the frontend.
 pub fn split_event(event: &AgentEvent) -> (String, String) {
-    let value = serde_json::to_value(event)
-        .unwrap_or_else(|_| serde_json::json!({ "kind": "error", "data": { "message": "serialize failed" } }));
+    let value = serde_json::to_value(event).unwrap_or_else(
+        |_| serde_json::json!({ "kind": "error", "data": { "message": "serialize failed" } }),
+    );
     let kind = value
         .get("kind")
         .and_then(|k| k.as_str())
         .unwrap_or("error")
         .to_string();
-    let payload = value.get("data").cloned().unwrap_or_else(|| serde_json::json!({}));
+    let payload = value
+        .get("data")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
     (kind, payload.to_string())
 }
 
@@ -248,6 +303,33 @@ fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+fn ensure_private_dir(path: &Path) -> Result<(), std::io::Error> {
+    std::fs::create_dir_all(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+fn harden_file_permissions(path: &Path) -> Result<(), std::io::Error> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if path.exists() {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        for suffix in ["-wal", "-shm"] {
+            let sidecar = PathBuf::from(format!("{}{}", path.display(), suffix));
+            if sidecar.exists() {
+                std::fs::set_permissions(sidecar, std::fs::Permissions::from_mode(0o600))?;
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -265,7 +347,14 @@ mod tests {
     async fn create_then_list_returns_the_session() {
         let store = SessionStore::connect_in_memory().await.unwrap();
         store
-            .create_session("s1", "claude", "/repo", "/wt/s1", "agent/s1", "do the thing")
+            .create_session(
+                "s1",
+                "claude",
+                "/repo",
+                "/wt/s1",
+                "agent/s1",
+                "do the thing",
+            )
             .await
             .unwrap();
         let sessions = store.list_sessions().await.unwrap();
@@ -283,11 +372,23 @@ mod tests {
             .create_session("s1", "claude", "/repo", "/wt/s1", "agent/s1", "t")
             .await
             .unwrap();
-        store.append_event("s1", "prompt", r#"{"text":"hello"}"#).await.unwrap();
-        store.append_event("s1", "token", r#"{"text":"hi there"}"#).await.unwrap();
-        store.append_event("s1", "done", r#"{"summary":"ok"}"#).await.unwrap();
+        store
+            .append_event("s1", "prompt", r#"{"text":"hello"}"#)
+            .await
+            .unwrap();
+        store
+            .append_event("s1", "token", r#"{"text":"hi there"}"#)
+            .await
+            .unwrap();
+        store
+            .append_event("s1", "done", r#"{"summary":"ok"}"#)
+            .await
+            .unwrap();
         let events = store.session_events("s1").await.unwrap();
-        assert_eq!(events.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![0, 1, 2]);
+        assert_eq!(
+            events.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
         assert_eq!(events[0].kind, "prompt");
         assert_eq!(events[2].kind, "done");
     }
@@ -295,8 +396,14 @@ mod tests {
     #[tokio::test]
     async fn set_status_updates_and_orders_by_updated_at() {
         let store = SessionStore::connect_in_memory().await.unwrap();
-        store.create_session("a", "claude", "/r", "/wt/a", "agent/a", "first").await.unwrap();
-        store.create_session("b", "claude", "/r", "/wt/b", "agent/b", "second").await.unwrap();
+        store
+            .create_session("a", "claude", "/r", "/wt/a", "agent/a", "first")
+            .await
+            .unwrap();
+        store
+            .create_session("b", "claude", "/r", "/wt/b", "agent/b", "second")
+            .await
+            .unwrap();
         store.set_status("a", "idle").await.unwrap(); // bumps a's updated_at to newest
         let sessions = store.list_sessions().await.unwrap();
         assert_eq!(sessions[0].id, "a");
@@ -306,9 +413,18 @@ mod tests {
     #[tokio::test]
     async fn events_are_scoped_per_session() {
         let store = SessionStore::connect_in_memory().await.unwrap();
-        store.create_session("a", "claude", "/r", "/wt/a", "agent/a", "t").await.unwrap();
-        store.create_session("b", "claude", "/r", "/wt/b", "agent/b", "t").await.unwrap();
-        store.append_event("a", "token", r#"{"text":"x"}"#).await.unwrap();
+        store
+            .create_session("a", "claude", "/r", "/wt/a", "agent/a", "t")
+            .await
+            .unwrap();
+        store
+            .create_session("b", "claude", "/r", "/wt/b", "agent/b", "t")
+            .await
+            .unwrap();
+        store
+            .append_event("a", "token", r#"{"text":"x"}"#)
+            .await
+            .unwrap();
         assert_eq!(store.session_events("a").await.unwrap().len(), 1);
         assert!(store.session_events("b").await.unwrap().is_empty());
     }
@@ -319,7 +435,10 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         let db = dir.join("t.db");
         let store = SessionStore::connect(&db).await.unwrap();
-        let mode: String = sqlx::query_scalar("PRAGMA journal_mode").fetch_one(&store.pool).await.unwrap();
+        let mode: String = sqlx::query_scalar("PRAGMA journal_mode")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
         assert_eq!(mode.to_lowercase(), "wal");
         let _ = std::fs::remove_dir_all(&dir);
     }

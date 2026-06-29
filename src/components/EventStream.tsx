@@ -1,10 +1,11 @@
-import { Fragment, type KeyboardEvent } from "react";
+import { Fragment } from "react";
 import type { AgentEvent } from "../lib/agent";
 import { EmptyState } from "./EmptyState";
 import { Markdown } from "./Markdown";
-import { Badge } from "@/components/ui/badge";
+import { Badge, badgeVariants } from "@/components/ui/badge";
 import { Alert, AlertTitle, AlertDescription } from "@/components/ui/alert";
 import { Wrench, Pencil } from "lucide-react";
+import { cn } from "@/lib/utils";
 
 interface EventStreamProps {
   events: AgentEvent[];
@@ -84,27 +85,9 @@ function renderEvent(
       const summary = describeToolCall(event.data.name, event.data.input);
       const filePath = fileTargetPath(event.data.name, event.data.input);
       const clickable = filePath !== null && onOpenFile !== undefined;
-      return (
-        <Badge
-          variant="secondary"
-          className={`gap-1.5 max-w-full overflow-hidden font-normal ${
-            clickable ? "cursor-pointer hover:bg-secondary/70" : ""
-          }`}
-          title={event.data.input}
-          {...(clickable
-            ? {
-                role: "button",
-                tabIndex: 0,
-                onClick: () => onOpenFile!(filePath!),
-                onKeyDown: (e: KeyboardEvent) => {
-                  if (e.key === "Enter" || e.key === " ") {
-                    e.preventDefault();
-                    onOpenFile!(filePath!);
-                  }
-                },
-              }
-            : {})}
-        >
+      const className = "gap-1.5 max-w-full overflow-hidden font-normal";
+      const content = (
+        <>
           <Wrench aria-hidden="true" className="size-3 shrink-0" />
           <span className="truncate">
             <span className="font-medium">{event.data.name}</span>
@@ -112,34 +95,44 @@ function renderEvent(
               <span className="text-muted-foreground font-mono"> · {summary}</span>
             )}
           </span>
+        </>
+      );
+      return clickable ? (
+        <button
+          type="button"
+          className={cn(badgeVariants({ variant: "secondary" }), className, "cursor-pointer hover:bg-secondary/70")}
+          title={event.data.input}
+          onClick={() => onOpenFile!(filePath!)}
+        >
+          {content}
+        </button>
+      ) : (
+        <Badge variant="secondary" className={className} title={event.data.input}>
+          {content}
         </Badge>
       );
     }
 
     case "fileWrite": {
       const clickable = onOpenFile !== undefined && event.data.path !== "";
-      return (
-        <Badge
-          variant="secondary"
-          className={`gap-1 max-w-full overflow-hidden font-mono font-normal ${
-            clickable ? "cursor-pointer hover:bg-secondary/70" : ""
-          }`}
-          {...(clickable
-            ? {
-                role: "button",
-                tabIndex: 0,
-                onClick: () => onOpenFile!(event.data.path),
-                onKeyDown: (e: KeyboardEvent) => {
-                  if (e.key === "Enter" || e.key === " ") {
-                    e.preventDefault();
-                    onOpenFile!(event.data.path);
-                  }
-                },
-              }
-            : {})}
-        >
+      const className = "gap-1 max-w-full overflow-hidden font-mono font-normal";
+      const content = (
+        <>
           <Pencil aria-hidden="true" className="size-3 shrink-0" />
           <span className="truncate">{event.data.path}</span>
+        </>
+      );
+      return clickable ? (
+        <button
+          type="button"
+          className={cn(badgeVariants({ variant: "secondary" }), className, "cursor-pointer hover:bg-secondary/70")}
+          onClick={() => onOpenFile!(event.data.path)}
+        >
+          {content}
+        </button>
+      ) : (
+        <Badge variant="secondary" className={className}>
+          {content}
         </Badge>
       );
     }

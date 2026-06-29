@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import {
   ArrowLeft,
   Bot,
@@ -11,10 +11,7 @@ import {
   Webhook,
   Zap,
 } from "lucide-react";
-import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
-import { oneDark, oneLight } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { toast } from "sonner";
-import { useTheme } from "@/components/theme-provider";
 
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
@@ -47,7 +44,8 @@ export interface CustomizationsDialogProps {
   counts: CustomizationCounts | null;
   capabilities: Capabilities | null;
   rules: RuleFile[];
-  sessionId: string;
+  /** Active session worktree, or `null` to browse the user's global ~/.claude scope. */
+  sessionId: string | null;
   hooks: HookEntry[];
   mcpServers: McpServerEntry[];
   plugins: PluginEntry[];
@@ -129,7 +127,7 @@ function NavRow({ item, active, count, onClick }: NavRowProps) {
       type="button"
       aria-current={active ? "page" : undefined}
       className={cn(
-        "flex items-center gap-2.5 w-full px-3 py-1.5 rounded-md text-sm text-left transition-colors",
+	        "flex items-center gap-2.5 w-full px-3 py-1.5 rounded-md text-sm text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
         "hover:bg-muted/50",
         active
           ? "bg-muted text-foreground font-medium"
@@ -157,59 +155,17 @@ function shortenPath(path: string): string {
   return path.replace(/^\/(?:Users|home)\/[^/]+\//, "~/");
 }
 
-// Maps file extension to a Prism language id. Defaults to "markdown" because
-// the majority of agent/skill files are .md. Falls back gracefully — Prism
-// renders unsupported languages as plain text.
-function detectLanguage(path: string): string {
-  const ext = path.split(".").pop()?.toLowerCase() ?? "";
-  switch (ext) {
-    case "md":
-    case "markdown":
-      return "markdown";
-    case "ts":
-    case "tsx":
-      return "tsx";
-    case "js":
-    case "jsx":
-    case "mjs":
-      return "jsx";
-    case "json":
-      return "json";
-    case "toml":
-      return "toml";
-    case "yaml":
-    case "yml":
-      return "yaml";
-    case "py":
-      return "python";
-    case "rs":
-      return "rust";
-    case "sh":
-    case "bash":
-      return "bash";
-    case "css":
-      return "css";
-    case "html":
-      return "markup";
-    default:
-      return "markdown";
-  }
-}
-
 interface FileDetailViewProps {
-  detail: { name: string; path: string };
+  detail: { name: string; path: string; editable: boolean };
   loading: boolean;
   error: boolean;
   content: string | null;
-  sessionId: string;
+  sessionId: string | null;
   onBack: () => void;
   onSaved: (newContent: string) => void;
 }
 
 function FileDetailView({ detail, loading, error, content, sessionId, onBack, onSaved }: FileDetailViewProps) {
-  const { theme } = useTheme();
-  const codeStyle = theme === "dark" ? oneDark : oneLight;
-
   const [isEditing, setIsEditing] = useState(false);
   const [editedContent, setEditedContent] = useState("");
   const [saving, setSaving] = useState(false);
@@ -232,6 +188,7 @@ function FileDetailView({ detail, loading, error, content, sessionId, onBack, on
   }
 
   async function handleSave() {
+    if (!sessionId) return; // global/user scope is read-only via IPC
     setSaving(true);
     try {
       await writeTextFile(sessionId, detail.path, editedContent);
@@ -246,7 +203,9 @@ function FileDetailView({ detail, loading, error, content, sessionId, onBack, on
     }
   }
 
-  const canEdit = !loading && !error && content !== null;
+  // Only project-scope files inside the active worktree are writable via IPC; user/global
+  // (~/.claude) files are read-only by design, so the editor controls are hidden for them.
+  const canEdit = !loading && !error && content !== null && detail.editable && sessionId !== null;
 
   return (
     <div className="flex flex-col h-full min-h-0">
@@ -302,6 +261,9 @@ function FileDetailView({ detail, loading, error, content, sessionId, onBack, on
             </Button>
           )
         )}
+        {!loading && !error && content !== null && !detail.editable && (
+          <span className="shrink-0 mt-1 text-xs text-muted-foreground">Read-only</span>
+        )}
       </div>
       {/* Body: edit textarea or syntax-highlighted read view */}
       {isEditing ? (
@@ -321,38 +283,26 @@ function FileDetailView({ detail, loading, error, content, sessionId, onBack, on
             {!loading && error && (
               <p className="text-sm text-muted-foreground">Couldn't read this file</p>
             )}
-            {!loading && !error && content !== null && (
-              <SyntaxHighlighter
-                language={detectLanguage(detail.path)}
-                style={codeStyle}
-                showLineNumbers
-                wrapLongLines
-                customStyle={{
-                  background: "transparent",
-                  margin: 0,
-                  padding: 0,
-                  fontSize: "0.75rem",
-                  whiteSpace: "pre-wrap",
-                  wordBreak: "break-word",
-                  overflowWrap: "anywhere",
-                }}
-                codeTagProps={{
-                  style: { whiteSpace: "pre-wrap", wordBreak: "break-word" },
-                }}
-                lineNumberStyle={{
-                  color: "var(--muted-foreground)",
-                  opacity: 0.5,
-                  userSelect: "none",
-                  minWidth: "2.5em",
-                }}
-              >
-                {content}
-              </SyntaxHighlighter>
-            )}
+            {!loading && !error && content !== null && <CodePreview content={content} />}
           </div>
         </ScrollArea>
       )}
     </div>
+  );
+}
+
+function CodePreview({ content }: { content: string }) {
+  return (
+    <pre className="m-0 grid grid-cols-[auto_1fr] gap-x-3 font-mono text-xs leading-5 text-foreground">
+      {content.split("\n").map((line, index) => (
+        <Fragment key={index}>
+          <span className="select-none text-right tabular-nums text-muted-foreground/60">
+            {index + 1}
+          </span>
+          <code className="whitespace-pre-wrap break-words">{line || " "}</code>
+        </Fragment>
+      ))}
+    </pre>
   );
 }
 
@@ -488,7 +438,7 @@ function AgentsSection({
   capabilities: Capabilities | null;
   search: string;
   onSearchChange: (s: string) => void;
-  onOpenDetail: (name: string, path: string) => void;
+  onOpenDetail: (name: string, path: string, editable: boolean) => void;
 }) {
   const subagents = capabilities?.subagents ?? [];
   const filtered = search
@@ -518,7 +468,7 @@ function AgentsSection({
               capability={agent}
               onOpen={
                 agent.path
-                  ? () => void onOpenDetail(agent.name, agent.path)
+                  ? () => void onOpenDetail(agent.name, agent.path, agent.source === "project")
                   : undefined
               }
             />
@@ -540,7 +490,7 @@ function SkillsSection({
   capabilities: Capabilities | null;
   search: string;
   onSearchChange: (s: string) => void;
-  onOpenDetail: (name: string, path: string) => void;
+  onOpenDetail: (name: string, path: string, editable: boolean) => void;
 }) {
   const skills = capabilities?.skills ?? [];
   const filtered = search
@@ -570,7 +520,7 @@ function SkillsSection({
               capability={skill}
               onOpen={
                 skill.path
-                  ? () => void onOpenDetail(skill.name, skill.path)
+                  ? () => void onOpenDetail(skill.name, skill.path, skill.source === "project")
                   : undefined
               }
             />
@@ -592,7 +542,7 @@ function InstructionsSection({
   rules: RuleFile[];
   search: string;
   onSearchChange: (s: string) => void;
-  onOpenDetail: (name: string, path: string) => void;
+  onOpenDetail: (name: string, path: string, editable: boolean) => void;
 }) {
   const existing = rules.filter((r) => r.exists);
   const filtered = search
@@ -617,7 +567,7 @@ function InstructionsSection({
               key={rule.path}
               type="button"
               className="flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-muted/50 text-left w-full min-w-0"
-              onClick={() => onOpenDetail(rule.label, rule.path)}
+              onClick={() => onOpenDetail(rule.label, rule.path, rule.scope === "project")}
             >
               <FileCode className="size-3.5 text-muted-foreground shrink-0" />
               <span className="flex-1 min-w-0 truncate text-sm">{rule.label}</span>
@@ -857,7 +807,7 @@ export function CustomizationsDialog({
   const [search, setSearch] = useState("");
 
   // In-dialog file detail view state.
-  const [detail, setDetail] = useState<{ name: string; path: string } | null>(null);
+  const [detail, setDetail] = useState<{ name: string; path: string; editable: boolean } | null>(null);
   const [fileContent, setFileContent] = useState<string | null>(null);
   const [fileLoading, setFileLoading] = useState(false);
   const [fileError, setFileError] = useState(false);
@@ -883,8 +833,8 @@ export function CustomizationsDialog({
   };
 
   // Open a file in the in-dialog viewer.
-  async function handleOpenDetail(name: string, path: string) {
-    setDetail({ name, path });
+  async function handleOpenDetail(name: string, path: string, editable: boolean) {
+    setDetail({ name, path, editable });
     setFileContent(null);
     setFileError(false);
     setFileLoading(true);
@@ -960,7 +910,7 @@ export function CustomizationsDialog({
                     capabilities={capabilities}
                     search={search}
                     onSearchChange={setSearch}
-                    onOpenDetail={(name, path) => void handleOpenDetail(name, path)}
+                    onOpenDetail={(name, path, editable) => void handleOpenDetail(name, path, editable)}
                   />
                 )}
                 {activeSection === "skills" && (
@@ -968,7 +918,7 @@ export function CustomizationsDialog({
                     capabilities={capabilities}
                     search={search}
                     onSearchChange={setSearch}
-                    onOpenDetail={(name, path) => void handleOpenDetail(name, path)}
+                    onOpenDetail={(name, path, editable) => void handleOpenDetail(name, path, editable)}
                   />
                 )}
                 {activeSection === "instructions" && (
@@ -976,7 +926,7 @@ export function CustomizationsDialog({
                     rules={rules}
                     search={search}
                     onSearchChange={setSearch}
-                    onOpenDetail={(name, path) => void handleOpenDetail(name, path)}
+                    onOpenDetail={(name, path, editable) => void handleOpenDetail(name, path, editable)}
                   />
                 )}
                 {activeSection === "hooks" && (

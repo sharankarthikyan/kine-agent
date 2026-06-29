@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { startSession, cleanupSession, sendMessage, type AgentEvent } from "../agent";
+import { startSession, cleanupSession, listTrustedRepos, pickRepository, sendMessage, type AgentEvent } from "../agent";
 
 describe("desktop guard", () => {
   const internals = (globalThis as Record<string, unknown>).__TAURI_INTERNALS__;
@@ -53,12 +53,12 @@ describe("startSession", () => {
     );
   });
 
-  it("forwards permissionMode when provided", async () => {
+  it("forwards allowed permissionMode when provided", async () => {
     const { invoke } = await import("@tauri-apps/api/core");
-    await startSession({ prompt: "hi", repo: "/work/proj", sessionId: "sess-1", permissionMode: "bypassPermissions", onEvent: () => {} });
+    await startSession({ prompt: "hi", repo: "/work/proj", sessionId: "sess-1", permissionMode: "acceptEdits", onEvent: () => {} });
     expect(invoke).toHaveBeenCalledWith(
       "start_session",
-      expect.objectContaining({ permissionMode: "bypassPermissions" }),
+      expect.objectContaining({ permissionMode: "acceptEdits" }),
     );
   });
 
@@ -92,10 +92,28 @@ describe("cleanupSession", () => {
     vi.clearAllMocks();
   });
 
-  it("invokes cleanup_session with repo and sessionId", async () => {
+  it("invokes cleanup_session with sessionId only", async () => {
     const { invoke } = await import("@tauri-apps/api/core");
-    await cleanupSession({ repo: "/work/proj", sessionId: "sess-7" });
-    expect(invoke).toHaveBeenCalledWith("cleanup_session", { repo: "/work/proj", sessionId: "sess-7" });
+    await cleanupSession("sess-7");
+    expect(invoke).toHaveBeenCalledWith("cleanup_session", { sessionId: "sess-7" });
+  });
+});
+
+describe("repositories", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("invokes the backend-owned repository picker", async () => {
+    const { invoke } = await import("@tauri-apps/api/core");
+    vi.mocked(invoke).mockResolvedValueOnce("/work/proj");
+    await expect(pickRepository()).resolves.toBe("/work/proj");
+    expect(invoke).toHaveBeenCalledWith("pick_repository");
+  });
+
+  it("lists backend-trusted repositories", async () => {
+    const { invoke } = await import("@tauri-apps/api/core");
+    vi.mocked(invoke).mockResolvedValueOnce(["/work/proj"]);
+    await expect(listTrustedRepos()).resolves.toEqual(["/work/proj"]);
+    expect(invoke).toHaveBeenCalledWith("list_trusted_repos");
   });
 });
 

@@ -109,7 +109,12 @@ fn allowed_read_write_paths(worktree: &Path, canonical_worktree: &Path) -> Vec<P
         }
     }
     let caps = list_capabilities("claude", worktree);
-    for cap in caps.skills.into_iter().chain(caps.subagents).chain(caps.commands) {
+    for cap in caps
+        .skills
+        .into_iter()
+        .chain(caps.subagents)
+        .chain(caps.commands)
+    {
         if cap.path.is_empty() {
             continue;
         }
@@ -172,19 +177,46 @@ pub fn write_text_file(path: &str, content: &str, worktree: &Path) -> Result<(),
     Ok(())
 }
 
+/// Write only project-local customization files. Global agent configuration and
+/// user-level capabilities are intentionally read-only from IPC because a compromised
+/// renderer could otherwise persist behavior changes outside the current repository.
+pub fn write_project_text_file(
+    path: &str,
+    content: &str,
+    worktree: &Path,
+) -> Result<(), InspectError> {
+    let target = std::fs::canonicalize(path)?;
+    let canonical_worktree = std::fs::canonicalize(worktree)?;
+    let allowed = allowed_read_write_paths(worktree, &canonical_worktree);
+    if !target.starts_with(&canonical_worktree) || !allowed.contains(&target) {
+        return Err(InspectError::Forbidden(path.to_string()));
+    }
+    if content.len() > 1024 * 1024 {
+        return Err(InspectError::ContentTooLarge);
+    }
+    std::fs::write(&target, content)?;
+    Ok(())
+}
+
 /// Returns true when `path` (already canonicalized by the caller) is one of the
 /// exact global config files the app is permitted to read. The expected paths are
 /// also canonicalized so that a `~/.claude` directory that is itself a symlink
 /// does not produce a false-negative.
 fn is_expected_global(path: &Path) -> bool {
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else { return false };
-    [".claude/CLAUDE.md", ".codex/config.toml", ".gemini/GEMINI.md"]
-        .iter()
-        .any(|rel| {
-            std::fs::canonicalize(home.join(rel))
-                .map(|c| c == path)
-                .unwrap_or(false)
-        })
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return false;
+    };
+    [
+        ".claude/CLAUDE.md",
+        ".codex/config.toml",
+        ".gemini/GEMINI.md",
+    ]
+    .iter()
+    .any(|rel| {
+        std::fs::canonicalize(home.join(rel))
+            .map(|c| c == path)
+            .unwrap_or(false)
+    })
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -217,7 +249,11 @@ pub struct Capabilities {
 /// Only Claude is mapped today; others return empty (their adapters land later).
 pub fn list_capabilities(agent: &str, worktree: &Path) -> Capabilities {
     if agent != "claude" {
-        return Capabilities { skills: vec![], subagents: vec![], commands: vec![] };
+        return Capabilities {
+            skills: vec![],
+            subagents: vec![],
+            commands: vec![],
+        };
     }
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let mut subagents = Vec::new();
@@ -241,19 +277,27 @@ pub fn list_capabilities(agent: &str, worktree: &Path) -> Capabilities {
     skills.sort_by(|a, b| a.name.cmp(&b.name));
     commands.sort_by(|a, b| a.name.cmp(&b.name));
 
-    Capabilities { skills, subagents, commands }
+    Capabilities {
+        skills,
+        subagents,
+        commands,
+    }
 }
 
 /// Push one `Capability` per `*.md` file found in `dir`.
 /// Name = file stem; description is extracted best-effort; path is the absolute file path.
 fn collect_md(dir: &Path, source: &str, out: &mut Vec<Capability>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("md") {
             continue;
         }
-        let Some(name) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+        let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
         out.push(Capability {
             name: name.to_string(),
             description: first_description(&path),
@@ -266,13 +310,19 @@ fn collect_md(dir: &Path, source: &str, out: &mut Vec<Capability>) {
 /// Push one `Capability` per subdirectory of `dir` that contains a `SKILL.md`.
 /// The `path` field is set to the absolute path of the `SKILL.md` file.
 fn collect_skill_dirs(dir: &Path, source: &str, out: &mut Vec<Capability>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let skill_md = entry.path().join("SKILL.md");
         if !skill_md.is_file() {
             continue;
         }
-        let Some(name) = entry.path().file_name().and_then(|s| s.to_str()).map(String::from)
+        let Some(name) = entry
+            .path()
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(String::from)
         else {
             continue;
         };
@@ -394,7 +444,11 @@ pub fn list_hooks(worktree: &Path) -> Vec<HookEntry> {
 
 fn list_hooks_with_home(worktree: &Path, home: Option<&Path>) -> Vec<HookEntry> {
     let mut entries = Vec::new();
-    parse_hooks_from_settings(&worktree.join(".claude/settings.json"), "project", &mut entries);
+    parse_hooks_from_settings(
+        &worktree.join(".claude/settings.json"),
+        "project",
+        &mut entries,
+    );
     if let Some(h) = home {
         parse_hooks_from_settings(&h.join(".claude/settings.json"), "user", &mut entries);
     }
@@ -405,12 +459,20 @@ fn list_hooks_with_home(worktree: &Path, home: Option<&Path>) -> Vec<HookEntry> 
 /// `HookEntry` per leaf command to `out`. The expected shape is:
 /// `{ "hooks": { "<EventName>": [ { "matcher?": "...", "hooks": [ { "type": "command", "command": "..." } ] } ] } }`
 fn parse_hooks_from_settings(path: &Path, source: &str, out: &mut Vec<HookEntry>) {
-    let Ok(content) = std::fs::read_to_string(path) else { return };
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else { return };
-    let Some(hooks_obj) = json.get("hooks").and_then(|v| v.as_object()) else { return };
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return;
+    };
+    let Some(hooks_obj) = json.get("hooks").and_then(|v| v.as_object()) else {
+        return;
+    };
 
     for (event_name, groups_val) in hooks_obj {
-        let Some(groups) = groups_val.as_array() else { continue };
+        let Some(groups) = groups_val.as_array() else {
+            continue;
+        };
         for group in groups {
             let matcher = group
                 .get("matcher")
@@ -459,9 +521,15 @@ fn list_mcp_servers_with_home(worktree: &Path, home: Option<&Path>) -> Vec<McpSe
 }
 
 fn parse_mcp_from_file(path: &Path, source: &str, out: &mut Vec<McpServerEntry>) {
-    let Ok(content) = std::fs::read_to_string(path) else { return };
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else { return };
-    let Some(servers) = json.get("mcpServers").and_then(|v| v.as_object()) else { return };
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return;
+    };
+    let Some(servers) = json.get("mcpServers").and_then(|v| v.as_object()) else {
+        return;
+    };
 
     for (name, config) in servers {
         // Pick the most informative single-line descriptor available.
@@ -470,7 +538,12 @@ fn parse_mcp_from_file(path: &Path, source: &str, out: &mut Vec<McpServerEntry>)
             .and_then(|v| v.as_str())
             .map(String::from)
             .or_else(|| config.get("url").and_then(|v| v.as_str()).map(String::from))
-            .or_else(|| config.get("type").and_then(|v| v.as_str()).map(String::from));
+            .or_else(|| {
+                config
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+            });
         out.push(McpServerEntry {
             name: name.clone(),
             detail,
@@ -491,8 +564,12 @@ pub fn list_plugins(worktree: &Path) -> Vec<PluginEntry> {
 fn list_plugins_with_home(home: Option<&Path>) -> Vec<PluginEntry> {
     let Some(h) = home else { return Vec::new() };
     let path = h.join(".claude/plugins/installed_plugins.json");
-    let Ok(content) = std::fs::read_to_string(&path) else { return Vec::new() };
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else { return Vec::new() };
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return Vec::new();
+    };
     let Some(plugins) = json.get("plugins").and_then(|v| v.as_object()) else {
         return Vec::new();
     };
@@ -501,7 +578,10 @@ fn list_plugins_with_home(home: Option<&Path>) -> Vec<PluginEntry> {
     for (key, records_val) in plugins {
         // Key format: "pluginName@marketplace" (e.g. "frontend-design@claude-plugins-official").
         let (name, marketplace) = if let Some(at_pos) = key.find('@') {
-            (key[..at_pos].to_string(), Some(key[at_pos + 1..].to_string()))
+            (
+                key[..at_pos].to_string(),
+                Some(key[at_pos + 1..].to_string()),
+            )
         } else {
             (key.clone(), None)
         };
@@ -555,7 +635,10 @@ pub fn customizations_counts(worktree: &Path) -> CustomizationCounts {
 /// inject a fake empty directory without mutating the global environment.
 fn customizations_counts_with_home(worktree: &Path, home: Option<&Path>) -> CustomizationCounts {
     let caps = list_capabilities("claude", worktree);
-    let instructions = rule_candidates(worktree).into_iter().filter(|r| r.exists).count() as u32;
+    let instructions = rule_candidates(worktree)
+        .into_iter()
+        .filter(|r| r.exists)
+        .count() as u32;
     let hooks = count_hooks(worktree, home);
     let mcp_servers = count_mcp(worktree, home);
     CustomizationCounts {
@@ -632,7 +715,8 @@ mod tests {
         // is outside `.claude`, but it lives under the canonicalized discovery
         // root, so it must remain readable.
         let dir = std::env::temp_dir().join(format!("ae-symdir-{}", std::process::id()));
-        let real_skills = std::env::temp_dir().join(format!("ae-realskills-{}", std::process::id()));
+        let real_skills =
+            std::env::temp_dir().join(format!("ae-realskills-{}", std::process::id()));
         std::fs::create_dir_all(dir.join(".claude")).unwrap();
         std::fs::create_dir_all(real_skills.join("bar")).unwrap();
         std::fs::write(real_skills.join("bar/SKILL.md"), "skill body").unwrap();
@@ -678,8 +762,7 @@ mod tests {
 
     #[test]
     fn list_capabilities_discovers_subagent_and_skill_for_claude() {
-        let dir =
-            std::env::temp_dir().join(format!("ae-caps-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("ae-caps-{}", std::process::id()));
 
         // Create .claude/agents/foo.md (subagent)
         let agents_dir = dir.join(".claude/agents");
@@ -693,18 +776,28 @@ mod tests {
         // Create .claude/skills/bar/SKILL.md (skill)
         let skill_dir = dir.join(".claude/skills/bar");
         std::fs::create_dir_all(&skill_dir).unwrap();
-        std::fs::write(skill_dir.join("SKILL.md"), "---\ndescription: Bar skill\n---\n").unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\ndescription: Bar skill\n---\n",
+        )
+        .unwrap();
 
         let caps = list_capabilities("claude", &dir);
 
         // Subagent "foo" must be found with the right description and source.
-        let foo = caps.subagents.iter().find(|c| c.name == "foo")
+        let foo = caps
+            .subagents
+            .iter()
+            .find(|c| c.name == "foo")
             .expect("subagent 'foo' not found");
         assert_eq!(foo.description.as_deref(), Some("Does foo"));
         assert_eq!(foo.source, "project");
 
         // Skill "bar" must be found via SKILL.md.
-        let bar = caps.skills.iter().find(|c| c.name == "bar")
+        let bar = caps
+            .skills
+            .iter()
+            .find(|c| c.name == "bar")
             .expect("skill 'bar' not found");
         assert_eq!(bar.description.as_deref(), Some("Bar skill"));
         assert_eq!(bar.source, "project");
@@ -741,8 +834,7 @@ mod tests {
 
     #[test]
     fn list_capabilities_returns_empty_for_non_claude_agents() {
-        let dir =
-            std::env::temp_dir().join(format!("ae-caps-nc-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("ae-caps-nc-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         // Even if there happened to be claude dirs, codex should still return empty.
         let caps = list_capabilities("codex", &dir);
@@ -763,7 +855,11 @@ mod tests {
         // .claude/agents/foo.md — counts as one subagent.
         let agents_dir = dir.join(".claude/agents");
         std::fs::create_dir_all(&agents_dir).unwrap();
-        std::fs::write(agents_dir.join("foo.md"), "---\ndescription: Foo agent\n---\n").unwrap();
+        std::fs::write(
+            agents_dir.join("foo.md"),
+            "---\ndescription: Foo agent\n---\n",
+        )
+        .unwrap();
 
         // .mcp.json with exactly 1 MCP server.
         std::fs::write(
@@ -773,7 +869,11 @@ mod tests {
         .unwrap();
 
         let counts = customizations_counts_with_home(&dir, Some(&fake_home));
-        assert!(counts.agents >= 1, "expected at least 1 agent, got {}", counts.agents);
+        assert!(
+            counts.agents >= 1,
+            "expected at least 1 agent, got {}",
+            counts.agents
+        );
         assert_eq!(counts.mcp_servers, 1, "expected exactly 1 MCP server");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -785,10 +885,17 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ae-cappath-{}", std::process::id()));
         let agents_dir = dir.join(".claude/agents");
         std::fs::create_dir_all(&agents_dir).unwrap();
-        std::fs::write(agents_dir.join("foo.md"), "---\ndescription: Does foo\n---\n").unwrap();
+        std::fs::write(
+            agents_dir.join("foo.md"),
+            "---\ndescription: Does foo\n---\n",
+        )
+        .unwrap();
 
         let caps = list_capabilities("claude", &dir);
-        let foo = caps.subagents.iter().find(|c| c.name == "foo")
+        let foo = caps
+            .subagents
+            .iter()
+            .find(|c| c.name == "foo")
             .expect("subagent 'foo' not found");
         assert!(
             foo.path.ends_with("/.claude/agents/foo.md"),
@@ -900,8 +1007,7 @@ mod tests {
     #[test]
     fn list_hooks_returns_entries_from_settings() {
         let dir = std::env::temp_dir().join(format!("ae-hooks-{}", std::process::id()));
-        let fake_home =
-            std::env::temp_dir().join(format!("ae-hooks-home-{}", std::process::id()));
+        let fake_home = std::env::temp_dir().join(format!("ae-hooks-home-{}", std::process::id()));
         let claude_dir = dir.join(".claude");
         std::fs::create_dir_all(&claude_dir).unwrap();
         std::fs::create_dir_all(&fake_home).unwrap();
@@ -921,7 +1027,10 @@ mod tests {
         assert_eq!(no_matcher.command, "echo start");
         assert_eq!(no_matcher.source, "project");
 
-        let with_matcher = entries.iter().find(|e| e.matcher.as_deref() == Some("Bash")).unwrap();
+        let with_matcher = entries
+            .iter()
+            .find(|e| e.matcher.as_deref() == Some("Bash"))
+            .unwrap();
         assert_eq!(with_matcher.command, "echo bash");
 
         // count_hooks must equal list length.
@@ -969,7 +1078,10 @@ mod tests {
         std::fs::create_dir_all(&fake_home).unwrap();
         // No ~/.claude/plugins/ directory at all — must return empty gracefully.
         let entries = list_plugins_with_home(Some(&fake_home));
-        assert!(entries.is_empty(), "expected empty plugin list, got {entries:?}");
+        assert!(
+            entries.is_empty(),
+            "expected empty plugin list, got {entries:?}"
+        );
         let _ = std::fs::remove_dir_all(&fake_home);
     }
 

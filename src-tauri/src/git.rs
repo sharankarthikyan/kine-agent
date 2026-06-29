@@ -23,7 +23,8 @@ pub struct TreeEntry {
 pub struct BranchChanges {
     /// Number of commits in this branch not reachable from `base`.
     pub ahead_count: u32,
-    /// Files with uncommitted changes in the working tree (reuses `review::FileChange`).
+    /// Files changed since `base`, including committed branch changes, tracked
+    /// working-tree changes, and untracked files.
     pub files: Vec<crate::review::FileChange>,
 }
 
@@ -76,10 +77,18 @@ pub fn worktree_tree(worktree: &Path) -> Vec<TreeEntry> {
     let mut entries: Vec<TreeEntry> = Vec::with_capacity(dirs.len() + file_paths.len());
 
     for dir in dirs {
-        entries.push(TreeEntry { path: dir, is_dir: true, status: None });
+        entries.push(TreeEntry {
+            path: dir,
+            is_dir: true,
+            status: None,
+        });
     }
     for (path, status) in file_paths {
-        entries.push(TreeEntry { path, is_dir: false, status });
+        entries.push(TreeEntry {
+            path,
+            is_dir: false,
+            status,
+        });
     }
 
     // Dirs-first, then alphabetical within each group.
@@ -112,8 +121,8 @@ pub fn default_base(worktree: &Path) -> String {
 }
 
 /// Return the number of commits `worktree`'s HEAD is ahead of `base`, plus the set of
-/// uncommitted file changes in the working tree (via `review::diff`). Both are
-/// best-effort: errors fall back to 0 / empty so the UI always gets a valid value.
+/// reviewable changes since `base`. Both are best-effort: errors fall back to 0 /
+/// empty so the UI always gets a valid value.
 pub fn branch_changes(worktree: &Path, base: &str) -> BranchChanges {
     let rev_range = format!("{base}..HEAD");
     let ahead_count = git_stdout(worktree, &["rev-list", "--count", &rev_range])
@@ -121,7 +130,7 @@ pub fn branch_changes(worktree: &Path, base: &str) -> BranchChanges {
         .parse::<u32>()
         .unwrap_or(0);
 
-    let files = crate::review::diff(worktree)
+    let files = crate::review::diff_from_base(worktree, base)
         .map(|d| d.files)
         .unwrap_or_default();
 
@@ -147,7 +156,9 @@ pub fn commit_session(worktree: &Path, message: &str) -> Result<CommitResult, St
     run_git(worktree, &["add", "-A"], "add -A")?;
     run_git(worktree, &["commit", "-m", message], "commit")?;
 
-    let sha = git_stdout(worktree, &["rev-parse", "HEAD"]).trim().to_string();
+    let sha = git_stdout(worktree, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
     if sha.is_empty() {
         return Err("git rev-parse HEAD returned empty output after commit".to_string());
     }

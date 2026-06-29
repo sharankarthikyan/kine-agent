@@ -79,7 +79,7 @@ export function SessionList({
             type="button"
             variant="ghost"
             size="icon"
-            className="size-7"
+            className="size-9"
             onClick={() => setSearchOpen((v) => !v)}
             aria-label="Search sessions"
           >
@@ -89,9 +89,9 @@ export function SessionList({
             type="button"
             variant="ghost"
             size="icon"
-            className="size-7"
+            className="size-9"
             aria-label="Filter sessions"
-            aria-disabled="true"
+            disabled
             tabIndex={-1}
           >
             <ListFilter className="size-3.5" />
@@ -183,12 +183,9 @@ export function SessionList({
                             <span className="truncate flex-1 min-w-0 text-left text-sm">
                               {session.title}
                             </span>
-                            {/* Label only for active/error — idle is conveyed by the dot. */}
-                            {session.status !== "idle" && (
-                              <span className="text-xs text-muted-foreground shrink-0">
-                                {config.label}
-                              </span>
-                            )}
+                            <span className="text-xs text-muted-foreground shrink-0">
+                              {config.label}
+                            </span>
                           </span>
                           {/* Bottom row: diffstat + relative time */}
                           <span className="text-xs text-muted-foreground tabular-nums pl-4">

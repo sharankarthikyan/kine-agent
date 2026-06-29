@@ -62,26 +62,32 @@ export interface PluginEntry {
   source: "project" | "user";
 }
 
-/** Return all hook rules configured for a session (worktree project + user ~/.claude). */
-export async function listHooks(sessionId: string): Promise<HookEntry[]> {
+/** Return all hook rules configured for a session (worktree project + user ~/.claude).
+ *  Pass `null` to list only the user's global ~/.claude scope (no session). */
+export async function listHooks(sessionId: string | null): Promise<HookEntry[]> {
   assertDesktop();
   return invoke<HookEntry[]>("list_hooks", { sessionId });
 }
 
-/** Return all MCP servers declared for a session (worktree .mcp.json + user ~/.claude.json). */
-export async function listMcpServers(sessionId: string): Promise<McpServerEntry[]> {
+/** Return all MCP servers declared for a session (worktree .mcp.json + user ~/.claude.json).
+ *  Pass `null` to list only the user's global ~/.claude.json scope (no session). */
+export async function listMcpServers(sessionId: string | null): Promise<McpServerEntry[]> {
   assertDesktop();
   return invoke<McpServerEntry[]>("list_mcp_servers", { sessionId });
 }
 
-/** Return installed Claude Code plugins from ~/.claude/plugins/installed_plugins.json. */
-export async function listPlugins(sessionId: string): Promise<PluginEntry[]> {
+/** Return installed Claude Code plugins from ~/.claude/plugins/installed_plugins.json.
+ *  Plugins are always user-scope; `sessionId` may be `null`. */
+export async function listPlugins(sessionId: string | null): Promise<PluginEntry[]> {
   assertDesktop();
   return invoke<PluginEntry[]>("list_plugins", { sessionId });
 }
 
-/** Return customization file counts (agents, skills, instructions, hooks, MCP servers) for a session. */
-export async function customizationsCounts(sessionId: string): Promise<CustomizationCounts> {
+/** Return customization file counts (agents, skills, instructions, hooks, MCP servers)
+ *  for a session, or — when `sessionId` is `null` — for the user's global ~/.claude scope. */
+export async function customizationsCounts(
+  sessionId: string | null,
+): Promise<CustomizationCounts> {
   assertDesktop();
   return invoke<CustomizationCounts>("customizations_counts", { sessionId });
 }

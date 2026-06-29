@@ -92,18 +92,18 @@ export function PromptBar({
 
   return (
     <div className="px-4 py-3">
-      <div className="rounded-xl border bg-card shadow-sm p-3 flex flex-col gap-2">
+      <div className="rounded-xl border bg-card shadow-sm p-3 flex flex-col gap-2 focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2 focus-within:ring-offset-background">
         {/* Composer textarea — card is the visual frame; textarea strips its own border/bg */}
         <Textarea
           ref={textareaRef}
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="Run local tasks with Claude, type # for adding context"
+	          placeholder="Message the agent…"
           aria-label="Message the agent"
           disabled={running}
           rows={1}
-          className="min-h-0 resize-none border-0 bg-transparent p-0 shadow-none focus-visible:ring-0 focus-visible:ring-offset-0"
+          className="min-h-0 resize-none rounded-none border-0 bg-transparent p-0 shadow-none outline-none focus:outline-none focus-visible:ring-0 focus-visible:ring-offset-0"
         />
 
         {/* Edit automatically — controls autonomy for follow-up messages */}
@@ -186,7 +186,7 @@ export function PromptBar({
 
           {/* RIGHT: attach + send */}
           <div className="flex items-center gap-1">
-            <Button variant="ghost" size="icon" aria-label="Attach" className="size-8">
+            <Button variant="ghost" size="icon" aria-label="Attach" className="size-9" disabled>
               <Paperclip data-icon />
             </Button>
             <Button
@@ -194,7 +194,7 @@ export function PromptBar({
               aria-label="Send"
               disabled={!canSend}
               onClick={send}
-              className="size-8 rounded-full"
+	              className="size-9 rounded-full"
             >
               <ArrowUp data-icon />
             </Button>

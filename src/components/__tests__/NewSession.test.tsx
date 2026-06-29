@@ -36,7 +36,7 @@ const FIXTURE_MODELS: ModelInfo[] = [opus, sonnet];
 const RECENT_PATHS = ["/home/user/projects/alpha", "/home/user/projects/beta"];
 const REPO_PATH = "/home/user/projects/my-app";
 
-const PLACEHOLDER = "What feature are you dreaming up?";
+const PLACEHOLDER = "Describe the task…";
 
 function setup(overrides: Partial<React.ComponentProps<typeof NewSession>> = {}) {
   const onPickRepo = vi.fn();

@@ -6,6 +6,7 @@ const DIFFSTAT: Diffstat = { additions: 12, deletions: 3, filesChanged: 5 };
 
 function setup(overrides: Partial<React.ComponentProps<typeof SessionHeader>> = {}) {
   const onClose = vi.fn();
+  const onCleanup = vi.fn();
   const onTogglePanel = vi.fn();
   render(
     <SessionHeader
@@ -14,12 +15,13 @@ function setup(overrides: Partial<React.ComponentProps<typeof SessionHeader>> = 
       status="idle"
       diffstat={DIFFSTAT}
       onClose={onClose}
+      onCleanup={onCleanup}
       onTogglePanel={onTogglePanel}
       panelOpen={false}
       {...overrides}
     />,
   );
-  return { onClose, onTogglePanel };
+  return { onClose, onCleanup, onTogglePanel };
 }
 
 // ── Title and repo ────────────────────────────────────────────────────────────
@@ -69,34 +71,12 @@ test("close button calls onClose", () => {
   expect(onClose).toHaveBeenCalledTimes(1);
 });
 
-// ── Inert stubs (approve / pin) ───────────────────────────────────────────────
+// ── Cleanup ───────────────────────────────────────────────────────────────────
 
-test("approve button has aria-disabled", () => {
-  setup();
-  expect(screen.getByRole("button", { name: "Approve" })).toHaveAttribute(
-    "aria-disabled",
-    "true",
-  );
-});
-
-test("pin button has aria-disabled", () => {
-  setup();
-  expect(screen.getByRole("button", { name: "Pin" })).toHaveAttribute(
-    "aria-disabled",
-    "true",
-  );
-});
-
-test("clicking approve does not invoke onClose", () => {
-  const { onClose } = setup();
-  fireEvent.click(screen.getByRole("button", { name: "Approve" }));
-  expect(onClose).not.toHaveBeenCalled();
-});
-
-test("clicking pin does not invoke onClose", () => {
-  const { onClose } = setup();
-  fireEvent.click(screen.getByRole("button", { name: "Pin" }));
-  expect(onClose).not.toHaveBeenCalled();
+test("cleanup button calls onCleanup", () => {
+  const { onCleanup } = setup();
+  fireEvent.click(screen.getByRole("button", { name: "Clean up worktree" }));
+  expect(onCleanup).toHaveBeenCalledTimes(1);
 });
 
 // ── Panel toggle ──────────────────────────────────────────────────────────────
@@ -120,6 +100,11 @@ test("panel toggle reflects panelOpen via aria-pressed", () => {
 test("renders the status label for a known status", () => {
   setup({ status: "running" });
   expect(screen.getByText("Running")).toBeInTheDocument();
+});
+
+test("renders Idle instead of relying on color alone", () => {
+  setup({ status: "idle" });
+  expect(screen.getByText("Idle")).toBeInTheDocument();
 });
 
 test("renders 'Unknown' label for an unrecognised status", () => {

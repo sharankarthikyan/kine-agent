@@ -1,4 +1,4 @@
-import { Check, PanelRight, Pin, X } from "lucide-react";
+import { PanelRight, Trash2, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import type { Diffstat } from "@/lib/conductor";
@@ -23,6 +23,7 @@ export interface SessionHeaderProps {
   status: string;
   diffstat: Diffstat | null;
   onClose: () => void;
+  onCleanup: () => void;
   onTogglePanel: () => void;
   panelOpen: boolean;
 }
@@ -33,6 +34,7 @@ export function SessionHeader({
   status,
   diffstat,
   onClose,
+  onCleanup,
   onTogglePanel,
   panelOpen,
 }: SessionHeaderProps) {
@@ -51,11 +53,8 @@ export function SessionHeader({
             className="size-2 rounded-full shrink-0"
             style={{ background: config.color }}
           />
-          <span className="text-sm font-medium truncate flex-1">{title}</span>
-          {/* Label only for the states that matter — idle is conveyed by the dot. */}
-          {status !== "idle" && (
-            <span className="text-xs text-muted-foreground shrink-0">{config.label}</span>
-          )}
+	          <span className="text-sm font-medium truncate flex-1">{title}</span>
+	          <span className="text-xs text-muted-foreground shrink-0">{config.label}</span>
         </span>
 
         {/* Secondary line: repo and/or diffstat — omitted when both are null */}
@@ -81,39 +80,26 @@ export function SessionHeader({
           size="icon"
           aria-label="Toggle panel"
           aria-pressed={panelOpen}
-          className="size-7"
+          className="size-9"
           onClick={onTogglePanel}
         >
           <PanelRight data-icon />
         </Button>
-        {/* Approve — inert stub, no handler */}
         <Button
           variant="ghost"
           size="icon"
-          aria-disabled="true"
-          aria-label="Approve"
-          className={cn("size-7 opacity-50")}
-          tabIndex={-1}
+          aria-label="Clean up worktree"
+          className={cn("size-9 text-muted-foreground hover:text-destructive")}
+          onClick={onCleanup}
         >
-          <Check data-icon />
-        </Button>
-        {/* Pin — inert stub, no handler */}
-        <Button
-          variant="ghost"
-          size="icon"
-          aria-disabled="true"
-          aria-label="Pin"
-          className={cn("size-7 opacity-50")}
-          tabIndex={-1}
-        >
-          <Pin data-icon />
+          <Trash2 data-icon />
         </Button>
         {/* Close — deselects the session */}
         <Button
           variant="ghost"
           size="icon"
           aria-label="Close session"
-          className="size-7"
+          className="size-9"
           onClick={onClose}
         >
           <X data-icon />

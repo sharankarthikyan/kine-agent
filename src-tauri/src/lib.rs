@@ -21,9 +21,9 @@ pub fn run() {
     });
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(store)
+        .manage(commands::RunRegistry::default())
         .setup(|app| {
             if let Some(win) = app.get_webview_window("main") {
                 // Paint the native window (including the transparent Overlay titlebar region on
@@ -35,6 +35,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::pick_repository,
+            commands::list_trusted_repos,
             commands::start_session,
             commands::cleanup_session,
             commands::review_session,

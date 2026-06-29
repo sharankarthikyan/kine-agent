@@ -39,7 +39,11 @@ pub fn parse_line(line: &str) -> Vec<AgentEvent> {
         Some("assistant") => parse_assistant(&v),
         Some("result") => {
             let is_error = v.get("is_error").and_then(Value::as_bool).unwrap_or(false);
-            let text = v.get("result").and_then(Value::as_str).unwrap_or("").to_string();
+            let text = v
+                .get("result")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
             let terminal = if is_error {
                 AgentEvent::Error { message: text }
             } else {
@@ -82,12 +86,23 @@ fn parse_assistant(v: &Value) -> Vec<AgentEvent> {
         .iter()
         .filter_map(|block| match block.get("type").and_then(Value::as_str)? {
             "text" => Some(AgentEvent::Token {
-                text: block.get("text").and_then(Value::as_str).unwrap_or("").to_string(),
+                text: block
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
             }),
             "tool_use" => Some(AgentEvent::ToolCall {
-                name: block.get("name").and_then(Value::as_str).unwrap_or("").to_string(),
+                name: block
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
                 // `input` is stored as compact JSON text (objects/arrays serialized).
-                input: block.get("input").map(|i| i.to_string()).unwrap_or_default(),
+                input: block
+                    .get("input")
+                    .map(|i| i.to_string())
+                    .unwrap_or_default(),
             }),
             _ => None,
         })
@@ -105,8 +120,8 @@ pub async fn spawn_and_stream(
     // Extract model and permission_mode before building the command so borrows on prompt
     // fields don't conflict with each other. Both are forwarded verbatim; None omits the flag.
     // Valid model values: short aliases (e.g. "opus", "sonnet", "haiku", "fable") or a full
-    // model id (e.g. "claude-opus-4-5"). Valid permission_mode values: "default",
-    // "acceptEdits", "plan", "bypassPermissions".
+    // model id (e.g. "claude-opus-4-5"). Valid permission_mode values are checked
+    // in the command layer before this adapter is invoked.
     let model = prompt.model.as_deref();
     let permission_mode = prompt.permission_mode.as_deref();
 
@@ -139,8 +154,14 @@ pub async fn spawn_and_stream(
         .spawn()
         .map_err(|e| SessionError::Spawn(e.to_string()))?;
 
-    let stdout = child.stdout.take().ok_or_else(|| SessionError::Spawn("no stdout".into()))?;
-    let stderr = child.stderr.take().ok_or_else(|| SessionError::Spawn("no stderr".into()))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| SessionError::Spawn("no stdout".into()))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| SessionError::Spawn("no stderr".into()))?;
 
     // Drain stderr concurrently on a separate task. Without this, claude --verbose can
     // write >64KB to stderr, fill the OS pipe buffer, block on write, and stop producing
@@ -274,13 +295,21 @@ mod tests {
 
     #[test]
     fn prompt_model_some_carries_through() {
-        let p = Prompt { text: "build it".into(), model: Some("opus".into()), permission_mode: None };
+        let p = Prompt {
+            text: "build it".into(),
+            model: Some("opus".into()),
+            permission_mode: None,
+        };
         assert_eq!(p.model.as_deref(), Some("opus"));
     }
 
     #[test]
     fn prompt_model_none_is_absent() {
-        let p = Prompt { text: "build it".into(), model: None, permission_mode: None };
+        let p = Prompt {
+            text: "build it".into(),
+            model: None,
+            permission_mode: None,
+        };
         assert!(p.model.is_none());
     }
 
@@ -298,7 +327,11 @@ mod tests {
 
     #[test]
     fn prompt_permission_mode_none_is_absent() {
-        let p = Prompt { text: "build it".into(), model: None, permission_mode: None };
+        let p = Prompt {
+            text: "build it".into(),
+            model: None,
+            permission_mode: None,
+        };
         assert!(p.permission_mode.is_none());
     }
 }
