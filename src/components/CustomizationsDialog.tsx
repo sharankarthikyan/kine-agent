@@ -409,7 +409,7 @@ export function CustomizationsDialog({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        className="w-[min(900px,90vw)] h-[min(640px,85vh)] flex flex-col p-0 gap-0 overflow-hidden"
+        className="w-[min(1200px,94vw)] h-[min(860px,90vh)] max-w-none flex flex-col p-0 gap-0 overflow-hidden rounded-xl border border-border"
       >
         {/* A11y: accessible name and description for the dialog (sr-only). */}
         <DialogTitle className="sr-only">Agent customizations</DialogTitle>
