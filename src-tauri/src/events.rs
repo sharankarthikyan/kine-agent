@@ -4,12 +4,25 @@ use serde::Serialize;
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", tag = "kind", content = "data")]
 pub enum AgentEvent {
-    Token { text: String },
-    ToolCall { name: String, input: String },
-    FileWrite { path: String },
-    ApprovalNeeded { prompt: String },
-    Done { summary: String },
-    Error { message: String },
+    Token {
+        text: String,
+    },
+    ToolCall {
+        name: String,
+        input: String,
+    },
+    FileWrite {
+        path: String,
+    },
+    ApprovalNeeded {
+        prompt: String,
+    },
+    Done {
+        summary: String,
+    },
+    Error {
+        message: String,
+    },
     /// Token usage + cost for a completed run (normalized across agents).
     #[serde(rename_all = "camelCase")]
     Usage {
@@ -35,16 +48,24 @@ mod tests {
 
     #[test]
     fn serializes_done_with_summary() {
-        let ev = AgentEvent::Done { summary: "ok".into() };
+        let ev = AgentEvent::Done {
+            summary: "ok".into(),
+        };
         let json = serde_json::to_string(&ev).unwrap();
         assert_eq!(json, r#"{"kind":"done","data":{"summary":"ok"}}"#);
     }
 
     #[test]
     fn serializes_tool_call_with_camelcase_tag_and_multiple_fields() {
-        let ev = AgentEvent::ToolCall { name: "Write".into(), input: "{}".into() };
+        let ev = AgentEvent::ToolCall {
+            name: "Write".into(),
+            input: "{}".into(),
+        };
         let json = serde_json::to_string(&ev).unwrap();
-        assert_eq!(json, r#"{"kind":"toolCall","data":{"name":"Write","input":"{}"}}"#);
+        assert_eq!(
+            json,
+            r#"{"kind":"toolCall","data":{"name":"Write","input":"{}"}}"#
+        );
     }
 
     #[test]

@@ -39,7 +39,7 @@ export interface StartSessionArgs {
   sessionId: string;
   /** Claude CLI model alias (e.g. "opus", "sonnet", "haiku"). Omit to use the CLI default. */
   model?: string;
-  /** Permission mode forwarded to the agent CLI (e.g. "default", "acceptEdits", "bypassPermissions"). */
+  /** Permission mode forwarded to the agent CLI. The backend only allows default, acceptEdits, and plan. */
   permissionMode?: string;
   onEvent: (event: AgentEvent) => void;
 }
@@ -57,15 +57,10 @@ export async function startSession({ prompt, repo, sessionId, model, permissionM
   await invoke("start_session", { prompt, repo, sessionId, model, permissionMode, onEvent: channel });
 }
 
-export interface CleanupSessionArgs {
-  repo: string;
-  sessionId: string;
-}
-
 /** Remove the worktree and branch for a finished session. */
-export async function cleanupSession({ repo, sessionId }: CleanupSessionArgs): Promise<void> {
+export async function cleanupSession(sessionId: string): Promise<void> {
   assertDesktop();
-  await invoke("cleanup_session", { repo, sessionId });
+  await invoke("cleanup_session", { sessionId });
 }
 
 export interface SendMessageArgs {
@@ -73,9 +68,21 @@ export interface SendMessageArgs {
   prompt: string;
   /** Claude CLI model alias (e.g. "opus", "sonnet", "haiku"). Omit to use the CLI default. */
   model?: string;
-  /** Permission mode forwarded to the agent CLI (e.g. "default", "acceptEdits", "bypassPermissions"). */
+  /** Permission mode forwarded to the agent CLI. The backend only allows default, acceptEdits, and plan. */
   permissionMode?: string;
   onEvent: (event: AgentEvent) => void;
+}
+
+/** Open the native folder picker and return a backend-trusted git repository root. */
+export async function pickRepository(): Promise<string | null> {
+  assertDesktop();
+  return invoke<string | null>("pick_repository");
+}
+
+/** Repositories previously selected through the backend-owned native picker. */
+export async function listTrustedRepos(): Promise<string[]> {
+  assertDesktop();
+  return invoke<string[]>("list_trusted_repos");
 }
 
 /** Continue an existing session with a follow-up message. */

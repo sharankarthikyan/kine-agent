@@ -117,7 +117,7 @@ export function NewSession({
   const hasModels = models.length > 0;
 
   return (
-    <div className="flex flex-1 items-center justify-center p-8">
+    <div className="flex flex-1 items-center justify-center p-4 min-[900px]:p-8">
       <div className="w-full max-w-2xl space-y-4">
         {/* Header line: New session in [repo] with [agent] */}
         <div className="flex flex-wrap items-center gap-1 text-sm text-muted-foreground">
@@ -148,11 +148,10 @@ export function NewSession({
                 <>
                   <DropdownMenuSeparator />
                   {recents.map((path) => (
-                    <DropdownMenuItem
-                      key={path}
-                      onSelect={() => onPickRecent(path)}
-                      title={path}
-                    >
+	                    <DropdownMenuItem
+	                      key={path}
+	                      onSelect={() => onPickRecent(path)}
+	                    >
                       <span>{basename(path)}</span>
                     </DropdownMenuItem>
                   ))}
@@ -207,17 +206,17 @@ export function NewSession({
         </div>
 
         {/* Composer card */}
-        <div className="rounded-xl border bg-card shadow-sm p-3 flex flex-col gap-2">
+	        <div className="rounded-xl border bg-card shadow-sm p-3 flex flex-col gap-2 focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2 focus-within:ring-offset-background">
           <Textarea
             ref={textareaRef}
             value={text}
             onChange={(e) => setText(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="What feature are you dreaming up?"
+	            placeholder="Describe the task…"
             aria-label="Describe your feature"
             disabled={running}
             rows={4}
-            className="min-h-[120px] resize-none border-0 bg-transparent p-0 shadow-none focus-visible:ring-0 focus-visible:ring-offset-0"
+	            className="min-h-[120px] resize-none rounded-none border-0 bg-transparent p-0 shadow-none outline-none focus:outline-none focus-visible:ring-0 focus-visible:ring-offset-0"
           />
 
           {/* Bottom action row */}
@@ -292,7 +291,7 @@ export function NewSession({
                 size="icon"
                 aria-label="Attach"
                 disabled
-                className="size-8"
+	                className="size-9"
               >
                 <Paperclip data-icon />
               </Button>
@@ -301,7 +300,7 @@ export function NewSession({
                 aria-label="Send"
                 disabled={!canSend}
                 onClick={send}
-                className="size-8 rounded-full"
+	                className="size-9 rounded-full"
               >
                 <ArrowUp data-icon />
               </Button>

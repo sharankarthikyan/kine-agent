@@ -62,6 +62,7 @@
   --border: oklch(0.922 0 0);
   --input: oklch(0.922 0 0);
   --ring: oklch(0.708 0 0);
+  --overlay: oklch(0.145 0 0 / 42%);
 
   /* domain status tokens (light) */
   --status-running: oklch(0.623 0.214 259.532);   /* sky-500 */
@@ -91,6 +92,7 @@
   --border: oklch(1 0 0 / 10%);
   --input: oklch(1 0 0 / 15%);
   --ring: oklch(0.556 0 0);
+  --overlay: oklch(0 0 0 / 72%);
 
   /* domain status tokens (dark — slightly brighter for dark bg) */
   --status-running: oklch(0.745 0.183 234.624);   /* sky-400 */

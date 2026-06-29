@@ -9,26 +9,34 @@ fn fixture() -> Vec<String> {
 #[test]
 fn parses_assistant_text_as_token() {
     let events: Vec<AgentEvent> = fixture().iter().flat_map(|l| parse_line(l)).collect();
-    assert!(events.contains(&AgentEvent::Token { text: "Hello".into() }));
+    assert!(events.contains(&AgentEvent::Token {
+        text: "Hello".into()
+    }));
 }
 
 #[test]
 fn parses_tool_use_as_tool_call() {
     let events: Vec<AgentEvent> = fixture().iter().flat_map(|l| parse_line(l)).collect();
-    assert!(events.iter().any(|e| matches!(e, AgentEvent::ToolCall { name, .. } if name == "Write")));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::ToolCall { name, .. } if name == "Write")));
 }
 
 #[test]
 fn parses_result_as_done() {
     let events: Vec<AgentEvent> = fixture().iter().flat_map(|l| parse_line(l)).collect();
-    assert!(events.contains(&AgentEvent::Done { summary: "Done writing a.txt".into() }));
+    assert!(events.contains(&AgentEvent::Done {
+        summary: "Done writing a.txt".into()
+    }));
 }
 
 #[test]
 fn result_is_error_maps_to_error_event() {
     let events: Vec<AgentEvent> = fixture().iter().flat_map(|l| parse_line(l)).collect();
     assert!(
-        events.contains(&AgentEvent::Error { message: "Auth failed".into() }),
+        events.contains(&AgentEvent::Error {
+            message: "Auth failed".into()
+        }),
         "is_error:true result must produce AgentEvent::Error, not Done"
     );
 }
@@ -39,13 +47,21 @@ fn two_block_assistant_emits_token_and_tool_call() {
     // block must not be silently dropped.
     let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Here is the file"},{"type":"tool_use","name":"Write","input":{"file_path":"b.txt"}}]}}"#;
     let events = parse_line(line);
-    assert_eq!(events.len(), 2, "expected exactly two events from a two-block assistant line");
+    assert_eq!(
+        events.len(),
+        2,
+        "expected exactly two events from a two-block assistant line"
+    );
     assert!(
-        events.contains(&AgentEvent::Token { text: "Here is the file".into() }),
+        events.contains(&AgentEvent::Token {
+            text: "Here is the file".into()
+        }),
         "text block must produce a Token event"
     );
     assert!(
-        events.iter().any(|e| matches!(e, AgentEvent::ToolCall { name, .. } if name == "Write")),
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::ToolCall { name, .. } if name == "Write")),
         "tool_use block must produce a ToolCall event"
     );
 }
@@ -77,7 +93,9 @@ fn parses_real_recorded_stream() {
                 cost_usd: Some(0.166508),
                 model: None,
             },
-            AgentEvent::Done { summary: "Hi.".into() },
+            AgentEvent::Done {
+                summary: "Hi.".into()
+            },
         ],
         "real-output parsing drifted; re-record the fixture and reconcile parse_line"
     );

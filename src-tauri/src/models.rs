@@ -109,7 +109,10 @@ fn parse_models(body: &serde_json::Value) -> Option<Vec<ModelInfo>> {
         .filter_map(|item| {
             let id = item.get("id")?.as_str()?;
             // display_name is optional: fall back to the id string when absent.
-            let label = item.get("display_name").and_then(|v| v.as_str()).unwrap_or(id);
+            let label = item
+                .get("display_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or(id);
             let context_window = item
                 .get("max_input_tokens")
                 .and_then(|v| v.as_u64())
@@ -125,7 +128,11 @@ fn parse_models(body: &serde_json::Value) -> Option<Vec<ModelInfo>> {
             })
         })
         .collect();
-    if models.is_empty() { None } else { Some(models) }
+    if models.is_empty() {
+        None
+    } else {
+        Some(models)
+    }
 }
 
 /// Call `GET /v1/models` against the Anthropic REST API and map the response
@@ -171,7 +178,9 @@ mod tests {
         let models = claude_fallback();
         assert_eq!(models.len(), 3);
         assert!(
-            models.iter().all(|m| m.source == "fallback" && m.agent == "claude" && !m.disabled),
+            models
+                .iter()
+                .all(|m| m.source == "fallback" && m.agent == "claude" && !m.disabled),
             "all models must be source=fallback, agent=claude, disabled=false"
         );
         assert_eq!(models[0].value, "opus", "opus must be first (default)");

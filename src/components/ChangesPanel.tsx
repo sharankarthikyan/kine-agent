@@ -22,12 +22,13 @@ const STATUS_COLOR_VAR: Record<ChangeStatus, string> = {
 
 export interface ChangesPanelProps {
   branch: BranchChanges | null;
+  status: "idle" | "loading" | "ready" | "error";
   onCommit: (message: string) => void;
   onOpenFile: (path: string) => void;
   committing: boolean;
 }
 
-export function ChangesPanel({ branch, onCommit, onOpenFile, committing }: ChangesPanelProps) {
+export function ChangesPanel({ branch, status, onCommit, onOpenFile, committing }: ChangesPanelProps) {
   const [composing, setComposing] = useState(false);
   const [message, setMessage] = useState("");
 
@@ -119,7 +120,15 @@ export function ChangesPanel({ branch, onCommit, onOpenFile, committing }: Chang
       )}
 
       {/* ── File list or empty state ──────────────────────────────────── */}
-      {!hasChanges ? (
+      {status === "loading" || status === "idle" ? (
+        <div className="flex flex-1 items-center justify-center px-4 text-center">
+          <p className="text-sm text-muted-foreground">Loading changes…</p>
+        </div>
+      ) : status === "error" ? (
+        <div className="flex flex-1 items-center justify-center px-4 text-center">
+          <p className="text-sm text-muted-foreground">Changes could not be loaded.</p>
+        </div>
+      ) : !hasChanges ? (
         <div className="flex flex-1 items-center justify-center">
           <p className="text-sm text-muted-foreground">No changes</p>
         </div>
@@ -131,7 +140,7 @@ export function ChangesPanel({ branch, onCommit, onOpenFile, committing }: Chang
                 <li key={file.path}>
                   <button
                     type="button"
-                    className="flex w-full min-w-0 items-center gap-2 px-2 py-1.5 text-sm hover:bg-muted/50 cursor-pointer text-left rounded-md"
+                    className="flex w-full min-w-0 items-center gap-2 px-2 py-1.5 text-sm hover:bg-muted/50 cursor-pointer text-left rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
                     onClick={() => onOpenFile(file.path)}
                     aria-label={`Open ${file.path}`}
                   >

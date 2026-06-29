@@ -48,7 +48,7 @@ function TreeNodeRow({ node, depth, onOpenFile }: TreeNodeRowProps) {
       <>
         <button
           type="button"
-          className="flex w-full min-w-0 items-center gap-1.5 py-0.5 pr-2 text-sm hover:bg-muted/50 cursor-pointer text-left rounded-md"
+	          className="flex w-full min-w-0 items-center gap-1.5 py-0.5 pr-2 text-sm hover:bg-muted/50 cursor-pointer text-left rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
           style={indentStyle}
           onClick={() => setOpen((prev) => !prev)}
           aria-expanded={open}
@@ -91,7 +91,7 @@ function TreeNodeRow({ node, depth, onOpenFile }: TreeNodeRowProps) {
   return (
     <button
       type="button"
-      className="flex w-full min-w-0 items-center gap-1.5 py-0.5 pr-2 text-sm hover:bg-muted/50 cursor-pointer text-left rounded-md"
+      className="flex w-full min-w-0 items-center gap-1.5 py-0.5 pr-2 text-sm hover:bg-muted/50 cursor-pointer text-left rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
       style={indentStyle}
       onClick={() => onOpenFile(node.path)}
       aria-label={`Open ${node.name}`}

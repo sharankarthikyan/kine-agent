@@ -1,10 +1,15 @@
-use agent_editor_lib::review::{diff, ChangeStatus};
+use agent_editor_lib::review::{diff, diff_from_base, ChangeStatus};
 use agent_editor_lib::worktree::create;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn run(dir: &Path, args: &[&str]) {
-    let status = Command::new("git").arg("-C").arg(dir).args(args).status().unwrap();
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .status()
+        .unwrap();
     assert!(status.success(), "git {:?} failed", args);
 }
 
@@ -52,7 +57,10 @@ fn diff_reports_modified_added_and_deleted() {
     let gone = by("gone.txt").expect("gone.txt in diff");
     assert_eq!(gone.status, ChangeStatus::Deleted);
 
-    assert!(d.patch.contains("keep.txt"), "patch should mention modified file");
+    assert!(
+        d.patch.contains("keep.txt"),
+        "patch should mention modified file"
+    );
 
     std::fs::remove_dir_all(&root).ok();
 }
@@ -77,5 +85,88 @@ fn diff_errors_when_worktree_missing() {
     let root = temp_dir("missing");
     let result = diff(&root.join("nope"));
     assert!(result.is_err());
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn diff_includes_untracked_file_patch() {
+    let root = temp_dir("untracked-patch");
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    init_repo(&repo);
+    let wt = create(&repo, &root.join("worktrees"), "rev3").unwrap();
+
+    std::fs::write(wt.path.join("notes.txt"), "alpha\nbeta\n").unwrap();
+
+    let d = diff(&wt.path).unwrap();
+    let notes = d
+        .files
+        .iter()
+        .find(|file| file.path == "notes.txt")
+        .expect("notes.txt in diff");
+    assert_eq!(notes.status, ChangeStatus::Added);
+    assert_eq!(notes.additions, 2);
+    assert!(d.patch.contains("diff --git a/notes.txt b/notes.txt"));
+    assert!(d.patch.contains("+alpha"));
+    assert!(d.patch.contains("+beta"));
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn diff_omits_large_untracked_file_body() {
+    let root = temp_dir("large-untracked");
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    init_repo(&repo);
+    let wt = create(&repo, &root.join("worktrees"), "rev4").unwrap();
+
+    std::fs::write(wt.path.join("large.txt"), "x".repeat(513 * 1024)).unwrap();
+
+    let d = diff(&wt.path).unwrap();
+    assert!(d.patch.contains("diff --git a/large.txt b/large.txt"));
+    assert!(d
+        .patch
+        .contains("File omitted from inline diff because it exceeds 512 KiB."));
+    assert!(!d.patch.contains(&"x".repeat(1024)));
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn diff_from_base_includes_committed_branch_changes_and_truncates_patch() {
+    let root = temp_dir("committed-truncated");
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    init_repo(&repo);
+    let wt = create(&repo, &root.join("worktrees"), "rev5").unwrap();
+
+    let base = String::from_utf8(
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    let base = base.trim().to_string();
+
+    let mut content = String::new();
+    for index in 0..240_000 {
+        content.push_str(&format!("line-{index:06}\n"));
+    }
+    std::fs::write(wt.path.join("huge.txt"), content).unwrap();
+    run(&wt.path, &["add", "huge.txt"]);
+    run(&wt.path, &["commit", "-q", "-m", "huge change"]);
+
+    let d = diff_from_base(&wt.path, &base).unwrap();
+    assert!(d.files.iter().any(|file| file.path == "huge.txt"));
+    assert!(d
+        .patch
+        .contains("Patch truncated by Kineloop because it exceeded 2 MiB."));
+    assert!(d.patch.len() < 2 * 1024 * 1024 + 512);
+
     std::fs::remove_dir_all(&root).ok();
 }

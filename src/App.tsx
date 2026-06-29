@@ -1,5 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -10,7 +9,7 @@ import { Conversation, type Turn } from "./components/Conversation";
 import { DiffViewer } from "./components/DiffViewer";
 import { TitleBar } from "./components/TitleBar";
 import { SessionList } from "./components/SessionList";
-import { CustomizationsDialog, type CustomizationSection } from "./components/CustomizationsDialog";
+import type { CustomizationSection } from "./components/CustomizationsDialog";
 import { SessionHeader } from "./components/SessionHeader";
 import { ContextPanel } from "./components/ContextPanel";
 import { ChangesPanel } from "./components/ChangesPanel";
@@ -19,7 +18,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Toaster } from "@/components/ui/sonner";
-import { startSession, sendMessage, type AgentEvent } from "./lib/agent";
+import { cleanupSession, listTrustedRepos, pickRepository, startSession, sendMessage, type AgentEvent } from "./lib/agent";
 import { detectAgents, listModels, type AgentInfo, type ModelInfo } from "./lib/models";
 import { reviewSession, type SessionDiff } from "./lib/review";
 import { listSessions, sessionEvents, type SessionSummary, type StoredEvent } from "./lib/sessions";
@@ -27,7 +26,6 @@ import { groupByWorkspace } from "./lib/workspaces";
 import { filesFromEvents, latestUsage } from "./lib/contextDerive";
 import { inspectRules, readTextFile, listCapabilities, type RuleFile, type Capabilities } from "./lib/inspect";
 import { turnsFromEvents } from "./lib/turns";
-import { getRecentRepos, addRecentRepo } from "./lib/recents";
 import {
   branchChanges as fetchBranchChanges,
   worktreeTree as fetchWorktreeTree,
@@ -48,17 +46,31 @@ import {
 } from "./lib/conductor";
 import { buildTree, type TreeNode } from "./lib/tree";
 
+const CustomizationsDialog = lazy(() =>
+  import("./components/CustomizationsDialog").then((mod) => ({
+    default: mod.CustomizationsDialog,
+  })),
+);
+
 /** Derive a short display title from the first non-empty line of the prompt. */
 function titleFromPrompt(text: string): string {
   const line = text.split("\n").map((l) => l.trim()).find(Boolean) ?? "";
   return line.length > 60 ? `${line.slice(0, 59)}…` : line || "Untitled session";
 }
 
+function safeErrorMessage(err: unknown): string {
+  const raw = String(err instanceof Error ? err.message : err);
+  return raw
+    .replace(/\/Users\/[^/\s]+/g, "~")
+    .replace(/\/private\/var\/folders\/[^\s)]+/g, "<temp>")
+    .replace(/\/var\/folders\/[^\s)]+/g, "<temp>");
+}
+
 export default function App() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [turns, setTurns] = useState<Turn[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
-  const [running, setRunning] = useState(false);
+  const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(() => new Set());
   const [diff, setDiff] = useState<SessionDiff | null>(null);
   const [rightTab, setRightTab] = useState<"context" | "changes" | "files" | null>(null);
   const [rightExpanded, setRightExpanded] = useState(false);
@@ -72,7 +84,7 @@ export default function App() {
   const [selectedAgent, setSelectedAgent] = useState<AgentInfo | null>(null);
   const [selectedRepo, setSelectedRepo] = useState<string | null>(null);
   const [autoEdit, setAutoEdit] = useState(false);
-  const [recents, setRecents] = useState<string[]>(() => getRecentRepos());
+  const [recents, setRecents] = useState<string[]>([]);
   const [sessionSearch, setSessionSearch] = useState("");
   // Sidebar collapse — persisted in localStorage.
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
@@ -92,6 +104,7 @@ export default function App() {
   const [diffstats, setDiffstats] = useState<Record<string, Diffstat>>({});
   // Changes tab state.
   const [branchChanges, setBranchChanges] = useState<BranchChanges | null>(null);
+  const [branchChangesStatus, setBranchChangesStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
   // Files tab state.
   const [treeNodes, setTreeNodes] = useState<TreeNode[]>([]);
   // Commit-in-flight flag.
@@ -155,12 +168,13 @@ export default function App() {
   const loadModels = useCallback(async () => {
     try {
       const discovered = await detectAgents();
-      const installed = discovered.filter((a) => a.installed);
+      const supported = discovered.filter((a) => a.id === "claude");
+      const installed = supported.filter((a) => a.installed);
       const results = await Promise.allSettled(installed.map((a) => listModels(a.id)));
       const all = results
         .flatMap((r) => (r.status === "fulfilled" ? r.value : []))
         .filter((m) => !m.disabled);
-      setAgents(discovered);
+      setAgents(supported);
       setSelectedAgent((prev) => prev ?? installed[0] ?? null);
       setModels(all);
       setSelectedModel((prev) => prev ?? all[0] ?? null);
@@ -191,26 +205,30 @@ export default function App() {
 
   // Refresh branch-level changes for the Changes tab — same stale-session guard.
   const refreshBranchChanges = useCallback(async (sessionId: string) => {
+    setBranchChangesStatus("loading");
     try {
       const result = await fetchBranchChanges(sessionId);
-      if (activeSessionIdRef.current === sessionId) setBranchChanges(result);
+      if (activeSessionIdRef.current === sessionId) {
+        setBranchChanges(result);
+        setBranchChangesStatus("ready");
+      }
     } catch {
-      if (activeSessionIdRef.current === sessionId) setBranchChanges(null);
+      if (activeSessionIdRef.current === sessionId) {
+        setBranchChanges(null);
+        setBranchChangesStatus("error");
+      }
     }
   }, []);
 
-  // Open a native directory picker and update repo + recents.
-  // Wrapped in try-catch — `open()` throws outside the desktop app, same pattern
-  // as refreshSessions / loadModels above.
+  // Open the backend-owned native directory picker and update repo + recents.
   async function pickRepo() {
     try {
-      const path = await open({ directory: true });
-      if (typeof path !== "string" || !path) return;
-      addRecentRepo(path);
+      const path = await pickRepository();
+      if (!path) return;
       setSelectedRepo(path);
-      setRecents(getRecentRepos());
-    } catch {
-      /* not in the desktop app, or user cancelled */
+      setRecents(await listTrustedRepos());
+    } catch (err) {
+      toast.error(safeErrorMessage(err));
     }
   }
 
@@ -226,9 +244,17 @@ export default function App() {
     void loadModels();
   }, [loadModels]);
 
-  // Fetch customization counts for the active session whenever it changes.
   useEffect(() => {
-    if (!activeSessionId) { setCounts(null); return; }
+    try { localStorage.removeItem("agent-editor.recentRepos"); } catch { /* legacy cleanup */ }
+    (async () => {
+      try { setRecents(await listTrustedRepos()); } catch { setRecents([]); }
+    })();
+  }, []);
+
+  // Fetch customization counts whenever the active session changes. With no active
+  // session (null) the backend reports the user's global ~/.claude scope, so the
+  // sidebar always shows real counts — even on the New Session screen.
+  useEffect(() => {
     const sessionId = activeSessionId;
     (async () => {
       try {
@@ -276,12 +302,13 @@ export default function App() {
   }, [rightTab, activeSessionId, selectedModel?.agent]);
 
   // Fetch rules, capabilities, hooks, MCP servers, and plugins when the Customizations
-  // dialog opens for an active session. All best-effort — failures produce empty state
-  // rather than errors. If the Context tab has already fetched rules/capabilities, the
-  // setters are idempotent and the IPC round-trip is cheap.
+  // dialog opens. With an active session this is the worktree (project + user) scope;
+  // with none, the user's global ~/.claude scope. All best-effort — failures produce
+  // empty state rather than errors. If the Context tab already fetched rules/capabilities,
+  // the setters are idempotent and the IPC round-trip is cheap.
   useEffect(() => {
-    if (!custDialogOpen || !activeSessionId) return;
-    const sessionId = activeSessionId;
+    if (!custDialogOpen) return;
+    const sessionId = activeSessionId; // null → user's global ~/.claude scope
     (async () => {
       try {
         const r = await inspectRules(sessionId);
@@ -358,7 +385,7 @@ export default function App() {
         })(),
       ]);
     } catch (err) {
-      toast.error(String(err));
+      toast.error(safeErrorMessage(err));
     } finally {
       setCommitting(false);
     }
@@ -406,7 +433,7 @@ export default function App() {
       return [row, ...prev.filter((s) => s.id !== sessionId)];
     });
     closeRight();
-    setRunning(true);
+    setRunningSessionIds((prev) => new Set(prev).add(sessionId));
     setTurns((prev) => [...prev, { prompt: text, events: [] }]);
     // Guard: if the user switches sessions while this send is streaming, drop the late
     // events from the UI — the backend persists all events regardless, so re-selecting
@@ -424,16 +451,23 @@ export default function App() {
         await sendMessage({ sessionId, prompt: text, model: modelArg, permissionMode: autoEdit ? "acceptEdits" : "default", onEvent });
       }
     } catch (err) {
-      onEvent({ kind: "error", data: { message: String(err) } });
+      onEvent({ kind: "error", data: { message: safeErrorMessage(err) } });
     } finally {
-      setRunning(false);
+      setRunningSessionIds((prev) => {
+        const next = new Set(prev);
+        next.delete(sessionId);
+        return next;
+      });
       await refreshSessions();
       if (activeSessionIdRef.current === sessionId) {
         // Refresh this session's diffstat so the sidebar row + SessionHeader stay
         // current after files are edited — one targeted call, not a fan-out.
         void fetchDiffstat(sessionId);
         await refreshDiff(sessionId);
-        try { setStoredEvents(await sessionEvents(sessionId)); } catch { /* ignore */ }
+        try {
+          const ev = await sessionEvents(sessionId);
+          if (activeSessionIdRef.current === sessionId) setStoredEvents(ev);
+        } catch { /* ignore */ }
       }
     }
   }
@@ -455,6 +489,7 @@ export default function App() {
     setCapabilities(null);
     setRuleView(null);
     setBranchChanges(null);
+    setBranchChangesStatus("idle");
     setTreeNodes([]);
     setDiffSheet(null);
     setHooks([]);
@@ -462,9 +497,11 @@ export default function App() {
     setPlugins([]);
     try {
       const ev = await sessionEvents(id);
+      if (activeSessionIdRef.current !== id) return;
       setStoredEvents(ev);
       setTurns(turnsFromEvents(ev));
     } catch {
+      if (activeSessionIdRef.current !== id) return;
       setStoredEvents([]);
       setTurns([]);
     }
@@ -480,6 +517,7 @@ export default function App() {
     setCapabilities(null);
     setRuleView(null);
     setBranchChanges(null);
+    setBranchChangesStatus("idle");
     setTreeNodes([]);
     setDiffSheet(null);
     setHooks([]);
@@ -488,12 +526,31 @@ export default function App() {
     closeRight();
   }
 
+  async function handleCleanupSession() {
+    if (!activeSessionId) return;
+    const session = activeSession;
+    const confirmed = window.confirm(
+      `Remove the worktree and branch for "${session?.title ?? "this session"}"? This does not touch the original repository.`,
+    );
+    if (!confirmed) return;
+    const sessionId = activeSessionId;
+    try {
+      await cleanupSession(sessionId);
+      toast.success("Session worktree cleaned up");
+      handleNewSession();
+      const list = await refreshSessions();
+      await refreshAllDiffstats(list);
+    } catch (err) {
+      toast.error(safeErrorMessage(err));
+    }
+  }
+
   async function handleOpenRule(rule: RuleFile) {
     if (!activeSessionId) return;
     try {
       setRuleView({ label: rule.label, content: await readTextFile(activeSessionId, rule.path) });
     } catch (e) {
-      setRuleView({ label: rule.label, content: `Failed to read: ${String(e)}` });
+      setRuleView({ label: rule.label, content: `Failed to read: ${safeErrorMessage(e)}` });
     }
   }
 
@@ -502,6 +559,9 @@ export default function App() {
 
   // Derived: active session object and its display values for TitleBar + SessionHeader.
   const activeSession = sessions.find((s) => s.id === activeSessionId) ?? null;
+  const activeRunning =
+    activeSessionId !== null &&
+    (runningSessionIds.has(activeSessionId) || activeSession?.status === "running");
   const titleBarTitle = activeSession?.title ?? null;
   const titleBarRepo = activeSession?.repo ? (activeSession.repo.split("/").pop() ?? null) : null;
 
@@ -513,13 +573,13 @@ export default function App() {
   // Open the active session's worktree in the system editor. Best-effort.
   async function handleOpenEditor() {
     if (!activeSessionId) return;
-    try { await openInEditor(activeSessionId); } catch (err) { toast.error(String(err)); }
+    try { await openInEditor(activeSessionId); } catch (err) { toast.error(safeErrorMessage(err)); }
   }
 
   // Open a terminal at the active session's worktree directory. Best-effort.
   async function handleOpenTerminal() {
     if (!activeSessionId) return;
-    try { await openTerminal(activeSessionId); } catch (err) { toast.error(String(err)); }
+    try { await openTerminal(activeSessionId); } catch (err) { toast.error(safeErrorMessage(err)); }
   }
 
   return (
@@ -534,7 +594,7 @@ export default function App() {
       />
       <div className="flex flex-1 min-h-0 min-w-0 overflow-hidden gap-2 px-2 pb-2">
         {!sidebarCollapsed && (
-          <div className="w-72 shrink-0 flex flex-col rounded-xl border border-border overflow-hidden">
+	          <div className="w-72 shrink-0 max-[900px]:hidden flex flex-col rounded-xl border border-border overflow-hidden">
             <SessionList
               groups={groupByWorkspace(filteredSessions)}
               activeId={activeSessionId}
@@ -554,7 +614,10 @@ export default function App() {
         <main className="flex flex-1 min-h-0 min-w-0 gap-2">
           {/* Chat column — hidden only while the right pane is expanded to fullscreen. */}
           {!rightExpanded && (
-            <section className="flex flex-1 flex-col min-w-0 min-h-0 rounded-xl border border-border bg-card overflow-hidden">
+	            <section className={cn(
+	              "flex flex-1 flex-col min-w-0 min-h-0 rounded-xl border border-border bg-card overflow-hidden",
+	              rightTab && "max-[900px]:hidden",
+	            )}>
               {activeSessionId === null ? (
                 /* No active session — show the new-session composer. */
                 <NewSession
@@ -565,12 +628,10 @@ export default function App() {
                   models={models}
                   model={selectedModel}
                   autoEdit={autoEdit}
-                  running={running}
+                  running={false}
                   onPickRepo={pickRepo}
                   onPickRecent={(p) => {
-                    addRecentRepo(p);
                     setSelectedRepo(p);
-                    setRecents(getRecentRepos());
                   }}
                   onAgentChange={setSelectedAgent}
                   onModelChange={setSelectedModel}
@@ -587,17 +648,18 @@ export default function App() {
                     status={activeSession?.status ?? "idle"}
                     diffstat={diffstats[activeSessionId] ?? null}
                     onClose={handleNewSession}
+                    onCleanup={() => void handleCleanupSession()}
                     panelOpen={rightTab !== null}
                     onTogglePanel={() => (rightTab ? closeRight() : setRightTab("context"))}
                   />
                   <div className="flex flex-1 flex-col overflow-auto min-h-0">
                     <div className="mt-auto w-full max-w-3xl mx-auto px-4">
-                      <Conversation turns={turns} running={running} onOpenFile={(path) => void handleOpenFile(path)} />
+                      <Conversation turns={turns} running={activeRunning} onOpenFile={(path) => void handleOpenFile(path)} />
                     </div>
                   </div>
                   <PromptBar
                     onStart={handleSend}
-                    running={running}
+                    running={activeRunning}
                     models={models}
                     model={selectedModel}
                     onModelChange={setSelectedModel}
@@ -614,7 +676,7 @@ export default function App() {
             <aside
               className={cn(
                 "flex flex-col min-w-0 min-h-0 rounded-xl border border-border bg-card overflow-hidden",
-                rightExpanded ? "w-full" : "w-[clamp(420px,46%,760px)]"
+	                rightExpanded ? "w-full" : "w-[clamp(420px,46%,760px)] max-[900px]:w-full"
               )}
             >
               <Tabs
@@ -659,9 +721,10 @@ export default function App() {
                   />
                 </TabsContent>
                 <TabsContent value="changes" className="flex-1 min-h-0 overflow-hidden">
-                  <ChangesPanel
-                    branch={branchChanges}
-                    onCommit={(message) => void handleCommit(message)}
+	                  <ChangesPanel
+	                    branch={branchChanges}
+	                    status={branchChangesStatus}
+	                    onCommit={(message) => void handleCommit(message)}
                     onOpenFile={(path) => void handleOpenFile(path)}
                     committing={committing}
                   />
@@ -680,7 +743,7 @@ export default function App() {
 
       {/* Rule viewer Sheet — rendered once, controlled by ruleView state. */}
       <Sheet open={ruleView !== null} onOpenChange={(o) => { if (!o) setRuleView(null); }}>
-        <SheetContent className="w-[480px] sm:max-w-none flex flex-col rounded-l-xl">
+	        <SheetContent className="w-[min(480px,calc(100vw-1rem))] sm:max-w-none flex flex-col rounded-l-xl">
           <SheetHeader>
             <SheetTitle className="font-mono text-sm">{ruleView?.label}</SheetTitle>
           </SheetHeader>
@@ -693,7 +756,7 @@ export default function App() {
       {/* File diff Sheet — opens when a file is clicked in Changes or Files tab.
           Shows the full session patch (DiffViewer has no per-file filter). */}
       <Sheet open={diffSheet !== null} onOpenChange={(o) => { if (!o) setDiffSheet(null); }}>
-        <SheetContent className="w-[640px] sm:max-w-none flex flex-col rounded-l-xl">
+	        <SheetContent className="w-[min(640px,calc(100vw-1rem))] sm:max-w-none flex flex-col rounded-l-xl">
           <SheetHeader>
             <SheetTitle className="font-mono text-sm">{diffSheet?.path}</SheetTitle>
           </SheetHeader>
@@ -704,18 +767,20 @@ export default function App() {
       </Sheet>
 
       {/* Customizations dialog — opened when a sidebar Customizations row is clicked. */}
-      <CustomizationsDialog
-        open={custDialogOpen}
-        onOpenChange={setCustDialogOpen}
-        initialSection={custSection}
-        counts={counts}
-        capabilities={capabilities}
-        rules={rules}
-        sessionId={activeSessionId ?? ""}
-        hooks={hooks}
-        mcpServers={mcpServers}
-        plugins={plugins}
-      />
+	      <Suspense fallback={null}>
+	        <CustomizationsDialog
+	          open={custDialogOpen}
+	          onOpenChange={setCustDialogOpen}
+	          initialSection={custSection}
+	          counts={counts}
+	          capabilities={capabilities}
+	          rules={rules}
+	          sessionId={activeSessionId}
+	          hooks={hooks}
+	          mcpServers={mcpServers}
+	          plugins={plugins}
+	        />
+	      </Suspense>
 
       <Toaster />
     </div>

@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { PromptBar } from "../PromptBar";
 import type { ModelInfo } from "../../lib/models";
 
-const PLACEHOLDER = "Run local tasks with Claude, type # for adding context";
+const PLACEHOLDER = "Message the agent…";
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
