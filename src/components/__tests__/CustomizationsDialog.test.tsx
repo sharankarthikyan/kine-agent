@@ -56,7 +56,6 @@ const defaultProps = {
   counts,
   capabilities,
   rules,
-  onOpenRule: noop,
   sessionId: "s1",
 };
 

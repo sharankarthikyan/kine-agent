@@ -85,18 +85,28 @@ pub fn read_text_file(path: &str, worktree: &Path) -> Result<String, InspectErro
         })
         .collect();
     // Also permit files discovered by list_capabilities — skills, subagents, and
-    // commands. These are enumerated only from trusted, fixed discovery roots
-    // (project `.claude/...` and the user's `~/.claude/...`), so any path the
-    // discovery returns is a legitimate capability file and safe to read,
-    // including user-scoped agents/skills outside the worktree. The exact-match
-    // guard below still prevents reading any path that discovery didn't surface.
+    // commands — including user-scoped ones under `~/.claude`. Re-apply the same
+    // boundary guard used for rule files: the canonical path must resolve INSIDE
+    // the worktree or the user's `~/.claude` tree. A symlinked capability that
+    // resolves outside those roots (e.g. ~/.ssh/id_rsa) is rejected — defence in
+    // depth against a compromised WebView, mirroring the rule-candidate guard.
+    let canonical_user_claude = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .and_then(|h| std::fs::canonicalize(h.join(".claude")).ok());
     let caps = list_capabilities("claude", worktree);
     for cap in caps.skills.into_iter().chain(caps.subagents).chain(caps.commands) {
         if cap.path.is_empty() {
             continue;
         }
         if let Ok(cp) = std::fs::canonicalize(&cap.path) {
-            allowed.push(cp);
+            let in_worktree = cp.starts_with(&canonical_worktree);
+            let in_user_claude = canonical_user_claude
+                .as_ref()
+                .map(|h| cp.starts_with(h))
+                .unwrap_or(false);
+            if in_worktree || in_user_claude {
+                allowed.push(cp);
+            }
         }
     }
     if !allowed.contains(&target) {
@@ -597,6 +607,32 @@ mod tests {
             "expected Forbidden for a file not in the rules/capabilities allowlist"
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_rejects_capability_symlink_escaping_roots() {
+        let dir = std::env::temp_dir().join(format!("ae-capescape-{}", std::process::id()));
+        let agents_dir = dir.join(".claude/agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        // A secret OUTSIDE the worktree and outside ~/.claude.
+        let secret = std::env::temp_dir().join(format!("ae-capsecret-{}.txt", std::process::id()));
+        std::fs::write(&secret, "TOP SECRET").unwrap();
+        // A capability file that is a symlink to the secret. collect_md checks the
+        // extension, so discovery surfaces it; canonicalize resolves to the secret.
+        let link = agents_dir.join("evil.md");
+        std::os::unix::fs::symlink(&secret, &link).unwrap();
+
+        assert!(
+            matches!(
+                read_text_file(&link.display().to_string(), &dir),
+                Err(InspectError::Forbidden(_))
+            ),
+            "expected Forbidden for a capability symlink resolving outside the worktree / ~/.claude"
+        );
+
+        let _ = std::fs::remove_file(&secret);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

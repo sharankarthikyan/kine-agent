@@ -681,7 +681,6 @@ export default function App() {
         counts={counts}
         capabilities={capabilities}
         rules={rules}
-        onOpenRule={handleOpenRule}
         sessionId={activeSessionId ?? ""}
       />
 

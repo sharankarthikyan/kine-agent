@@ -44,7 +44,6 @@ export interface CustomizationsDialogProps {
   counts: CustomizationCounts | null;
   capabilities: Capabilities | null;
   rules: RuleFile[];
-  onOpenRule: (rule: RuleFile) => void;
   sessionId: string;
 }
 
@@ -231,6 +230,12 @@ function FileDetailView({ detail, loading, error, content, onBack }: FileDetailV
                 margin: 0,
                 padding: 0,
                 fontSize: "0.75rem",
+                whiteSpace: "pre-wrap",
+                wordBreak: "break-word",
+                overflowWrap: "anywhere",
+              }}
+              codeTagProps={{
+                style: { whiteSpace: "pre-wrap", wordBreak: "break-word" },
               }}
               lineNumberStyle={{
                 color: "var(--muted-foreground)",
