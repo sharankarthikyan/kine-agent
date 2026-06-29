@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
-import { FileDiff, Info, Maximize2, Minimize2, X } from "lucide-react";
+import { Maximize2, Minimize2, PanelRight, X } from "lucide-react";
 import { PromptBar } from "./components/PromptBar";
 import { Conversation, type Turn } from "./components/Conversation";
 import { DiffViewer } from "./components/DiffViewer";
@@ -193,25 +193,19 @@ export default function App() {
     closeRight();
   }
 
-  // openContext captures sessionId synchronously so the cross-session guard
-  // can compare against the ref after each async IPC call completes.
-  async function openContext() {
+  // Fetch rules + capabilities whenever the Context tab becomes active for a session.
+  // Captures sessionId at effect-run time so the cross-session ref guard works correctly
+  // even if the user switches sessions while awaiting IPC calls.
+  useEffect(() => {
+    if (rightTab !== "context" || !activeSessionId) return;
     const sessionId = activeSessionId;
-    setRightTab("context");
-    if (!sessionId) return;
-    try {
-      const r = await inspectRules(sessionId);
-      if (activeSessionIdRef.current === sessionId) setRules(r);
-    } catch {
-      if (activeSessionIdRef.current === sessionId) setRules([]);
-    }
-    try {
-      const c = await listCapabilities(sessionId, selectedModel?.agent ?? "claude");
-      if (activeSessionIdRef.current === sessionId) setCapabilities(c);
-    } catch {
-      if (activeSessionIdRef.current === sessionId) setCapabilities(null);
-    }
-  }
+    (async () => {
+      try { const r = await inspectRules(sessionId); if (activeSessionIdRef.current === sessionId) setRules(r); }
+      catch { if (activeSessionIdRef.current === sessionId) setRules([]); }
+      try { const c = await listCapabilities(sessionId, selectedModel?.agent ?? "claude"); if (activeSessionIdRef.current === sessionId) setCapabilities(c); }
+      catch { if (activeSessionIdRef.current === sessionId) setCapabilities(null); }
+    })();
+  }, [rightTab, activeSessionId, selectedModel?.agent]);
 
   async function handleOpenRule(rule: RuleFile) {
     if (!activeSessionId) return;
@@ -242,24 +236,17 @@ export default function App() {
           {/* Chat column — hidden only while the right pane is expanded to fullscreen. */}
           {!rightExpanded && (
             <section className="flex flex-1 flex-col min-w-0 min-h-0">
-              {/* Stable top toolbar — always the same height; never causes layout jerk. */}
+              {/* Stable top toolbar — single toggle; switching Context vs Diff lives in the pane tabs. */}
               {activeSessionId !== null && (
-                <div className="flex items-center justify-end gap-1 px-4 py-2 border-b border-border">
+                <div className="flex items-center justify-end px-4 py-2 border-b border-border">
                   <Button
-                    variant={rightTab === "context" ? "secondary" : "ghost"}
+                    variant={rightTab !== null ? "secondary" : "ghost"}
                     size="sm"
-                    onClick={openContext}
+                    onClick={() => (rightTab ? closeRight() : setRightTab("context"))}
+                    aria-label="Toggle context panel"
                   >
-                    <Info data-icon />
-                    Context
-                  </Button>
-                  <Button
-                    variant={rightTab === "diff" ? "secondary" : "ghost"}
-                    size="sm"
-                    onClick={() => setRightTab("diff")}
-                  >
-                    <FileDiff data-icon />
-                    Diff
+                    <PanelRight data-icon />
+                    Panel
                     {changedCount > 0 && (
                       <Badge variant="secondary" className="ml-1 tabular-nums">
                         {changedCount}
