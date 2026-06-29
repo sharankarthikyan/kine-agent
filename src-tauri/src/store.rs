@@ -102,7 +102,7 @@ impl SessionStore {
         )
         .execute(&self.pool)
         .await?;
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id, seq)")
+        sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS idx_events_session ON events(session_id, seq)")
             .execute(&self.pool)
             .await?;
         Ok(())
