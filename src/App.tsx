@@ -51,12 +51,14 @@ export default function App() {
     try {
       const agents = await detectAgents();
       const installed = agents.filter((a) => a.installed);
-      const lists = await Promise.all(installed.map((a) => listModels(a.id)));
-      const all = lists.flat().filter((m) => !m.disabled);
+      const results = await Promise.allSettled(installed.map((a) => listModels(a.id)));
+      const all = results
+        .flatMap((r) => (r.status === "fulfilled" ? r.value : []))
+        .filter((m) => !m.disabled);
       setModels(all);
       setSelectedModel((prev) => prev ?? all[0] ?? null);
-    } catch {
-      /* not in the desktop app */
+    } catch (err) {
+      console.error("failed to load models", err);
     }
   }, []);
 

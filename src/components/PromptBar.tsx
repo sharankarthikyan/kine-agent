@@ -66,6 +66,8 @@ export function PromptBar({ onStart, running, models, model, onModelChange }: Pr
   }
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+    // Skip during IME composition so committing a CJK candidate doesn't send prematurely.
+    if (e.nativeEvent.isComposing) return;
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       send();
@@ -130,6 +132,7 @@ export function PromptBar({ onStart, running, models, model, onModelChange }: Pr
                         className="gap-2"
                       >
                         <Check
+                          data-icon
                           className={cn(
                             "shrink-0",
                             m.value === model?.value ? "opacity-100" : "opacity-0",
