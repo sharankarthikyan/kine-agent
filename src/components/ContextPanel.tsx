@@ -40,7 +40,7 @@ function displayPath(path: string): string {
 // Shared inset card wrapper for section bodies
 function SectionCard({ children, className }: { children: React.ReactNode; className?: string }) {
   return (
-    <div className={cn("rounded-lg border border-border bg-muted/20", className)}>
+    <div className={cn(className)}>
       {children}
     </div>
   );

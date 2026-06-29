@@ -124,7 +124,7 @@ export function ChangesPanel({ branch, onCommit, onOpenFile, committing }: Chang
           <p className="text-sm text-muted-foreground">No changes</p>
         </div>
       ) : (
-        <div className="flex-1 min-h-0 mx-3 mb-3 rounded-lg border border-border bg-muted/20 overflow-hidden">
+        <div className="flex-1 min-h-0 mx-3 mb-3 overflow-hidden">
           <ScrollArea className="h-full">
             <ul className="list-none p-1 m-0 flex flex-col gap-0.5">
               {branch.files.map((file) => (

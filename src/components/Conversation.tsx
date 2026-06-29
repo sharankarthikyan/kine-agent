@@ -12,9 +12,10 @@ export interface Turn {
 interface ConversationProps {
   turns: Turn[];
   running: boolean;
+  onOpenFile?: (path: string) => void;
 }
 
-export function Conversation({ turns, running }: ConversationProps) {
+export function Conversation({ turns, running, onOpenFile }: ConversationProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     try {
@@ -53,7 +54,7 @@ export function Conversation({ turns, running }: ConversationProps) {
               <div className="text-xs font-medium text-muted-foreground">
                 Agent
               </div>
-              <EventStream events={turn.events} />
+              <EventStream events={turn.events} onOpenFile={onOpenFile} />
             </section>
           )}
         </div>

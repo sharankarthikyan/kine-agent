@@ -134,8 +134,8 @@ export function FilesTree({ nodes, onOpenFile }: FilesTreeProps) {
 
   return (
     <ScrollArea className="h-full">
-      <div className="p-3">
-        <div className="rounded-lg border border-border bg-muted/20 py-1">
+      <div className="p-2">
+        <div className="py-1">
           {nodes.map((node) => (
             <TreeNodeRow key={node.path} node={node} depth={0} onOpenFile={onOpenFile} />
           ))}

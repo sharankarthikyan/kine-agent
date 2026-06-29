@@ -1,4 +1,4 @@
-import { Fragment } from "react";
+import { Fragment, type KeyboardEvent } from "react";
 import type { AgentEvent } from "../lib/agent";
 import { EmptyState } from "./EmptyState";
 import { Markdown } from "./Markdown";
@@ -8,6 +8,8 @@ import { Wrench, Pencil } from "lucide-react";
 
 interface EventStreamProps {
   events: AgentEvent[];
+  /** Open a file's diff when a file-related tool chip is clicked. */
+  onOpenFile?: (path: string) => void;
 }
 
 /**
@@ -17,7 +19,7 @@ interface EventStreamProps {
  * is NOT re-rendered when prose already exists — the streamed text is the answer;
  * it's only shown when the turn produced no prose.
  */
-export function EventStream({ events }: EventStreamProps) {
+export function EventStream({ events, onOpenFile }: EventStreamProps) {
   if (events.length === 0) {
     return (
       <EmptyState
@@ -36,11 +38,11 @@ export function EventStream({ events }: EventStreamProps) {
           // chip per line — far less vertical noise when an agent reads N files.
           <div key={i} className="flex w-full flex-wrap gap-1.5">
             {group.events.map((event, j) => (
-              <Fragment key={j}>{renderEvent(event, hasProse)}</Fragment>
+              <Fragment key={j}>{renderEvent(event, hasProse, onOpenFile)}</Fragment>
             ))}
           </div>
         ) : (
-          <Fragment key={i}>{renderEvent(group.event, hasProse)}</Fragment>
+          <Fragment key={i}>{renderEvent(group.event, hasProse, onOpenFile)}</Fragment>
         )
       )}
     </div>
@@ -68,7 +70,11 @@ function groupChipRuns(events: AgentEvent[]): ChipGroup[] {
   return groups;
 }
 
-function renderEvent(event: AgentEvent, hasProse: boolean) {
+function renderEvent(
+  event: AgentEvent,
+  hasProse: boolean,
+  onOpenFile?: (path: string) => void,
+) {
   switch (event.kind) {
     case "token":
       // Agent prose is Markdown and is the dominant element of the turn.
@@ -76,11 +82,28 @@ function renderEvent(event: AgentEvent, hasProse: boolean) {
 
     case "toolCall": {
       const summary = describeToolCall(event.data.name, event.data.input);
+      const filePath = fileTargetPath(event.data.name, event.data.input);
+      const clickable = filePath !== null && onOpenFile !== undefined;
       return (
         <Badge
           variant="secondary"
-          className="gap-1.5 max-w-full overflow-hidden font-normal"
+          className={`gap-1.5 max-w-full overflow-hidden font-normal ${
+            clickable ? "cursor-pointer hover:bg-secondary/70" : ""
+          }`}
           title={event.data.input}
+          {...(clickable
+            ? {
+                role: "button",
+                tabIndex: 0,
+                onClick: () => onOpenFile!(filePath!),
+                onKeyDown: (e: KeyboardEvent) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    onOpenFile!(filePath!);
+                  }
+                },
+              }
+            : {})}
         >
           <Wrench aria-hidden="true" className="size-3 shrink-0" />
           <span className="truncate">
@@ -93,16 +116,33 @@ function renderEvent(event: AgentEvent, hasProse: boolean) {
       );
     }
 
-    case "fileWrite":
+    case "fileWrite": {
+      const clickable = onOpenFile !== undefined && event.data.path !== "";
       return (
         <Badge
           variant="secondary"
-          className="gap-1 max-w-full overflow-hidden font-mono font-normal"
+          className={`gap-1 max-w-full overflow-hidden font-mono font-normal ${
+            clickable ? "cursor-pointer hover:bg-secondary/70" : ""
+          }`}
+          {...(clickable
+            ? {
+                role: "button",
+                tabIndex: 0,
+                onClick: () => onOpenFile!(event.data.path),
+                onKeyDown: (e: KeyboardEvent) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    onOpenFile!(event.data.path);
+                  }
+                },
+              }
+            : {})}
         >
           <Pencil aria-hidden="true" className="size-3 shrink-0" />
           <span className="truncate">{event.data.path}</span>
         </Badge>
       );
+    }
 
     case "approvalNeeded":
       // The one event that earns a real card — it's an interactive gate.
@@ -143,6 +183,23 @@ function renderEvent(event: AgentEvent, hasProse: boolean) {
  * `Read · App.tsx`, `Bash · npm test`, `Agent · Review portfolio UI/UX`.
  * Falls back to "" (chip shows just the tool name) when nothing useful parses.
  */
+/**
+ * The file path a tool acted on, for the file tools whose chip should open a
+ * diff on click (Read/Write/Edit/NotebookEdit). Returns null for non-file tools.
+ */
+function fileTargetPath(name: string, input: string): string | null {
+  if (!["Read", "Write", "Edit", "NotebookEdit"].includes(name)) return null;
+  try {
+    const parsed = JSON.parse(input);
+    if (!parsed || typeof parsed !== "object") return null;
+    const args = parsed as Record<string, unknown>;
+    const path = args.file_path ?? args.path ?? args.notebook_path;
+    return typeof path === "string" && path.trim() !== "" ? path : null;
+  } catch {
+    return null;
+  }
+}
+
 function describeToolCall(name: string, input: string): string {
   let args: Record<string, unknown> = {};
   try {

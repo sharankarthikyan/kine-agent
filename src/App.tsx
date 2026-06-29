@@ -562,7 +562,7 @@ export default function App() {
                   />
                   <div className="flex flex-1 flex-col overflow-auto min-h-0">
                     <div className="mt-auto w-full max-w-3xl mx-auto px-4">
-                      <Conversation turns={turns} running={running} />
+                      <Conversation turns={turns} running={running} onOpenFile={(path) => void handleOpenFile(path)} />
                     </div>
                   </div>
                   <PromptBar
