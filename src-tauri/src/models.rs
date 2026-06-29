@@ -147,6 +147,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires Claude Code on PATH; run manually with cargo test -- --ignored"]
     fn claude_is_installed_on_this_machine() {
         let agents = detect_agents();
         assert!(

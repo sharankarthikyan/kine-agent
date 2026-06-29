@@ -201,7 +201,7 @@ export default function App() {
                     className="rounded-full"
                     onClick={() => setDiffOpen(true)}
                   >
-                    <FileDiff className="mr-2 size-4" />
+                    <FileDiff data-icon />
                     {changedCount} file{changedCount === 1 ? "" : "s"} changed — Review
                   </Button>
                 </div>

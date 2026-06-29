@@ -15,10 +15,10 @@ interface EmptyStateProps {
 export function EmptyState({ heading, hint }: EmptyStateProps) {
   return (
     <Empty className="border-none">
+      <EmptyMedia variant="icon">
+        <MessageSquare />
+      </EmptyMedia>
       <EmptyHeader>
-        <EmptyMedia variant="icon">
-          <MessageSquare />
-        </EmptyMedia>
         <EmptyTitle>{heading}</EmptyTitle>
         <EmptyDescription>{hint}</EmptyDescription>
       </EmptyHeader>
