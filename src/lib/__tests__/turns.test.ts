@@ -40,4 +40,17 @@ describe("turnsFromEvents", () => {
     expect(turns[0].prompt).toBe("");
     expect(turns[0].events).toEqual([{ kind: "token", data: {} }]);
   });
+
+  it("opens a fresh turn for each prompt even with no agent events between", () => {
+    const turns = turnsFromEvents([ev(0, "prompt", '{"text":"a"}'), ev(1, "prompt", '{"text":"b"}')]);
+    expect(turns).toHaveLength(2);
+    expect(turns[0]).toEqual({ prompt: "a", events: [] });
+    expect(turns[1]).toEqual({ prompt: "b", events: [] });
+  });
+
+  it("falls back to empty prompt when a valid payload lacks text", () => {
+    const turns = turnsFromEvents([ev(0, "prompt", '{"foo":1}')]);
+    expect(turns).toHaveLength(1);
+    expect(turns[0].prompt).toBe("");
+  });
 });

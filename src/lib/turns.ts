@@ -7,6 +7,9 @@ import type { Turn } from "../components/Conversation";
  * a new turn; every other row appends to the current turn (creating an empty-prompt
  * turn first if the stream starts with agent output). Malformed payloads degrade to
  * an empty `data` object rather than throwing.
+ *
+ * Input is assumed to be in seq order — `seq` and `ts` fields are not consulted.
+ * `kind` is trusted as written by the persistence layer; no re-validation is done here.
  */
 export function turnsFromEvents(events: StoredEvent[]): Turn[] {
   const turns: Turn[] = [];
@@ -18,7 +21,8 @@ export function turnsFromEvents(events: StoredEvent[]): Turn[] {
     }
     if (turns.length === 0) turns.push({ prompt: "", events: [] });
     const data = safeParse(event.payloadJson);
-    turns[turns.length - 1].events.push({ kind: event.kind, data } as AgentEvent);
+    const currentTurn = turns[turns.length - 1];
+    currentTurn.events.push({ kind: event.kind, data } as AgentEvent);
   }
   return turns;
 }
