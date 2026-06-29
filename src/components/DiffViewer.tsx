@@ -55,7 +55,7 @@ export function DiffViewer({ diff }: DiffViewerProps) {
   return (
     <div className="flex flex-col h-full min-h-0">
       {/* Summary header */}
-      <p className="shrink-0 px-3 py-2 text-sm text-muted-foreground">
+      <p className="shrink-0 px-3 py-2 text-sm tabular-nums text-muted-foreground">
         {count} {count === 1 ? "file" : "files"} changed
       </p>
 

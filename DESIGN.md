@@ -34,8 +34,8 @@
 - Framework: React 19 + Vite + TypeScript, inside Tauri 2 (system WebView).
 - Styling: **Tailwind CSS** (v4).
 - Components: **shadcn/ui** (Radix primitives + `cva` variants), copied into `src/components/ui/`.
-- Installed: _(updated as added)_ button, input, textarea, card, scroll-area, dropdown-menu, select,
-  badge, separator, tooltip, skeleton, sonner (toast).
+- Installed: alert, badge, button, card, dropdown-menu, empty, scroll-area, separator, skeleton,
+  sonner (toast), textarea, tooltip.
 - Extension: custom variants via `cva()` in the component file; never fork a primitive unnecessarily.
 - Composition: every component accepts `className` and merges via `cn()` (`src/lib/utils.ts`).
 
