@@ -6,6 +6,7 @@ import { DiffViewer } from "./components/DiffViewer";
 import { TitleBar } from "./components/TitleBar";
 import { SessionList } from "./components/SessionList";
 import { startSession, sendMessage, type AgentEvent } from "./lib/agent";
+import { DEFAULT_MODEL, type AgentModel } from "./lib/models";
 import { reviewSession, type SessionDiff } from "./lib/review";
 import { listSessions, sessionEvents, type SessionSummary } from "./lib/sessions";
 import { turnsFromEvents } from "./lib/turns";
@@ -24,6 +25,7 @@ export default function App() {
   const [diff, setDiff] = useState<SessionDiff | null>(null);
   const [diffOpen, setDiffOpen] = useState(false);
   const [diffExpanded, setDiffExpanded] = useState(false);
+  const [selectedModel, setSelectedModel] = useState<AgentModel>(DEFAULT_MODEL);
 
   // Synchronous ref keeps the active session ID readable inside async callbacks
   // without stale-closure issues — the guard for cross-session contamination.
@@ -81,7 +83,7 @@ export default function App() {
     });
   }
 
-  async function handleSend(text: string) {
+  async function handleSend(text: string, model: AgentModel) {
     const isNew = activeSessionId === null;
     const sessionId = activeSessionId ?? crypto.randomUUID();
     // Set the ref synchronously before the first await so the cross-session guard
@@ -107,11 +109,13 @@ export default function App() {
       if (activeSessionIdRef.current !== sessionId) return;
       appendToLastTurn(event);
     };
+    // Forward the Claude model alias; other agents don't use --model yet.
+    const modelArg = model.agent === "claude" ? model.id : undefined;
     try {
       if (isNew) {
-        await startSession({ prompt: text, repo: ".", sessionId, onEvent });
+        await startSession({ prompt: text, repo: ".", sessionId, model: modelArg, onEvent });
       } else {
-        await sendMessage({ sessionId, prompt: text, onEvent });
+        await sendMessage({ sessionId, prompt: text, model: modelArg, onEvent });
       }
     } catch (err) {
       onEvent({ kind: "error", data: { message: String(err) } });
@@ -170,7 +174,12 @@ export default function App() {
                   </button>
                 </div>
               )}
-              <PromptBar onStart={handleSend} running={running} />
+              <PromptBar
+                onStart={handleSend}
+                running={running}
+                model={selectedModel}
+                onModelChange={setSelectedModel}
+              />
             </section>
           )}
 
