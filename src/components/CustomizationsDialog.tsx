@@ -148,6 +148,15 @@ function NavRow({ item, active, count, onClick }: NavRowProps) {
 
 // ─── File detail view ─────────────────────────────────────────────────────────
 
+// Returns a display-friendly path: worktree files become repo-relative, home
+// files become ~/…, everything else is unchanged. The full path is preserved
+// as a title attribute for hover inspection.
+function shortenPath(path: string): string {
+  const wt = path.match(/\/\.agent-editor\/worktrees\/[^/]+\/(.+)$/);
+  if (wt) return wt[1];
+  return path.replace(/^\/(?:Users|home)\/[^/]+\//, "~/");
+}
+
 // Maps file extension to a Prism language id. Defaults to "markdown" because
 // the majority of agent/skill files are .md. Falls back gracefully — Prism
 // renders unsupported languages as plain text.
@@ -254,8 +263,11 @@ function FileDetailView({ detail, loading, error, content, sessionId, onBack, on
         </Button>
         <div className="flex flex-col min-w-0 gap-0.5 flex-1">
           <span className="text-sm font-bold leading-tight truncate">{detail.name}</span>
-          <span className="text-xs text-muted-foreground font-mono leading-tight truncate">
-            {detail.path}
+          <span
+            className="text-xs text-muted-foreground font-mono leading-tight truncate"
+            title={detail.path}
+          >
+            {shortenPath(detail.path)}
           </span>
         </div>
         {canEdit && (
