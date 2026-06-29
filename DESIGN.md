@@ -9,6 +9,7 @@
 - Target users: expert developers / power users, keyboard-driven, running many agent sessions in parallel.
 - Default interaction model: keyboard-friendly desktop; 3-zone master-detail (session list | chat | diff pane).
 - Tone: calm and restrained — "felt, not seen". Whitespace and subtle surfaces over borders and color.
+- **No decorative emoji:** UI uses Lucide icons (`data-icon`) exclusively — never emoji glyphs. All labels are normal-case (no uppercase / title-case forcing). Explicit user preference.
 
 ## Tokens (shadcn/ui, zinc base)
 - **Colors:** shadcn CSS variables (`--background`, `--foreground`, `--card`, `--popover`, `--primary`,
@@ -34,15 +35,13 @@
 - Framework: React 19 + Vite + TypeScript, inside Tauri 2 (system WebView).
 - Styling: **Tailwind CSS** (v4).
 - Components: **shadcn/ui** (Radix primitives + `cva` variants), copied into `src/components/ui/`.
-- Installed: alert, badge, button, card, dropdown-menu, empty, progress, scroll-area, separator,
-  sheet, skeleton, sonner (toast), tabs, textarea, tooltip.
+- Installed: alert, badge, button, card, dropdown-menu, empty, input, progress, scroll-area, separator,
+  sheet, skeleton, sonner (toast), switch, tabs, textarea, tooltip.
 - Extension: custom variants via `cva()` in the component file; never fork a primitive unnecessarily.
 - Composition: every component accepts `className` and merges via `cn()` (`src/lib/utils.ts`).
 
 ## Patterns
-- **Layout:** 3-zone master-detail — session list (left, ~`w-72`) | chat (center, prose capped ~`max-w-3xl`,
-  bottom-anchored) | diff pane (right, collapsible + expand-to-fullscreen). Separate with space + subtle
-  surface, not heavy borders.
+- **Layout:** 3-zone master-detail — session list (left, ~`w-72`, collapsible, state in `localStorage`) | chat (center, bottom-anchored composer) | context/changes/files pane (right, collapsible + expand-to-fullscreen). **Inset rounded-panel chrome:** all 3 columns are inset from the window edges with a gap; each is a `rounded-xl border border-border bg-card` surface on a darker window `background` — floating-card look (per Conductor screenshots / user feedback).
 - **Composer (prompt bar):** modern AI-chat input — a roomy `rounded-xl` bordered card with a `Textarea`
   ("Message the agent…"), bottom-left a **model/agent selector** (Lucide icon + model name + tier `Badge` +
   chevron, via `DropdownMenu`/`Select`), bottom-right an attach icon button + a circular `rounded-full` send
@@ -54,7 +53,11 @@
 - **Errors:** inline, scoped to the turn/session (`destructive` accent); never blank the whole view.
 - **Empty state:** centered icon + short heading + one CTA ("Start a session").
 - **States:** every interactive component defines default / hover / focus-visible / disabled (+ loading/error where apt).
-- **Context panel:** a tabbed right pane (`Context | Diff`, shadcn `Tabs`) in the same collapsible/expandable slot; Context tab shows window-usage (`Progress`) + cost, files this session, loaded rules/config (open in a `Sheet`), discovered skills/subagents/commands, and settings — all read-only, derived headless.
+- **Right pane:** shadcn `Tabs` with three tabs — **Context** (window-usage `Progress` + cost, files this session, loaded rules/config open in a `Sheet`, discovered skills/subagents) · **Changes** (primary Commit button + branch-ahead badge + file rows; file row opens diff in a `Sheet`) · **Files** (collapsible directory tree). Pane is collapsible/expandable; all content is read-only, derived from agent events.
+- **TitleBar:** 3-zone drag region (macOS traffic lights | centered app title | right buttons). Functional: left sidebar-toggle + right open-editor / open-terminal / theme-toggle buttons. Future stub buttons carry `aria-disabled` and never intercept pointer events.
+- **Sidebar session rows:** status dot + status label (never color-only) + session title + muted diffstat `+A −D · relativeTime` (added in emerald, removed in `destructive`, `tabular-nums`). Group headers = `text-muted-foreground`, normal-case workspace name. Customizations section rows: Lucide icon + label + muted count (`tabular-nums`).
+- **New-session:** centered card; repo picker and agent picker rendered as `DropdownMenu` triggers; full-width `Textarea` ("Describe the task…"); autonomy `Switch` labeled "Edit automatically".
+- **Session-detail header:** status dot + session title + muted `<repo> · +A −D`; right: approve / pin stub buttons (`aria-disabled`) + close.
 - **Responsive:** desktop-first; panes collapse gracefully on narrow widths (diff → tab fallback).
 - **Dark mode:** default dark (calm zinc); light available via class toggle; theme-aware tokens only (no hardcoded hex).
 
