@@ -88,26 +88,33 @@ fn allowed_read_write_paths(worktree: &Path, canonical_worktree: &Path) -> Vec<P
         })
         .collect();
     // Also permit files discovered by list_capabilities — skills, subagents, and
-    // commands — including user-scoped ones under `~/.claude`. Re-apply the same
-    // boundary guard used for rule files: the canonical path must resolve INSIDE
-    // the worktree or the user's `~/.claude` tree. A symlinked capability that
-    // resolves outside those roots (e.g. ~/.ssh/id_rsa) is rejected — defence in
-    // depth against a compromised WebView.
-    let canonical_user_claude = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .and_then(|h| std::fs::canonicalize(h.join(".claude")).ok());
+    // commands. A capability file is allowed only if its canonical path resolves
+    // under one of the CANONICALIZED discovery roots below. Canonicalizing the
+    // roots follows directory symlinks (e.g. a `~/.claude/skills` that points at
+    // `~/.agents/skills`), so legitimate symlinked capability dirs work — while a
+    // FILE symlink escaping to an unrelated location (e.g. ~/.ssh/id_rsa) still
+    // resolves outside every root and is rejected. Defence in depth against a
+    // compromised WebView, without breaking the common symlinked-config setup.
+    let mut cap_roots: Vec<PathBuf> = Vec::new();
+    for sub in [".claude/agents", ".claude/skills", ".claude/commands"] {
+        if let Ok(c) = std::fs::canonicalize(worktree.join(sub)) {
+            cap_roots.push(c);
+        }
+    }
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        for sub in [".claude/agents", ".claude/skills", ".claude/commands"] {
+            if let Ok(c) = std::fs::canonicalize(home.join(sub)) {
+                cap_roots.push(c);
+            }
+        }
+    }
     let caps = list_capabilities("claude", worktree);
     for cap in caps.skills.into_iter().chain(caps.subagents).chain(caps.commands) {
         if cap.path.is_empty() {
             continue;
         }
         if let Ok(cp) = std::fs::canonicalize(&cap.path) {
-            let in_worktree = cp.starts_with(canonical_worktree);
-            let in_user_claude = canonical_user_claude
-                .as_ref()
-                .map(|h| cp.starts_with(h))
-                .unwrap_or(false);
-            if in_worktree || in_user_claude {
+            if cap_roots.iter().any(|root| cp.starts_with(root)) {
                 allowed.push(cp);
             }
         }
@@ -615,6 +622,31 @@ mod tests {
         ));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_allows_capability_under_symlinked_skills_dir() {
+        // Mirrors the common setup where `.claude/skills` is a directory symlink
+        // pointing elsewhere (e.g. `~/.agents/skills`). The skill's canonical path
+        // is outside `.claude`, but it lives under the canonicalized discovery
+        // root, so it must remain readable.
+        let dir = std::env::temp_dir().join(format!("ae-symdir-{}", std::process::id()));
+        let real_skills = std::env::temp_dir().join(format!("ae-realskills-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join(".claude")).unwrap();
+        std::fs::create_dir_all(real_skills.join("bar")).unwrap();
+        std::fs::write(real_skills.join("bar/SKILL.md"), "skill body").unwrap();
+        // .claude/skills -> real_skills (directory symlink)
+        std::os::unix::fs::symlink(&real_skills, dir.join(".claude/skills")).unwrap();
+
+        let skill_via_link = dir.join(".claude/skills/bar/SKILL.md");
+        assert_eq!(
+            read_text_file(&skill_via_link.display().to_string(), &dir).unwrap(),
+            "skill body"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&real_skills);
     }
 
     #[test]
