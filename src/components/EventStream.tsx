@@ -49,7 +49,7 @@ function renderEvent(event: AgentEvent, hasProse: boolean) {
           className="gap-1 max-w-full overflow-hidden font-mono font-normal"
           title={event.data.input}
         >
-          <Wrench className="size-3 shrink-0" />
+          <Wrench aria-hidden="true" className="size-3 shrink-0" />
           <span className="truncate">
             {event.data.name}
             {summarize(event.data.input)}
@@ -63,7 +63,7 @@ function renderEvent(event: AgentEvent, hasProse: boolean) {
           variant="secondary"
           className="gap-1 max-w-full overflow-hidden font-mono font-normal"
         >
-          <Pencil className="size-3 shrink-0" />
+          <Pencil aria-hidden="true" className="size-3 shrink-0" />
           <span className="truncate">{event.data.path}</span>
         </Badge>
       );

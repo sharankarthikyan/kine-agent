@@ -40,7 +40,7 @@ export function Conversation({ turns, running }: ConversationProps) {
         <div key={i} className="flex flex-col gap-3">
           {/* User message: subtle muted bubble, contained (not full-width). */}
           <section className="flex flex-col gap-2">
-            <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+            <div className="text-xs font-medium text-muted-foreground">
               You
             </div>
             <div className="self-start max-w-prose rounded-lg bg-muted px-4 py-3 text-foreground whitespace-pre-wrap">
@@ -50,7 +50,7 @@ export function Conversation({ turns, running }: ConversationProps) {
           {/* Agent output: plain on the canvas — room for prose, chips, code. */}
           {turn.events.length > 0 && (
             <section className="flex flex-col gap-2">
-              <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+              <div className="text-xs font-medium text-muted-foreground">
                 Agent
               </div>
               <EventStream events={turn.events} />
