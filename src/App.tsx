@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { FileDiff, Info, Maximize2, Minimize2, X } from "lucide-react";
 import { PromptBar } from "./components/PromptBar";
@@ -8,7 +9,7 @@ import { DiffViewer } from "./components/DiffViewer";
 import { TitleBar } from "./components/TitleBar";
 import { SessionList } from "./components/SessionList";
 import { ContextPanel } from "./components/ContextPanel";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { startSession, sendMessage, type AgentEvent } from "./lib/agent";
@@ -169,6 +170,7 @@ export default function App() {
     setDiff(null);
     setRules([]);
     setCapabilities(null);
+    setRuleView(null);
     try {
       const ev = await sessionEvents(id);
       setStoredEvents(ev);
@@ -187,16 +189,28 @@ export default function App() {
     setStoredEvents([]);
     setRules([]);
     setCapabilities(null);
+    setRuleView(null);
     closeRight();
   }
 
+  // openContext captures sessionId synchronously so the cross-session guard
+  // can compare against the ref after each async IPC call completes.
   async function openContext() {
+    const sessionId = activeSessionId;
     setRightTab("context");
-    if (!activeSessionId) return;
-    try { setRules(await inspectRules(activeSessionId)); } catch { setRules([]); }
+    if (!sessionId) return;
     try {
-      setCapabilities(await listCapabilities(activeSessionId, selectedModel?.agent ?? "claude"));
-    } catch { setCapabilities(null); }
+      const r = await inspectRules(sessionId);
+      if (activeSessionIdRef.current === sessionId) setRules(r);
+    } catch {
+      if (activeSessionIdRef.current === sessionId) setRules([]);
+    }
+    try {
+      const c = await listCapabilities(sessionId, selectedModel?.agent ?? "claude");
+      if (activeSessionIdRef.current === sessionId) setCapabilities(c);
+    } catch {
+      if (activeSessionIdRef.current === sessionId) setCapabilities(null);
+    }
   }
 
   async function handleOpenRule(rule: RuleFile) {
@@ -211,7 +225,6 @@ export default function App() {
   const files = filesFromEvents(storedEvents);
   const usage = latestUsage(storedEvents);
   const changedCount = diff?.files.length ?? 0;
-  const showReviewChip = !running && changedCount > 0 && rightTab !== "diff";
 
   return (
     <div className="flex flex-col h-screen bg-background text-foreground">
@@ -229,32 +242,37 @@ export default function App() {
           {/* Chat column — hidden only while the right pane is expanded to fullscreen. */}
           {!rightExpanded && (
             <section className="flex flex-1 flex-col min-w-0 min-h-0">
+              {/* Stable top toolbar — always the same height; never causes layout jerk. */}
+              {activeSessionId !== null && (
+                <div className="flex items-center justify-end gap-1 px-4 py-2 border-b border-border">
+                  <Button
+                    variant={rightTab === "context" ? "secondary" : "ghost"}
+                    size="sm"
+                    onClick={openContext}
+                  >
+                    <Info data-icon />
+                    Context
+                  </Button>
+                  <Button
+                    variant={rightTab === "diff" ? "secondary" : "ghost"}
+                    size="sm"
+                    onClick={() => setRightTab("diff")}
+                  >
+                    <FileDiff data-icon />
+                    Diff
+                    {changedCount > 0 && (
+                      <Badge variant="secondary" className="ml-1 tabular-nums">
+                        {changedCount}
+                      </Badge>
+                    )}
+                  </Button>
+                </div>
+              )}
               <div className="flex flex-1 flex-col overflow-auto min-h-0">
                 <div className="mt-auto w-full max-w-3xl mx-auto px-4">
                   <Conversation turns={turns} running={running} />
                 </div>
               </div>
-              {(showReviewChip || activeSessionId !== null) && (
-                <div className="flex items-center gap-2 px-4 py-2">
-                  {showReviewChip && (
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="rounded-full"
-                      onClick={() => setRightTab("diff")}
-                    >
-                      <FileDiff data-icon />
-                      {changedCount} file{changedCount === 1 ? "" : "s"} changed — Review
-                    </Button>
-                  )}
-                  {activeSessionId !== null && (
-                    <Button variant="ghost" size="sm" onClick={openContext}>
-                      <Info data-icon />
-                      Context
-                    </Button>
-                  )}
-                </div>
-              )}
               <PromptBar
                 onStart={handleSend}
                 running={running}
@@ -302,23 +320,24 @@ export default function App() {
                     </Button>
                   </div>
                 </header>
-                <div className="flex-1 min-h-0 overflow-auto">
-                  {rightTab === "context" ? (
-                    <ContextPanel
-                      usage={usage}
-                      files={files}
-                      rules={rules}
-                      capabilities={capabilities}
-                      model={selectedModel}
-                      onOpenRule={handleOpenRule}
-                      onOpenFile={() => setRightTab("diff")}
-                    />
-                  ) : diff ? (
+                <TabsContent value="context" className="flex-1 min-h-0 overflow-auto">
+                  <ContextPanel
+                    usage={usage}
+                    files={files}
+                    rules={rules}
+                    capabilities={capabilities}
+                    model={selectedModel}
+                    onOpenRule={handleOpenRule}
+                    onOpenFile={() => setRightTab("diff")}
+                  />
+                </TabsContent>
+                <TabsContent value="diff" className="flex-1 min-h-0 overflow-auto">
+                  {diff ? (
                     <DiffViewer diff={diff} />
                   ) : (
                     <p className="p-4 text-sm text-muted-foreground">No changes.</p>
                   )}
-                </div>
+                </TabsContent>
               </Tabs>
             </aside>
           )}

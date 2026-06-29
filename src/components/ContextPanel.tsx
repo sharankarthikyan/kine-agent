@@ -77,7 +77,9 @@ function WindowUsage({ usage, model }: WindowUsageProps) {
       </div>
 
       {usage.costUsd !== null && (
-        <p className="text-xs tabular-nums font-medium">${usage.costUsd.toFixed(2)}</p>
+        <p className="text-xs tabular-nums font-medium">
+          ${usage.costUsd < 0.01 ? usage.costUsd.toFixed(4) : usage.costUsd.toFixed(2)}
+        </p>
       )}
     </div>
   );
