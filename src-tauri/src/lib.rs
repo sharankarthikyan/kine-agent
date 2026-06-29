@@ -9,6 +9,8 @@ pub mod review;
 pub mod store;
 pub mod worktree;
 
+use tauri::Manager;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Open the session store before building (block on the async connect once).
@@ -22,6 +24,16 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(store)
+        .setup(|app| {
+            if let Some(win) = app.get_webview_window("main") {
+                // Paint the native window (including the transparent Overlay titlebar region on
+                // macOS) opaque dark so the desktop never bleeds through the top edge.
+                // The backgroundColor in tauri.conf.json is compiled-in; this runtime call
+                // forces the native layer to apply it reliably on every launch.
+                let _ = win.set_background_color(Some(tauri::window::Color(9, 9, 11, 255)));
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::start_session,
             commands::cleanup_session,
