@@ -3,6 +3,7 @@ import type { CSSProperties } from "react";
 import { PromptBar } from "./components/PromptBar";
 import { EventStream } from "./components/EventStream";
 import { DiffViewer } from "./components/DiffViewer";
+import { RunningIndicator } from "./components/RunningIndicator";
 import { startSession, type AgentEvent } from "./lib/agent";
 import { reviewSession, type SessionDiff } from "./lib/review";
 
@@ -46,7 +47,8 @@ export default function App() {
     <div style={{ display: "grid", gridTemplateColumns: "var(--sidebar-w) 1fr", height: "100vh" }}>
       <aside style={{ borderRight: "1px solid var(--border-hairline)", background: "var(--bg-surface)", padding: "var(--space-4)" }}>
         <h1 style={{ fontSize: "var(--fs-14)", color: "var(--text-primary)" }}>agent-editor</h1>
-        <p style={{ color: "var(--text-muted)", fontSize: "var(--fs-13)" }}>Sessions (coming soon)</p>
+        <p style={{ color: "var(--text-muted)", fontSize: "var(--fs-12)", textTransform: "uppercase", letterSpacing: "0.04em", marginTop: "var(--space-5)" }}>SESSIONS</p>
+        <p style={{ color: "var(--text-disabled)", fontSize: "var(--fs-13)", marginTop: "var(--space-2)" }}>No sessions yet.</p>
       </aside>
       <main style={{ display: "flex", flexDirection: "column", height: "100vh", minHeight: 0 }}>
         <PromptBar onStart={handleStart} running={running} />
@@ -56,7 +58,14 @@ export default function App() {
           </div>
         )}
         <div style={{ flex: 1, overflow: "auto", minHeight: 0 }}>
-          {diff ? <DiffViewer diff={diff} /> : <EventStream events={events} />}
+          {diff ? (
+            <DiffViewer diff={diff} />
+          ) : (
+            <div style={{ maxWidth: "var(--content-measure)" }}>
+              {running && <RunningIndicator />}
+              <EventStream events={events} />
+            </div>
+          )}
         </div>
       </main>
     </div>

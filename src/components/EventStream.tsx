@@ -1,5 +1,6 @@
 import type { CSSProperties } from "react";
 import type { AgentEvent } from "../lib/agent";
+import { EmptyState } from "./EmptyState";
 
 interface EventStreamProps {
   events: AgentEvent[];
@@ -8,9 +9,10 @@ interface EventStreamProps {
 export function EventStream({ events }: EventStreamProps) {
   if (events.length === 0) {
     return (
-      <p style={{ color: "var(--text-muted)", padding: "var(--space-4)" }}>
-        No activity yet.
-      </p>
+      <EmptyState
+        heading="No activity yet."
+        hint="Describe a task above and press Start to run an agent."
+      />
     );
   }
   return (
