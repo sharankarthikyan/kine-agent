@@ -1,7 +1,7 @@
 use crate::adapter::{AgentAdapter, EventSink, Prompt};
 use crate::adapters::claude::ClaudeAdapter;
 use crate::events::AgentEvent;
-use crate::inspect::{self, Capabilities, CustomizationCounts, RuleFile};
+use crate::inspect::{self, Capabilities, CustomizationCounts, HookEntry, McpServerEntry, PluginEntry, RuleFile};
 use crate::git::{self, BranchChanges, CommitResult, TreeEntry};
 use crate::review::{self, Diffstat, SessionDiff};
 use crate::store::{self, SessionStore, SessionSummary, StoredEvent};
@@ -420,6 +420,46 @@ pub async fn open_terminal(session_id: String) -> Result<(), String> {
             drop(wt);
             Err("Opening a terminal is only supported on macOS for now".into())
         }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Return all hook rules configured for a session's worktree (project) and
+/// `~/.claude/settings.json` (user). Each leaf command in the hooks object becomes one
+/// entry. Best-effort: missing or unparseable files contribute an empty list.
+#[tauri::command]
+pub async fn list_hooks(session_id: String) -> Result<Vec<HookEntry>, String> {
+    let root = worktrees_root();
+    tokio::task::spawn_blocking(move || {
+        let wt = crate::worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
+        Ok::<Vec<HookEntry>, String>(inspect::list_hooks(&wt.path))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Return all MCP servers declared for a session's worktree (`.mcp.json`) and
+/// `~/.claude.json` (user). Best-effort: missing or unparseable files contribute nothing.
+#[tauri::command]
+pub async fn list_mcp_servers(session_id: String) -> Result<Vec<McpServerEntry>, String> {
+    let root = worktrees_root();
+    tokio::task::spawn_blocking(move || {
+        let wt = crate::worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
+        Ok::<Vec<McpServerEntry>, String>(inspect::list_mcp_servers(&wt.path))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Return installed Claude Code plugins from `~/.claude/plugins/installed_plugins.json`.
+/// Best-effort: returns an empty list when the file is missing or unparseable.
+#[tauri::command]
+pub async fn list_plugins(session_id: String) -> Result<Vec<PluginEntry>, String> {
+    let root = worktrees_root();
+    tokio::task::spawn_blocking(move || {
+        let wt = crate::worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
+        Ok::<Vec<PluginEntry>, String>(inspect::list_plugins(&wt.path))
     })
     .await
     .map_err(|e| e.to_string())?

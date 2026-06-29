@@ -343,6 +343,185 @@ fn first_description(path: &Path) -> Option<String> {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Customization lists
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// A single hook rule as configured in a Claude settings file.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HookEntry {
+    pub event: String,
+    pub matcher: Option<String>,
+    pub command: String,
+    /// `"project"` when found in the worktree, `"user"` when found in `~/.claude/`.
+    pub source: String,
+}
+
+/// A single MCP server declaration.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServerEntry {
+    pub name: String,
+    pub detail: Option<String>,
+    /// `"project"` when found in `<worktree>/.mcp.json`, `"user"` from `~/.claude.json`.
+    pub source: String,
+}
+
+/// A single installed Claude Code plugin.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginEntry {
+    pub name: String,
+    pub detail: Option<String>,
+    /// `"user"` if any installation is user-scope, `"project"` if only project-scoped.
+    pub source: String,
+}
+
+/// Return all hook rules configured in `<worktree>/.claude/settings.json` and
+/// `~/.claude/settings.json`. Each leaf command becomes one `HookEntry`. Best-effort:
+/// missing or unparseable files contribute nothing.
+pub fn list_hooks(worktree: &Path) -> Vec<HookEntry> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    list_hooks_with_home(worktree, home.as_deref())
+}
+
+fn list_hooks_with_home(worktree: &Path, home: Option<&Path>) -> Vec<HookEntry> {
+    let mut entries = Vec::new();
+    parse_hooks_from_settings(&worktree.join(".claude/settings.json"), "project", &mut entries);
+    if let Some(h) = home {
+        parse_hooks_from_settings(&h.join(".claude/settings.json"), "user", &mut entries);
+    }
+    entries
+}
+
+/// Parse the `hooks` object from a Claude settings JSON file, appending one
+/// `HookEntry` per leaf command to `out`. The expected shape is:
+/// `{ "hooks": { "<EventName>": [ { "matcher?": "...", "hooks": [ { "type": "command", "command": "..." } ] } ] } }`
+fn parse_hooks_from_settings(path: &Path, source: &str, out: &mut Vec<HookEntry>) {
+    let Ok(content) = std::fs::read_to_string(path) else { return };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else { return };
+    let Some(hooks_obj) = json.get("hooks").and_then(|v| v.as_object()) else { return };
+
+    for (event_name, groups_val) in hooks_obj {
+        let Some(groups) = groups_val.as_array() else { continue };
+        for group in groups {
+            let matcher = group
+                .get("matcher")
+                .and_then(|m| m.as_str())
+                .map(|s| s.to_string());
+            let Some(leaf_hooks) = group.get("hooks").and_then(|h| h.as_array()) else {
+                continue;
+            };
+            for hook in leaf_hooks {
+                // Prefer the "command" string; fall back to "type" as a brief descriptor.
+                let command = hook
+                    .get("command")
+                    .and_then(|c| c.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| {
+                        hook.get("type")
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("unknown")
+                            .to_string()
+                    });
+                out.push(HookEntry {
+                    event: event_name.clone(),
+                    matcher: matcher.clone(),
+                    command,
+                    source: source.to_string(),
+                });
+            }
+        }
+    }
+}
+
+/// Return all MCP servers declared in `<worktree>/.mcp.json` and `~/.claude.json`.
+/// Best-effort: missing or unparseable files contribute nothing.
+pub fn list_mcp_servers(worktree: &Path) -> Vec<McpServerEntry> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    list_mcp_servers_with_home(worktree, home.as_deref())
+}
+
+fn list_mcp_servers_with_home(worktree: &Path, home: Option<&Path>) -> Vec<McpServerEntry> {
+    let mut entries = Vec::new();
+    parse_mcp_from_file(&worktree.join(".mcp.json"), "project", &mut entries);
+    if let Some(h) = home {
+        parse_mcp_from_file(&h.join(".claude.json"), "user", &mut entries);
+    }
+    entries
+}
+
+fn parse_mcp_from_file(path: &Path, source: &str, out: &mut Vec<McpServerEntry>) {
+    let Ok(content) = std::fs::read_to_string(path) else { return };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else { return };
+    let Some(servers) = json.get("mcpServers").and_then(|v| v.as_object()) else { return };
+
+    for (name, config) in servers {
+        // Pick the most informative single-line descriptor available.
+        let detail = config
+            .get("command")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .or_else(|| config.get("url").and_then(|v| v.as_str()).map(String::from))
+            .or_else(|| config.get("type").and_then(|v| v.as_str()).map(String::from));
+        out.push(McpServerEntry {
+            name: name.clone(),
+            detail,
+            source: source.to_string(),
+        });
+    }
+}
+
+/// Return installed Claude Code plugins from `~/.claude/plugins/installed_plugins.json`.
+/// Best-effort: missing or unparseable file returns an empty Vec. The `worktree`
+/// parameter is reserved for future per-project plugin support.
+pub fn list_plugins(worktree: &Path) -> Vec<PluginEntry> {
+    let _ = worktree;
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    list_plugins_with_home(home.as_deref())
+}
+
+fn list_plugins_with_home(home: Option<&Path>) -> Vec<PluginEntry> {
+    let Some(h) = home else { return Vec::new() };
+    let path = h.join(".claude/plugins/installed_plugins.json");
+    let Ok(content) = std::fs::read_to_string(&path) else { return Vec::new() };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else { return Vec::new() };
+    let Some(plugins) = json.get("plugins").and_then(|v| v.as_object()) else {
+        return Vec::new();
+    };
+
+    let mut entries = Vec::new();
+    for (key, records_val) in plugins {
+        // Key format: "pluginName@marketplace" (e.g. "frontend-design@claude-plugins-official").
+        let (name, marketplace) = if let Some(at_pos) = key.find('@') {
+            (key[..at_pos].to_string(), Some(key[at_pos + 1..].to_string()))
+        } else {
+            (key.clone(), None)
+        };
+        // "user" scope takes precedence; fall back to "project" if only project installs exist.
+        let source = records_val
+            .as_array()
+            .map(|arr| {
+                if arr
+                    .iter()
+                    .any(|r| r.get("scope").and_then(|s| s.as_str()) == Some("user"))
+                {
+                    "user"
+                } else {
+                    "project"
+                }
+            })
+            .unwrap_or("user");
+        entries.push(PluginEntry {
+            name,
+            detail: marketplace,
+            source: source.to_string(),
+        });
+    }
+    entries
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Customization counts
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -381,49 +560,14 @@ fn customizations_counts_with_home(worktree: &Path, home: Option<&Path>) -> Cust
     }
 }
 
-/// Sum the number of hook rules configured in `<wt>/.claude/settings.json` and
-/// `<home>/.claude/settings.json`. Each top-level entry inside the `hooks` object's
-/// per-event arrays counts as one rule. Returns 0 on any missing/parse error.
+/// Count hook rules — DRY: delegates to `list_hooks_with_home`.
 fn count_hooks(worktree: &Path, home: Option<&Path>) -> u32 {
-    let mut total = 0u32;
-    total += hooks_from_settings(&worktree.join(".claude/settings.json"));
-    if let Some(h) = home {
-        total += hooks_from_settings(&h.join(".claude/settings.json"));
-    }
-    total
+    list_hooks_with_home(worktree, home).len() as u32
 }
 
-fn hooks_from_settings(path: &Path) -> u32 {
-    (|| -> Option<u32> {
-        let content = std::fs::read_to_string(path).ok()?;
-        let json: serde_json::Value = serde_json::from_str(&content).ok()?;
-        let hooks = json.get("hooks")?.as_object()?;
-        // Each element of each per-event array is one hook rule.
-        let count: usize = hooks.values().filter_map(|v| v.as_array()).map(|a| a.len()).sum();
-        Some(count as u32)
-    })()
-    .unwrap_or(0)
-}
-
-/// Count MCP servers declared in `<wt>/.mcp.json` + `<home>/.claude.json`. Returns 0
-/// on any missing/parse error.
+/// Count MCP servers — DRY: delegates to `list_mcp_servers_with_home`.
 fn count_mcp(worktree: &Path, home: Option<&Path>) -> u32 {
-    let mut total = 0u32;
-    total += mcp_servers_from_file(&worktree.join(".mcp.json"));
-    if let Some(h) = home {
-        total += mcp_servers_from_file(&h.join(".claude.json"));
-    }
-    total
-}
-
-fn mcp_servers_from_file(path: &Path) -> u32 {
-    (|| -> Option<u32> {
-        let content = std::fs::read_to_string(path).ok()?;
-        let json: serde_json::Value = serde_json::from_str(&content).ok()?;
-        let servers = json.get("mcpServers")?.as_object()?;
-        Some(servers.len() as u32)
-    })()
-    .unwrap_or(0)
+    list_mcp_servers_with_home(worktree, home).len() as u32
 }
 
 #[cfg(test)]
@@ -719,6 +863,82 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_hooks_returns_entries_from_settings() {
+        let dir = std::env::temp_dir().join(format!("ae-hooks-{}", std::process::id()));
+        let fake_home =
+            std::env::temp_dir().join(format!("ae-hooks-home-{}", std::process::id()));
+        let claude_dir = dir.join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        std::fs::create_dir_all(&fake_home).unwrap();
+
+        // Two hooks in SessionStart: one without a matcher, one with.
+        std::fs::write(
+            claude_dir.join("settings.json"),
+            r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"echo start"}]},{"matcher":"Bash","hooks":[{"type":"command","command":"echo bash"}]}]}}"#,
+        )
+        .unwrap();
+
+        let entries = list_hooks_with_home(&dir, Some(&fake_home));
+        assert_eq!(entries.len(), 2, "expected 2 hook entries, got {entries:?}");
+
+        let no_matcher = entries.iter().find(|e| e.matcher.is_none()).unwrap();
+        assert_eq!(no_matcher.event, "SessionStart");
+        assert_eq!(no_matcher.command, "echo start");
+        assert_eq!(no_matcher.source, "project");
+
+        let with_matcher = entries.iter().find(|e| e.matcher.as_deref() == Some("Bash")).unwrap();
+        assert_eq!(with_matcher.command, "echo bash");
+
+        // count_hooks must equal list length.
+        assert_eq!(count_hooks(&dir, Some(&fake_home)), 2);
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&fake_home);
+    }
+
+    #[test]
+    fn list_mcp_servers_returns_entries_from_mcp_json() {
+        let dir = std::env::temp_dir().join(format!("ae-mcp-list-{}", std::process::id()));
+        let fake_home =
+            std::env::temp_dir().join(format!("ae-mcp-list-home-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&fake_home).unwrap();
+
+        std::fs::write(
+            dir.join(".mcp.json"),
+            r#"{"mcpServers":{"server-a":{"command":"node","args":["a.js"]},"server-b":{"url":"http://localhost:3000"}}}"#,
+        )
+        .unwrap();
+
+        let entries = list_mcp_servers_with_home(&dir, Some(&fake_home));
+        assert_eq!(entries.len(), 2, "expected 2 MCP servers, got {entries:?}");
+
+        let a = entries.iter().find(|e| e.name == "server-a").unwrap();
+        assert_eq!(a.detail.as_deref(), Some("node"));
+        assert_eq!(a.source, "project");
+
+        let b = entries.iter().find(|e| e.name == "server-b").unwrap();
+        assert_eq!(b.detail.as_deref(), Some("http://localhost:3000"));
+
+        // count_mcp must equal list length.
+        assert_eq!(count_mcp(&dir, Some(&fake_home)), 2);
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&fake_home);
+    }
+
+    #[test]
+    fn list_plugins_returns_empty_when_no_plugins_dir() {
+        let fake_home =
+            std::env::temp_dir().join(format!("ae-plugins-empty-{}", std::process::id()));
+        std::fs::create_dir_all(&fake_home).unwrap();
+        // No ~/.claude/plugins/ directory at all — must return empty gracefully.
+        let entries = list_plugins_with_home(Some(&fake_home));
+        assert!(entries.is_empty(), "expected empty plugin list, got {entries:?}");
+        let _ = std::fs::remove_dir_all(&fake_home);
     }
 
     #[cfg(unix)]

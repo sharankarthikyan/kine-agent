@@ -39,6 +39,47 @@ export interface CommitResult {
   sha: string;
 }
 
+/** A single configured hook rule (leaf command) from a Claude settings file. */
+export interface HookEntry {
+  event: string;
+  matcher: string | null;
+  command: string;
+  source: "project" | "user";
+}
+
+/** A single MCP server declaration from `.mcp.json` or `~/.claude.json`. */
+export interface McpServerEntry {
+  name: string;
+  detail: string | null;
+  source: "project" | "user";
+}
+
+/** A single installed Claude Code plugin from `~/.claude/plugins/installed_plugins.json`. */
+export interface PluginEntry {
+  name: string;
+  /** Marketplace identifier (e.g. "claude-plugins-official"), or null when unavailable. */
+  detail: string | null;
+  source: "project" | "user";
+}
+
+/** Return all hook rules configured for a session (worktree project + user ~/.claude). */
+export async function listHooks(sessionId: string): Promise<HookEntry[]> {
+  assertDesktop();
+  return invoke<HookEntry[]>("list_hooks", { sessionId });
+}
+
+/** Return all MCP servers declared for a session (worktree .mcp.json + user ~/.claude.json). */
+export async function listMcpServers(sessionId: string): Promise<McpServerEntry[]> {
+  assertDesktop();
+  return invoke<McpServerEntry[]>("list_mcp_servers", { sessionId });
+}
+
+/** Return installed Claude Code plugins from ~/.claude/plugins/installed_plugins.json. */
+export async function listPlugins(sessionId: string): Promise<PluginEntry[]> {
+  assertDesktop();
+  return invoke<PluginEntry[]>("list_plugins", { sessionId });
+}
+
 /** Return customization file counts (agents, skills, instructions, hooks, MCP servers) for a session. */
 export async function customizationsCounts(sessionId: string): Promise<CustomizationCounts> {
   assertDesktop();

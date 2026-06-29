@@ -53,7 +53,10 @@ pub fn run() {
             commands::branch_changes,
             commands::commit_session,
             commands::open_in_editor,
-            commands::open_terminal
+            commands::open_terminal,
+            commands::list_hooks,
+            commands::list_mcp_servers,
+            commands::list_plugins
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
