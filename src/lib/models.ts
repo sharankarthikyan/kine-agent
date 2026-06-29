@@ -20,6 +20,7 @@ export interface ModelInfo {
   description: string | null;
   source: "api" | "fallback";
   disabled: boolean;
+  contextWindow: number | null;
 }
 
 /** Discover which agent CLIs are installed on this machine. */
