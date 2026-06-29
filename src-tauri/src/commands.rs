@@ -107,12 +107,16 @@ fn worktrees_root() -> PathBuf {
 ///
 /// `model` is optional: `Some("opus")` / `Some("claude-opus-4-5")` etc. pass `--model`
 /// to the CLI; `None` (omitted from the IPC call) uses the CLI's own default.
+///
+/// `permission_mode` is optional: `Some("acceptEdits")` / `Some("default")` etc. pass
+/// `--permission-mode` to the CLI; `None` omits the flag (CLI default applies).
 #[tauri::command]
 pub async fn start_session(
     prompt: String,
     repo: String,
     session_id: String,
     model: Option<String>,
+    permission_mode: Option<String>,
     on_event: Channel<AgentEvent>,
     store: State<'_, SessionStore>,
 ) -> Result<(), String> {
@@ -146,18 +150,20 @@ pub async fn start_session(
         eprintln!("failed to persist prompt for session {session_id}: {e}");
     }
 
-    run_persisting(&store, session_id, Prompt { text: prompt, model }, wt.path, false, on_event).await
+    run_persisting(&store, session_id, Prompt { text: prompt, model, permission_mode }, wt.path, false, on_event).await
 }
 
 /// Continue an existing session with a follow-up message (resumes the agent in the
 /// session's worktree, persisting the new prompt + streamed events).
 ///
 /// `model` is optional: passes `--model` to the CLI when `Some`, omitted when `None`.
+/// `permission_mode` is optional: passes `--permission-mode` to the CLI when `Some`, omitted when `None`.
 #[tauri::command]
 pub async fn send_message(
     prompt: String,
     session_id: String,
     model: Option<String>,
+    permission_mode: Option<String>,
     on_event: Channel<AgentEvent>,
     store: State<'_, SessionStore>,
 ) -> Result<(), String> {
@@ -182,7 +188,7 @@ pub async fn send_message(
         eprintln!("failed to persist prompt for session {session_id}: {e}");
     }
 
-    run_persisting(&store, session_id, Prompt { text: prompt, model }, wt_path, true, on_event).await
+    run_persisting(&store, session_id, Prompt { text: prompt, model, permission_mode }, wt_path, true, on_event).await
 }
 
 /// Remove the worktree (and branch) for a finished session.

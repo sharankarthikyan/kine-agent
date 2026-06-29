@@ -5,10 +5,15 @@ use std::path::PathBuf;
 /// `model` is forwarded verbatim to `--model` on the CLI (short alias: `opus`, `sonnet`,
 /// `haiku`, `fable`; or a full model id like `claude-opus-4-5`). `None` leaves the flag
 /// absent, deferring to the CLI's own default — today's behaviour is preserved.
+///
+/// `permission_mode` is forwarded verbatim to `--permission-mode` on the CLI (valid values:
+/// `"default"`, `"acceptEdits"`, `"plan"`, `"bypassPermissions"`). `None` omits the flag,
+/// preserving today's behaviour (CLI default, which is `"default"`).
 #[derive(Debug, Clone)]
 pub struct Prompt {
     pub text: String,
     pub model: Option<String>,
+    pub permission_mode: Option<String>,
 }
 
 /// Fatal session-level failure (the agent never ran or died). In-band errors the
@@ -52,14 +57,14 @@ mod tests {
 
     #[test]
     fn prompt_holds_text() {
-        let p = Prompt { text: "do it".into(), model: None };
+        let p = Prompt { text: "do it".into(), model: None, permission_mode: None };
         assert_eq!(p.text, "do it");
         assert!(p.model.is_none());
     }
 
     #[test]
     fn prompt_holds_model() {
-        let p = Prompt { text: "do it".into(), model: Some("opus".into()) };
+        let p = Prompt { text: "do it".into(), model: Some("opus".into()), permission_mode: None };
         assert_eq!(p.model.as_deref(), Some("opus"));
     }
 }
