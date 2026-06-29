@@ -64,12 +64,25 @@ pub fn rule_candidates(worktree: &Path) -> Vec<RuleFile> {
 /// from reading arbitrary files inside the worktree or the global config dirs (e.g.
 /// `~/.claude/.credentials.json`). Payload is streamed-and-capped at 256 KB so a
 /// large file cannot be slurped into RAM before the limit is applied.
+///
+/// Security: candidates are further filtered so their canonical (symlink-resolved)
+/// path must either reside INSIDE the canonical worktree OR be one of the exact
+/// global config files. This prevents a symlinked rule file from becoming a read
+/// gadget for secrets outside the worktree boundary.
 pub fn read_text_file(path: &str, worktree: &Path) -> Result<String, InspectError> {
     let target = std::fs::canonicalize(path)?;
+    let canonical_worktree = std::fs::canonicalize(worktree)?;
     let allowed: Vec<PathBuf> = rule_candidates(worktree)
         .into_iter()
         .filter(|r| r.exists)
-        .filter_map(|r| std::fs::canonicalize(&r.path).ok())
+        .filter_map(|r| {
+            let cp = std::fs::canonicalize(&r.path).ok()?;
+            if cp.starts_with(&canonical_worktree) || is_expected_global(&cp) {
+                Some(cp)
+            } else {
+                None
+            }
+        })
         .collect();
     if !allowed.contains(&target) {
         return Err(InspectError::Forbidden(path.to_string()));
@@ -79,6 +92,21 @@ pub fn read_text_file(path: &str, worktree: &Path) -> Result<String, InspectErro
     let mut buf = Vec::new();
     f.take(256 * 1024).read_to_end(&mut buf)?;
     Ok(String::from_utf8_lossy(&buf).to_string())
+}
+
+/// Returns true when `path` (already canonicalized by the caller) is one of the
+/// exact global config files the app is permitted to read. The expected paths are
+/// also canonicalized so that a `~/.claude` directory that is itself a symlink
+/// does not produce a false-negative.
+fn is_expected_global(path: &Path) -> bool {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else { return false };
+    [".claude/CLAUDE.md", ".codex/config.toml", ".gemini/GEMINI.md"]
+        .iter()
+        .any(|rel| {
+            std::fs::canonicalize(home.join(rel))
+                .map(|c| c == path)
+                .unwrap_or(false)
+        })
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -127,6 +155,10 @@ pub fn list_capabilities(agent: &str, worktree: &Path) -> Capabilities {
     if let Some(h) = &home {
         collect_md(&h.join(".claude/commands"), "user", &mut commands);
     }
+
+    subagents.sort_by(|a, b| a.name.cmp(&b.name));
+    skills.sort_by(|a, b| a.name.cmp(&b.name));
+    commands.sort_by(|a, b| a.name.cmp(&b.name));
 
     Capabilities { skills, subagents, commands }
 }
@@ -239,6 +271,33 @@ mod tests {
         let non_candidate = dir.join("secret.txt");
         assert!(matches!(
             read_text_file(&non_candidate.display().to_string(), &dir),
+            Err(InspectError::Forbidden(_))
+        ));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_rejects_symlink_escaping_worktree() {
+        let dir = std::env::temp_dir().join(format!("ae-insp3-{}", std::process::id()));
+        let worktree = dir.join("worktree");
+        let outside = dir.join("outside");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        // Create a secret file outside the worktree boundary.
+        let secret = outside.join("secret.txt");
+        std::fs::write(&secret, "TOPSECRET").unwrap();
+
+        // Place a symlink at CLAUDE.md (a candidate path) pointing to the secret.
+        // is_file() follows symlinks, so rule_candidates will mark it as existing —
+        // but read_text_file must detect that the canonical target escapes the
+        // worktree and return Forbidden rather than returning the secret content.
+        let link = worktree.join("CLAUDE.md");
+        std::os::unix::fs::symlink(&secret, &link).unwrap();
+
+        assert!(matches!(
+            read_text_file(&link.display().to_string(), &worktree),
             Err(InspectError::Forbidden(_))
         ));
 
