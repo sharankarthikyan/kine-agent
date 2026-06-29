@@ -39,11 +39,11 @@ export function Conversation({ turns, running }: ConversationProps) {
       {turns.map((turn, i) => (
         <div key={i} className="flex flex-col gap-3">
           {/* User message: subtle muted bubble, contained (not full-width). */}
-          <section className="flex flex-col gap-2">
+          <section className="flex flex-col gap-2 items-end">
             <div className="text-xs font-medium text-muted-foreground">
               You
             </div>
-            <div className="self-start max-w-prose rounded-lg bg-muted px-4 py-3 text-foreground whitespace-pre-wrap">
+            <div className="self-end max-w-prose rounded-lg bg-muted px-4 py-3 text-foreground whitespace-pre-wrap">
               {turn.prompt}
             </div>
           </section>
