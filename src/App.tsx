@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { PromptBar } from "./components/PromptBar";
 import { Conversation, type Turn } from "./components/Conversation";
@@ -19,6 +19,14 @@ export default function App() {
   const [diffOpen, setDiffOpen] = useState(false);
   const [diffExpanded, setDiffExpanded] = useState(false);
 
+  // Synchronous ref keeps the active session ID readable inside async callbacks
+  // without stale-closure issues — the guard for cross-session contamination.
+  const activeSessionIdRef = useRef<string | null>(null);
+  const setActive = (id: string | null) => {
+    activeSessionIdRef.current = id;
+    setActiveSessionId(id);
+  };
+
   // Best-effort refreshers — no-op in a plain browser preview (assertDesktop throws).
   const refreshSessions = useCallback(async () => {
     try {
@@ -28,17 +36,34 @@ export default function App() {
     }
   }, []);
 
+  // Guard: only apply the fetched diff if the session is still the active one.
+  // A late fetch from a prior session must not clobber the now-active session's diff.
   const refreshDiff = useCallback(async (sessionId: string) => {
     try {
-      setDiff(await reviewSession({ sessionId }));
+      const d = await reviewSession({ sessionId });
+      if (activeSessionIdRef.current === sessionId) setDiff(d);
     } catch {
-      setDiff(null); // worktree may be gone; no changes to show
+      if (activeSessionIdRef.current === sessionId) setDiff(null);
     }
   }, []);
 
   useEffect(() => {
     void refreshSessions();
   }, [refreshSessions]);
+
+  // closeDiff keeps the "reset both flags together" invariant structural.
+  const closeDiff = () => { setDiffOpen(false); setDiffExpanded(false); };
+
+  // Esc closes the diff pane — especially useful in the chat-hiding expanded state.
+  // Inline the two setters so the linter's exhaustive-deps rule is satisfied.
+  useEffect(() => {
+    if (!diffOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") { setDiffOpen(false); setDiffExpanded(false); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [diffOpen]);
 
   function appendToLastTurn(event: AgentEvent) {
     setTurns((prev) => {
@@ -51,20 +76,26 @@ export default function App() {
   }
 
   async function handleSend(text: string) {
-    setDiffOpen(false);
-    setDiffExpanded(false);
+    closeDiff();
     setRunning(true);
     setTurns((prev) => [...prev, { prompt: text, events: [] }]);
     let sessionId = activeSessionId;
+    // Guard: if the user switches sessions while this send is streaming, drop the late
+    // events from the UI — the backend persists all events regardless, so re-selecting
+    // the session rehydrates anything dropped here.
+    const onEvent = (event: AgentEvent) => {
+      if (activeSessionIdRef.current !== sessionId) return;
+      appendToLastTurn(event);
+    };
     try {
       if (sessionId === null) {
-        sessionId = await startSession({ prompt: text, repo: ".", onEvent: appendToLastTurn });
-        setActiveSessionId(sessionId);
+        sessionId = await startSession({ prompt: text, repo: ".", onEvent });
+        setActive(sessionId);
       } else {
-        await sendMessage({ sessionId, prompt: text, onEvent: appendToLastTurn });
+        await sendMessage({ sessionId, prompt: text, onEvent });
       }
     } catch (err) {
-      appendToLastTurn({ kind: "error", data: { message: String(err) } });
+      onEvent({ kind: "error", data: { message: String(err) } });
     } finally {
       setRunning(false);
       await refreshSessions();
@@ -73,9 +104,8 @@ export default function App() {
   }
 
   async function handleSelectSession(id: string) {
-    setActiveSessionId(id);
-    setDiffOpen(false);
-    setDiffExpanded(false);
+    setActive(id);
+    closeDiff();
     setDiff(null);
     try {
       setTurns(turnsFromEvents(await sessionEvents(id)));
@@ -86,11 +116,10 @@ export default function App() {
   }
 
   function handleNewSession() {
-    setActiveSessionId(null);
+    setActive(null);
     setTurns([]);
     setDiff(null);
-    setDiffOpen(false);
-    setDiffExpanded(false);
+    closeDiff();
   }
 
   const changedCount = diff?.files.length ?? 0;
@@ -142,7 +171,7 @@ export default function App() {
                     {diffExpanded ? "⤡" : "⤢"}
                   </button>
                   <button
-                    onClick={() => { setDiffOpen(false); setDiffExpanded(false); }}
+                    onClick={closeDiff}
                     style={iconButton}
                     aria-label="Close diff"
                   >
