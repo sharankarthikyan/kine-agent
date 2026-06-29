@@ -13,9 +13,11 @@ impl AgentAdapter for ClaudeAdapter {
         &self,
         prompt: Prompt,
         cwd: PathBuf,
+        session_id: String,
+        resume: bool,
         sink: Box<dyn EventSink>,
     ) -> impl std::future::Future<Output = Result<(), SessionError>> + Send {
-        spawn_and_stream(prompt, cwd, sink)
+        spawn_and_stream(prompt, cwd, session_id, resume, sink)
     }
 }
 
@@ -77,14 +79,23 @@ fn parse_assistant(v: &Value) -> Vec<AgentEvent> {
 pub async fn spawn_and_stream(
     prompt: Prompt,
     cwd: PathBuf,
+    session_id: String,
+    resume: bool,
     sink: Box<dyn EventSink>,
 ) -> Result<(), SessionError> {
-    let mut child = Command::new("claude")
+    let mut command = Command::new("claude");
+    command
         .arg("-p")
         .arg(&prompt.text)
         .arg("--output-format")
         .arg("stream-json")
-        .arg("--verbose")
+        .arg("--verbose");
+    if resume {
+        command.arg("--resume").arg(&session_id);
+    } else {
+        command.arg("--session-id").arg(&session_id);
+    }
+    let mut child = command
         .current_dir(&cwd)
         // Close stdin: claude otherwise waits ~3s for piped stdin before proceeding.
         .stdin(std::process::Stdio::null())

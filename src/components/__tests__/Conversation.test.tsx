@@ -1,26 +1,26 @@
 import { render, screen } from "@testing-library/react";
-import { Conversation } from "../Conversation";
-import type { AgentEvent } from "../../lib/agent";
+import { Conversation, type Turn } from "../Conversation";
 
-test("shows the empty state when there is no prompt, no events, and not running", () => {
-  render(<Conversation prompt={null} events={[]} running={false} />);
+test("empty state when there are no turns and not running", () => {
+  render(<Conversation turns={[]} running={false} />);
   expect(screen.getByText("No activity yet.")).toBeInTheDocument();
 });
 
-test("renders the user prompt as a 'You' turn", () => {
-  render(<Conversation prompt="refactor auth" events={[]} running={false} />);
-  expect(screen.getByText("You")).toBeInTheDocument();
-  expect(screen.getByText("refactor auth")).toBeInTheDocument();
+test("renders multiple turns with their prompts and events", () => {
+  const turns: Turn[] = [
+    { prompt: "first task", events: [{ kind: "done", data: { summary: "did first" } }] },
+    { prompt: "second task", events: [{ kind: "token", data: { text: "working second" } }] },
+  ];
+  render(<Conversation turns={turns} running={false} />);
+  expect(screen.getByText("first task")).toBeInTheDocument();
+  expect(screen.getByText(/did first/)).toBeInTheDocument();
+  expect(screen.getByText("second task")).toBeInTheDocument();
+  expect(screen.getByText("working second")).toBeInTheDocument();
+  expect(screen.getAllByText("You")).toHaveLength(2);
 });
 
-test("renders agent events under an 'Agent' turn", () => {
-  const events: AgentEvent[] = [{ kind: "token", data: { text: "working on it" } }];
-  render(<Conversation prompt="do x" events={events} running={false} />);
-  expect(screen.getByText("Agent")).toBeInTheDocument();
-  expect(screen.getByText("working on it")).toBeInTheDocument();
-});
-
-test("shows the running indicator while the agent is working", () => {
-  render(<Conversation prompt="do x" events={[]} running={true} />);
+test("shows the running indicator while working", () => {
+  const turns: Turn[] = [{ prompt: "x", events: [] }];
+  render(<Conversation turns={turns} running={true} />);
   expect(screen.getByRole("status")).toHaveTextContent(/working/i);
 });

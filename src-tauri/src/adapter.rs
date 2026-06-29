@@ -29,11 +29,14 @@ pub trait EventSink: Send {
 /// selection across Codex/Gemini is added, switch to enum dispatch or
 /// `async-trait`/`Pin<Box<dyn Future>>`.
 pub trait AgentAdapter {
-    /// Spawn the agent in `cwd`, stream normalized events into `sink`, return when done.
+    /// Run the agent in `cwd` for session `session_id`. `resume=false` starts a new
+    /// session pinned to that id; `resume=true` continues it. Streams events to `sink`.
     fn run(
         &self,
         prompt: Prompt,
         cwd: PathBuf,
+        session_id: String,
+        resume: bool,
         sink: Box<dyn EventSink>,
     ) -> impl std::future::Future<Output = Result<(), SessionError>> + Send;
 }

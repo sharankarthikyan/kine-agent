@@ -36,3 +36,16 @@ export interface CleanupSessionArgs {
 export async function cleanupSession({ repo, sessionId }: CleanupSessionArgs): Promise<void> {
   await invoke("cleanup_session", { repo, sessionId });
 }
+
+export interface SendMessageArgs {
+  sessionId: string;
+  prompt: string;
+  onEvent: (event: AgentEvent) => void;
+}
+
+/** Continue an existing session with a follow-up message. */
+export async function sendMessage({ sessionId, prompt, onEvent }: SendMessageArgs): Promise<void> {
+  const channel = new Channel<AgentEvent>();
+  channel.onmessage = onEvent;
+  await invoke("send_message", { sessionId, prompt, onEvent: channel });
+}

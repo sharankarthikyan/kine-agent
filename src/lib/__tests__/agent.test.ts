@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { startSession, cleanupSession, type AgentEvent } from "../agent";
+import { startSession, cleanupSession, sendMessage, type AgentEvent } from "../agent";
 
 // The factory is hoisted above imports, so the mock Channel must be defined inline.
 vi.mock("@tauri-apps/api/core", () => {
@@ -58,5 +58,28 @@ describe("cleanupSession", () => {
     const { invoke } = await import("@tauri-apps/api/core");
     await cleanupSession({ repo: "/work/proj", sessionId: "sess-7" });
     expect(invoke).toHaveBeenCalledWith("cleanup_session", { repo: "/work/proj", sessionId: "sess-7" });
+  });
+});
+
+describe("sendMessage", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("invokes send_message with the sessionId, prompt, and a Channel", async () => {
+    const { invoke, Channel } = await import("@tauri-apps/api/core");
+    await sendMessage({ sessionId: "s1", prompt: "and now add docs", onEvent: () => {} });
+    expect(invoke).toHaveBeenCalledWith(
+      "send_message",
+      expect.objectContaining({ sessionId: "s1", prompt: "and now add docs", onEvent: expect.any(Channel) }),
+    );
+  });
+
+  it("delivers streamed events to onEvent", async () => {
+    const { invoke } = await import("@tauri-apps/api/core");
+    const got: AgentEvent[] = [];
+    await sendMessage({ sessionId: "s1", prompt: "x", onEvent: (e) => got.push(e) });
+    const args = vi.mocked(invoke).mock.calls[0][1] as unknown as { onEvent: CapturedChannel };
+    const event: AgentEvent = { kind: "token", data: { text: "more" } };
+    args.onEvent.onmessage?.(event);
+    expect(got).toEqual([event]);
   });
 });
