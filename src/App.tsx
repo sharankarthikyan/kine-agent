@@ -565,11 +565,11 @@ export default function App() {
                 onValueChange={(v) => setRightTab(v as "context" | "changes" | "files")}
                 className="flex flex-col min-h-0 flex-1"
               >
-                <header className="flex items-center justify-between px-3 py-1.5 border-b border-border/60">
-                  <TabsList>
-                    <TabsTrigger value="context">Context</TabsTrigger>
-                    <TabsTrigger value="changes">Changes</TabsTrigger>
-                    <TabsTrigger value="files">Files</TabsTrigger>
+                <header className="flex items-center gap-2 px-3 py-1.5 border-b border-border/60">
+                  <TabsList className="flex-1">
+                    <TabsTrigger value="context" className="flex-1">Context</TabsTrigger>
+                    <TabsTrigger value="changes" className="flex-1">Changes</TabsTrigger>
+                    <TabsTrigger value="files" className="flex-1">Files</TabsTrigger>
                   </TabsList>
                   <div className="flex items-center gap-1">
                     <Button
