@@ -8,13 +8,23 @@ pub mod worktree;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Open the session store before building (block on the async connect once).
+    let store = tauri::async_runtime::block_on(async {
+        store::SessionStore::connect(&store::default_db_path())
+            .await
+            .expect("failed to open session store")
+    });
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .manage(store)
         .invoke_handler(tauri::generate_handler![
             commands::start_session,
             commands::cleanup_session,
             commands::review_session,
-            commands::send_message
+            commands::send_message,
+            commands::list_sessions,
+            commands::session_events
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

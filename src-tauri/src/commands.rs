@@ -2,16 +2,72 @@ use crate::adapter::{AgentAdapter, EventSink, Prompt};
 use crate::adapters::claude::ClaudeAdapter;
 use crate::events::AgentEvent;
 use crate::review::{self, SessionDiff};
+use crate::store::{self, SessionStore, SessionSummary, StoredEvent};
 use crate::worktree;
 use std::path::PathBuf;
 use tauri::ipc::Channel;
+use tauri::State;
+use tokio::sync::mpsc;
 
-/// Adapts a Tauri Channel into our EventSink trait.
-struct ChannelSink(Channel<AgentEvent>);
+/// Sink that fans each event two ways: to the live UI Channel AND to an mpsc queue
+/// that a drain task persists to the store. Keeps the IPC path non-blocking — DB
+/// writes happen on the drain task, not in `emit`.
+struct StoreSink {
+    channel: Channel<AgentEvent>,
+    tx: mpsc::UnboundedSender<AgentEvent>,
+}
 
-impl EventSink for ChannelSink {
+impl EventSink for StoreSink {
     fn emit(&self, event: AgentEvent) {
-        let _ = self.0.send(event);
+        let _ = self.channel.send(event.clone());
+        let _ = self.tx.send(event);
+    }
+}
+
+/// Run the adapter while persisting every streamed event, then stamp the session
+/// status ("idle" on success, "error" on failure). The prompt row must already be
+/// written by the caller so it gets seq 0 before any streamed event.
+async fn run_persisting(
+    store: &SessionStore,
+    session_id: String,
+    prompt: Prompt,
+    cwd: PathBuf,
+    resume: bool,
+    on_event: Channel<AgentEvent>,
+) -> Result<(), String> {
+    let (tx, mut rx) = mpsc::unbounded_channel::<AgentEvent>();
+    let sink = Box::new(StoreSink { channel: on_event, tx });
+
+    // Drain task: persist events as they arrive. Ends when the sink (and its tx)
+    // is dropped at the end of `.run()`.
+    let drain_store = store.clone();
+    let drain_sid = session_id.clone();
+    let drain = tokio::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            let (kind, payload) = store::split_event(&event);
+            let _ = drain_store.append_event(&drain_sid, &kind, &payload).await;
+        }
+    });
+
+    let result = ClaudeAdapter
+        .run(prompt, cwd, session_id.clone(), resume, sink)
+        .await;
+    let _ = drain.await; // flush all persisted events before stamping status
+    let status = if result.is_ok() { "idle" } else { "error" };
+    let _ = store.set_status(&session_id, status).await;
+    result.map_err(|e| e.to_string())
+}
+
+/// A session's display title: first non-empty line of the prompt, trimmed to 60 chars.
+fn title_from_prompt(prompt: &str) -> String {
+    let line = prompt.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
+    if line.chars().count() > 60 {
+        let truncated: String = line.chars().take(59).collect();
+        format!("{truncated}…")
+    } else if line.is_empty() {
+        "Untitled session".to_string()
+    } else {
+        line.to_string()
     }
 }
 
@@ -28,50 +84,55 @@ fn worktrees_root() -> PathBuf {
     base.join(".agent-editor").join("worktrees")
 }
 
-/// Start a session: create an isolated worktree off `repo` for `session_id`, then
-/// run the Claude agent inside it. The worktree is left in place for later review;
-/// call `cleanup_session` to remove it.
+/// Start a session: create an isolated worktree off `repo` for `session_id`, persist
+/// the session + prompt, then run the Claude agent inside it (streaming + persisting
+/// events). The worktree is left in place for review; `cleanup_session` removes it.
 #[tauri::command]
 pub async fn start_session(
     prompt: String,
     repo: String,
     session_id: String,
     on_event: Channel<AgentEvent>,
+    store: State<'_, SessionStore>,
 ) -> Result<(), String> {
     let repo_path = PathBuf::from(&repo);
-    // `repo` is WebView-supplied; reject anything that isn't an existing directory
-    // before handing it to git (symmetry with the validated session_id).
     if !repo_path.is_dir() {
         return Err(format!("repo is not an existing directory: {repo}"));
     }
     let root = worktrees_root();
-    // Clone session_id so it is available both inside spawn_blocking (which takes ownership
-    // via the move closure) and afterwards for the .run call.
     let sid = session_id.clone();
-    // git worktree add is blocking I/O — keep it off the async runtime's worker.
     let wt = tokio::task::spawn_blocking(move || worktree::create(&repo_path, &root, &sid))
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())?;
 
-    let sink = Box::new(ChannelSink(on_event));
-    // On error the worktree is left in place: a normal "agent ran then errored" session
-    // still has changes worth reviewing, and the frontend can always cleanup_session.
-    // (Plan 3/5: persist the repo↔session mapping, auto-clean empty spawn-failure
-    // worktrees, and reuse-or-error on a colliding session_id instead of a raw git error.)
-    ClaudeAdapter
-        .run(Prompt { text: prompt }, wt.path, session_id, false, sink)
+    // Persist the session row + the user's prompt (seq 0) before streaming.
+    store
+        .create_session(
+            &session_id,
+            "claude",
+            &repo,
+            &wt.path.display().to_string(),
+            &wt.branch,
+            &title_from_prompt(&prompt),
+        )
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    let _ = store
+        .append_event(&session_id, "prompt", &serde_json::json!({ "text": prompt }).to_string())
+        .await;
+
+    run_persisting(&store, session_id, Prompt { text: prompt }, wt.path, false, on_event).await
 }
 
-/// Continue an existing session with a follow-up message (resumes the agent in
-/// the session's worktree). Fails if the session's worktree no longer exists.
+/// Continue an existing session with a follow-up message (resumes the agent in the
+/// session's worktree, persisting the new prompt + streamed events).
 #[tauri::command]
 pub async fn send_message(
     prompt: String,
     session_id: String,
     on_event: Channel<AgentEvent>,
+    store: State<'_, SessionStore>,
 ) -> Result<(), String> {
     let root = worktrees_root();
     let sid = session_id.clone();
@@ -86,11 +147,12 @@ pub async fn send_message(
     .map_err(|e| e.to_string())?
     .map_err(|e| e.to_string())?;
 
-    let sink = Box::new(ChannelSink(on_event));
-    ClaudeAdapter
-        .run(Prompt { text: prompt }, wt_path, session_id, true, sink)
-        .await
-        .map_err(|e| e.to_string())
+    let _ = store.set_status(&session_id, "running").await;
+    let _ = store
+        .append_event(&session_id, "prompt", &serde_json::json!({ "text": prompt }).to_string())
+        .await;
+
+    run_persisting(&store, session_id, Prompt { text: prompt }, wt_path, true, on_event).await
 }
 
 /// Remove the worktree (and branch) for a finished session.
@@ -122,6 +184,21 @@ pub async fn review_session(session_id: String) -> Result<SessionDiff, String> {
     .await
     .map_err(|e| e.to_string())?
     .map_err(|e| e.to_string())
+}
+
+/// All sessions for the list pane, most-recently-updated first.
+#[tauri::command]
+pub async fn list_sessions(store: State<'_, SessionStore>) -> Result<Vec<SessionSummary>, String> {
+    store.list_sessions().await.map_err(|e| e.to_string())
+}
+
+/// A session's persisted events, in order — the frontend rebuilds its turns from these.
+#[tauri::command]
+pub async fn session_events(
+    session_id: String,
+    store: State<'_, SessionStore>,
+) -> Result<Vec<StoredEvent>, String> {
+    store.session_events(&session_id).await.map_err(|e| e.to_string())
 }
 
 /// Resolve a session's worktree path (validated), erroring via ReviewError.
