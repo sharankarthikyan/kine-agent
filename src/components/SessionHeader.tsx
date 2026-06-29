@@ -45,12 +45,17 @@ export function SessionHeader({
         {/* Top row: status dot + title + status label (mirrors SessionList row layout) */}
         <span className="flex items-center gap-2 min-w-0">
           <span
-            aria-hidden
+            role="img"
+            aria-label={`Status: ${config.label}`}
+            title={config.label}
             className="size-2 rounded-full shrink-0"
             style={{ background: config.color }}
           />
           <span className="text-sm font-medium truncate flex-1">{title}</span>
-          <span className="text-xs text-muted-foreground shrink-0">{config.label}</span>
+          {/* Label only for the states that matter — idle is conveyed by the dot. */}
+          {status !== "idle" && (
+            <span className="text-xs text-muted-foreground shrink-0">{config.label}</span>
+          )}
         </span>
 
         {/* Secondary line: repo and/or diffstat — omitted when both are null */}

@@ -171,16 +171,21 @@ export function SessionList({
                           {/* Top row: status dot + title + status label */}
                           <span className="flex items-center gap-2 w-full min-w-0">
                             <span
-                              aria-hidden
+                              role="img"
+                              aria-label={`Status: ${config.label}`}
+                              title={config.label}
                               className="size-2 rounded-full shrink-0"
                               style={{ background: config.color }}
                             />
                             <span className="truncate flex-1 min-w-0 text-left text-sm">
                               {session.title}
                             </span>
-                            <span className="text-xs text-muted-foreground shrink-0">
-                              {config.label}
-                            </span>
+                            {/* Label only for active/error — idle is conveyed by the dot. */}
+                            {session.status !== "idle" && (
+                              <span className="text-xs text-muted-foreground shrink-0">
+                                {config.label}
+                              </span>
+                            )}
                           </span>
                           {/* Bottom row: diffstat + relative time */}
                           <span className="text-xs text-muted-foreground tabular-nums pl-4">
