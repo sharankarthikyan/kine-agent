@@ -1,6 +1,6 @@
 use crate::events::AgentEvent;
 use serde::Serialize;
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::Row;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -51,7 +51,10 @@ impl SessionStore {
         }
         let opts = SqliteConnectOptions::new()
             .filename(db_path)
-            .create_if_missing(true);
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .synchronous(SqliteSynchronous::Normal)
+            .busy_timeout(std::time::Duration::from_secs(5));
         let pool = SqlitePoolOptions::new()
             .max_connections(5)
             .connect_with(opts)
@@ -308,5 +311,16 @@ mod tests {
         store.append_event("a", "token", r#"{"text":"x"}"#).await.unwrap();
         assert_eq!(store.session_events("a").await.unwrap().len(), 1);
         assert!(store.session_events("b").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn on_disk_connect_uses_wal() {
+        let dir = std::env::temp_dir().join(format!("ae-store-wal-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let db = dir.join("t.db");
+        let store = SessionStore::connect(&db).await.unwrap();
+        let mode: String = sqlx::query_scalar("PRAGMA journal_mode").fetch_one(&store.pool).await.unwrap();
+        assert_eq!(mode.to_lowercase(), "wal");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
