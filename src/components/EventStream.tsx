@@ -27,13 +27,45 @@ export function EventStream({ events }: EventStreamProps) {
     );
   }
   const hasProse = events.some((e) => e.kind === "token");
+  const groups = groupChipRuns(events);
   return (
     <div className="flex flex-col items-start gap-3">
-      {events.map((event, i) => (
-        <Fragment key={i}>{renderEvent(event, hasProse)}</Fragment>
-      ))}
+      {groups.map((group, i) =>
+        group.kind === "chips" ? (
+          // A burst of tool/file calls flows inline and wraps, instead of one
+          // chip per line — far less vertical noise when an agent reads N files.
+          <div key={i} className="flex w-full flex-wrap gap-1.5">
+            {group.events.map((event, j) => (
+              <Fragment key={j}>{renderEvent(event, hasProse)}</Fragment>
+            ))}
+          </div>
+        ) : (
+          <Fragment key={i}>{renderEvent(group.event, hasProse)}</Fragment>
+        )
+      )}
     </div>
   );
+}
+
+type ChipGroup =
+  | { kind: "chips"; events: AgentEvent[] }
+  | { kind: "single"; event: AgentEvent };
+
+/** Coalesce consecutive tool/file-write events into one wrapping chip cluster. */
+function groupChipRuns(events: AgentEvent[]): ChipGroup[] {
+  const groups: ChipGroup[] = [];
+  for (const event of events) {
+    const isChip = event.kind === "toolCall" || event.kind === "fileWrite";
+    const last = groups[groups.length - 1];
+    if (isChip && last && last.kind === "chips") {
+      last.events.push(event);
+    } else if (isChip) {
+      groups.push({ kind: "chips", events: [event] });
+    } else {
+      groups.push({ kind: "single", event });
+    }
+  }
+  return groups;
 }
 
 function renderEvent(event: AgentEvent, hasProse: boolean) {

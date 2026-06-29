@@ -29,6 +29,13 @@ function SectionHeading({ children }: { children: React.ReactNode }) {
   return <p className="text-xs font-medium text-muted-foreground">{children}</p>;
 }
 
+// Strip the per-session worktree prefix so a file reads relative to the repo
+// root (e.g. "src/components/App.tsx") instead of the long absolute path.
+function displayPath(path: string): string {
+  const match = path.match(/\/\.agent-editor\/worktrees\/[^/]+\/(.+)$/);
+  return match ? match[1] : path;
+}
+
 // Shared inset card wrapper for section bodies
 function SectionCard({ children, className }: { children: React.ReactNode; className?: string }) {
   return (
@@ -173,10 +180,11 @@ export function ContextPanel({
                       size="sm"
                       className="h-auto w-full min-w-0 justify-start gap-2 px-2 py-1 font-normal"
                       onClick={() => onOpenFile?.(file.path)}
+                      title={file.path}
                     >
                       <Icon data-icon="inline-start" />
                       <span className="flex-1 min-w-0 truncate text-left font-mono text-xs">
-                        {file.path}
+                        {displayPath(file.path)}
                       </span>
                       <Badge variant="secondary" className="ml-auto">
                         {file.action}
