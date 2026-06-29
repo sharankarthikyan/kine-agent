@@ -27,7 +27,7 @@ struct StoreSink {
 impl EventSink for StoreSink {
     fn emit(&self, event: AgentEvent) {
         if matches!(event, AgentEvent::Error { .. }) {
-            self.saw_error.store(true, Ordering::Relaxed);
+            self.saw_error.store(true, Ordering::Release);
         }
         let _ = self.channel.send(event.clone());
         let _ = self.tx.send(event);
@@ -69,7 +69,7 @@ async fn run_persisting(
         .run(prompt, cwd, session_id.clone(), resume, sink)
         .await;
     let _ = drain.await; // flush all persisted events before stamping status
-    let status = if result.is_ok() && !saw_error.load(Ordering::Relaxed) { "idle" } else { "error" };
+    let status = if result.is_ok() && !saw_error.load(Ordering::Acquire) { "idle" } else { "error" };
     let _ = store.set_status(&session_id, status).await;
     result.map_err(|e| e.to_string())
 }
@@ -78,7 +78,7 @@ async fn run_persisting(
 fn title_from_prompt(prompt: &str) -> String {
     let line = prompt.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
     if line.chars().count() > 60 {
-        let truncated: String = line.chars().take(59).collect();
+        let truncated: String = line.chars().take(59).collect(); // 59 chars + ellipsis = 60 displayed
         format!("{truncated}…")
     } else if line.is_empty() {
         "Untitled session".to_string()
@@ -134,9 +134,12 @@ pub async fn start_session(
         )
         .await
         .map_err(|e| e.to_string())?;
-    let _ = store
+    if let Err(e) = store
         .append_event(&session_id, "prompt", &serde_json::json!({ "text": prompt }).to_string())
-        .await;
+        .await
+    {
+        eprintln!("failed to persist prompt for session {session_id}: {e}");
+    }
 
     run_persisting(&store, session_id, Prompt { text: prompt }, wt.path, false, on_event).await
 }
@@ -164,9 +167,12 @@ pub async fn send_message(
     .map_err(|e| e.to_string())?;
 
     let _ = store.set_status(&session_id, "running").await;
-    let _ = store
+    if let Err(e) = store
         .append_event(&session_id, "prompt", &serde_json::json!({ "text": prompt }).to_string())
-        .await;
+        .await
+    {
+        eprintln!("failed to persist prompt for session {session_id}: {e}");
+    }
 
     run_persisting(&store, session_id, Prompt { text: prompt }, wt_path, true, on_event).await
 }
