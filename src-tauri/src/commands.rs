@@ -45,8 +45,11 @@ pub async fn start_session(
         return Err(format!("repo is not an existing directory: {repo}"));
     }
     let root = worktrees_root();
+    // Clone session_id so it is available both inside spawn_blocking (which takes ownership
+    // via the move closure) and afterwards for the .run call.
+    let sid = session_id.clone();
     // git worktree add is blocking I/O — keep it off the async runtime's worker.
-    let wt = tokio::task::spawn_blocking(move || worktree::create(&repo_path, &root, &session_id))
+    let wt = tokio::task::spawn_blocking(move || worktree::create(&repo_path, &root, &sid))
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())?;
@@ -57,7 +60,35 @@ pub async fn start_session(
     // (Plan 3/5: persist the repo↔session mapping, auto-clean empty spawn-failure
     // worktrees, and reuse-or-error on a colliding session_id instead of a raw git error.)
     ClaudeAdapter
-        .run(Prompt { text: prompt }, wt.path, sink)
+        .run(Prompt { text: prompt }, wt.path, session_id, false, sink)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Continue an existing session with a follow-up message (resumes the agent in
+/// the session's worktree). Fails if the session's worktree no longer exists.
+#[tauri::command]
+pub async fn send_message(
+    prompt: String,
+    session_id: String,
+    on_event: Channel<AgentEvent>,
+) -> Result<(), String> {
+    let root = worktrees_root();
+    let sid = session_id.clone();
+    let wt_path = tokio::task::spawn_blocking(move || -> Result<PathBuf, String> {
+        let wt = worktree::worktree_for(&root, &sid).map_err(|e| e.to_string())?;
+        if !wt.path.is_dir() {
+            return Err(format!("no active session worktree for {sid}"));
+        }
+        Ok(wt.path)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+
+    let sink = Box::new(ChannelSink(on_event));
+    ClaudeAdapter
+        .run(Prompt { text: prompt }, wt_path, session_id, true, sink)
         .await
         .map_err(|e| e.to_string())
 }

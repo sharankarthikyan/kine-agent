@@ -12,7 +12,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::start_session,
             commands::cleanup_session,
-            commands::review_session
+            commands::review_session,
+            commands::send_message
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
