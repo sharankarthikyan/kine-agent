@@ -234,3 +234,24 @@ pub async fn session_events(
 fn worktree_resolve(root: &std::path::Path, session_id: &str) -> Result<std::path::PathBuf, review::ReviewError> {
     Ok(crate::worktree::worktree_for(root, session_id)?.path)
 }
+
+/// Probe PATH for each supported agent CLI (claude, codex, gemini) and return
+/// their `AgentInfo` records with `installed` set accordingly. Blocking work is
+/// offloaded from the async runtime via `spawn_blocking`.
+#[tauri::command]
+pub async fn detect_agents() -> Result<Vec<crate::models::AgentInfo>, String> {
+    tokio::task::spawn_blocking(crate::models::detect_agents)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Return the model list for `agent`. For "claude": tries the Anthropic REST
+/// API when `ANTHROPIC_API_KEY` is set, falls back to hardcoded aliases on any
+/// error. Other agents return an empty list. Blocking I/O is offloaded from the
+/// async runtime via `spawn_blocking`.
+#[tauri::command]
+pub async fn list_models(agent: String) -> Result<Vec<crate::models::ModelInfo>, String> {
+    tokio::task::spawn_blocking(move || crate::models::list_models(&agent))
+        .await
+        .map_err(|e| e.to_string())
+}
