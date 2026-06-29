@@ -105,6 +105,11 @@
   * {
     @apply border-border outline-ring/50;
   }
+  html {
+    /* Paint the root opaque so the native window (Overlay titlebar) never
+       reveals the desktop behind the top edge. */
+    @apply bg-background;
+  }
   body {
     @apply bg-background text-foreground;
     font-family: var(--font-sans);
