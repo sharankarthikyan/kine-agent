@@ -105,10 +105,10 @@ function CapabilitySubsection({ label, items }: CapabilitySubsectionProps) {
     <div className="flex flex-col gap-1">
       <p className="text-xs text-muted-foreground">{label}</p>
       {items.map((cap) => (
-        <div key={cap.name} className={cn("flex items-center gap-2 px-1 py-0.5 rounded-md")}>
-          <span className="text-xs font-medium">{cap.name}</span>
+        <div key={cap.name} className={cn("flex items-center gap-2 min-w-0 px-1 py-0.5 rounded-md")}>
+          <span className="text-xs font-medium shrink-0">{cap.name}</span>
           {cap.description && (
-            <span className="truncate text-xs text-muted-foreground flex-1">
+            <span className="truncate text-xs text-muted-foreground flex-1 min-w-0">
               {cap.description}
             </span>
           )}
@@ -171,11 +171,11 @@ export function ContextPanel({
                       key={file.path}
                       variant="ghost"
                       size="sm"
-                      className="h-auto w-full justify-start gap-2 px-2 py-1 font-normal"
+                      className="h-auto w-full min-w-0 justify-start gap-2 px-2 py-1 font-normal"
                       onClick={() => onOpenFile?.(file.path)}
                     >
                       <Icon data-icon="inline-start" />
-                      <span className="flex-1 truncate text-left font-mono text-xs">
+                      <span className="flex-1 min-w-0 truncate text-left font-mono text-xs">
                         {file.path}
                       </span>
                       <Badge variant="secondary" className="ml-auto">
@@ -202,11 +202,11 @@ export function ContextPanel({
                     key={rule.path}
                     variant="ghost"
                     size="sm"
-                    className="h-auto w-full justify-start gap-2 px-2 py-1 font-normal"
+                    className="h-auto w-full min-w-0 justify-start gap-2 px-2 py-1 font-normal"
                     onClick={() => onOpenRule(rule)}
                   >
                     <FileCode data-icon="inline-start" />
-                    <span className="flex-1 truncate text-left text-xs">{rule.label}</span>
+                    <span className="flex-1 min-w-0 truncate text-left text-xs">{rule.label}</span>
                     <Badge variant="outline" className="ml-auto">
                       {rule.scope}
                     </Badge>

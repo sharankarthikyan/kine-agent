@@ -131,7 +131,7 @@ export function ChangesPanel({ branch, onCommit, onOpenFile, committing }: Chang
                 <li key={file.path}>
                   <button
                     type="button"
-                    className="flex w-full items-center gap-2 px-2 py-1.5 text-sm hover:bg-muted/50 cursor-pointer text-left rounded-md"
+                    className="flex w-full min-w-0 items-center gap-2 px-2 py-1.5 text-sm hover:bg-muted/50 cursor-pointer text-left rounded-md"
                     onClick={() => onOpenFile(file.path)}
                     aria-label={`Open ${file.path}`}
                   >
@@ -143,7 +143,7 @@ export function ChangesPanel({ branch, onCommit, onOpenFile, committing }: Chang
                     >
                       {STATUS_LETTER[file.status]}
                     </span>
-                    <span className="flex-1 font-mono text-xs truncate">{file.path}</span>
+                    <span className="flex-1 min-w-0 font-mono text-xs truncate">{file.path}</span>
                     <span
                       className="tabular-nums text-xs shrink-0"
                       style={{ color: "var(--status-success)" }}

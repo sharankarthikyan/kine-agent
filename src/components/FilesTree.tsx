@@ -48,7 +48,7 @@ function TreeNodeRow({ node, depth, onOpenFile }: TreeNodeRowProps) {
       <>
         <button
           type="button"
-          className="flex w-full items-center gap-1.5 py-0.5 pr-2 text-sm hover:bg-muted/50 cursor-pointer text-left rounded-md"
+          className="flex w-full min-w-0 items-center gap-1.5 py-0.5 pr-2 text-sm hover:bg-muted/50 cursor-pointer text-left rounded-md"
           style={indentStyle}
           onClick={() => setOpen((prev) => !prev)}
           aria-expanded={open}
@@ -63,7 +63,7 @@ function TreeNodeRow({ node, depth, onOpenFile }: TreeNodeRowProps) {
           ) : (
             <Folder data-icon className="size-3.5 shrink-0 text-muted-foreground" />
           )}
-          <span className="flex-1 text-xs truncate">{node.name}</span>
+          <span className="flex-1 min-w-0 text-xs truncate">{node.name}</span>
           {/* Status letter — not color-only */}
           {node.status && (
             <span
@@ -91,7 +91,7 @@ function TreeNodeRow({ node, depth, onOpenFile }: TreeNodeRowProps) {
   return (
     <button
       type="button"
-      className="flex w-full items-center gap-1.5 py-0.5 pr-2 text-sm hover:bg-muted/50 cursor-pointer text-left rounded-md"
+      className="flex w-full min-w-0 items-center gap-1.5 py-0.5 pr-2 text-sm hover:bg-muted/50 cursor-pointer text-left rounded-md"
       style={indentStyle}
       onClick={() => onOpenFile(node.path)}
       aria-label={`Open ${node.name}`}
@@ -104,7 +104,7 @@ function TreeNodeRow({ node, depth, onOpenFile }: TreeNodeRowProps) {
         style={statusColor ? { color: statusColor } : undefined}
       />
       <span
-        className="flex-1 text-xs truncate font-mono"
+        className="flex-1 min-w-0 text-xs truncate font-mono"
         style={statusColor ? { color: statusColor } : undefined}
       >
         {node.name}

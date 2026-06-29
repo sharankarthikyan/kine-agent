@@ -146,7 +146,7 @@ export function SessionList({
             {groups.map((group) => (
               <li key={group.workspace}>
                 {/* Workspace header — muted, normal-case */}
-                <div className="px-2 pt-2 pb-1 text-xs text-muted-foreground font-normal select-none">
+                <div className="px-2 pt-2 pb-1 text-xs text-muted-foreground font-normal select-none truncate">
                   {group.workspace}
                 </div>
                 <ul className="flex flex-col gap-0.5">
@@ -175,7 +175,7 @@ export function SessionList({
                               className="size-2 rounded-full shrink-0"
                               style={{ background: config.color }}
                             />
-                            <span className="truncate flex-1 text-left text-sm">
+                            <span className="truncate flex-1 min-w-0 text-left text-sm">
                               {session.title}
                             </span>
                             <span className="text-xs text-muted-foreground shrink-0">

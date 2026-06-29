@@ -479,7 +479,7 @@ export default function App() {
         onOpenEditor={() => void handleOpenEditor()}
         onOpenTerminal={() => void handleOpenTerminal()}
       />
-      <div className="flex flex-1 min-h-0 gap-2 px-2 pb-2">
+      <div className="flex flex-1 min-h-0 min-w-0 overflow-hidden gap-2 px-2 pb-2">
         {!sidebarCollapsed && (
           <div className="w-72 shrink-0 flex flex-col rounded-xl border border-border overflow-hidden">
             <SessionList
@@ -494,7 +494,7 @@ export default function App() {
             />
           </div>
         )}
-        <main className="flex flex-1 min-h-0 gap-2">
+        <main className="flex flex-1 min-h-0 min-w-0 gap-2">
           {/* Chat column — hidden only while the right pane is expanded to fullscreen. */}
           {!rightExpanded && (
             <section className="flex flex-1 flex-col min-w-0 min-h-0 rounded-xl border border-border bg-card overflow-hidden">
