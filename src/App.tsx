@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { Maximize2, Minimize2, PanelRight, X } from "lucide-react";
 import { PromptBar } from "./components/PromptBar";
+import { NewSession } from "./components/NewSession";
 import { Conversation, type Turn } from "./components/Conversation";
 import { DiffViewer } from "./components/DiffViewer";
 import { TitleBar } from "./components/TitleBar";
@@ -13,13 +15,14 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { startSession, sendMessage, type AgentEvent } from "./lib/agent";
-import { detectAgents, listModels, type ModelInfo } from "./lib/models";
+import { detectAgents, listModels, type AgentInfo, type ModelInfo } from "./lib/models";
 import { reviewSession, type SessionDiff } from "./lib/review";
 import { listSessions, sessionEvents, type SessionSummary, type StoredEvent } from "./lib/sessions";
 import { groupByWorkspace } from "./lib/workspaces";
 import { filesFromEvents, latestUsage } from "./lib/contextDerive";
 import { inspectRules, readTextFile, listCapabilities, type RuleFile, type Capabilities } from "./lib/inspect";
 import { turnsFromEvents } from "./lib/turns";
+import { getRecentRepos, addRecentRepo } from "./lib/recents";
 
 /** Derive a short display title from the first non-empty line of the prompt. */
 function titleFromPrompt(text: string): string {
@@ -41,6 +44,11 @@ export default function App() {
   const [ruleView, setRuleView] = useState<{ label: string; content: string } | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [selectedModel, setSelectedModel] = useState<ModelInfo | null>(null);
+  const [agents, setAgents] = useState<AgentInfo[]>([]);
+  const [selectedAgent, setSelectedAgent] = useState<AgentInfo | null>(null);
+  const [selectedRepo, setSelectedRepo] = useState<string | null>(null);
+  const [autoEdit, setAutoEdit] = useState(false);
+  const [recents, setRecents] = useState<string[]>(() => getRecentRepos());
   // Milestone 6 will wire counts/diffstats; search is local for now.
   const [sessionSearch, setSessionSearch] = useState("");
 
@@ -65,12 +73,14 @@ export default function App() {
   // Best-effort — no-op in the browser preview where IPC is unavailable.
   const loadModels = useCallback(async () => {
     try {
-      const agents = await detectAgents();
-      const installed = agents.filter((a) => a.installed);
+      const discovered = await detectAgents();
+      const installed = discovered.filter((a) => a.installed);
       const results = await Promise.allSettled(installed.map((a) => listModels(a.id)));
       const all = results
         .flatMap((r) => (r.status === "fulfilled" ? r.value : []))
         .filter((m) => !m.disabled);
+      setAgents(discovered);
+      setSelectedAgent((prev) => prev ?? installed[0] ?? null);
       setModels(all);
       setSelectedModel((prev) => prev ?? all[0] ?? null);
     } catch (err) {
@@ -88,6 +98,21 @@ export default function App() {
       if (activeSessionIdRef.current === sessionId) setDiff(null);
     }
   }, []);
+
+  // Open a native directory picker and update repo + recents.
+  // Wrapped in try-catch — `open()` throws outside the desktop app, same pattern
+  // as refreshSessions / loadModels above.
+  async function pickRepo() {
+    try {
+      const path = await open({ directory: true });
+      if (typeof path !== "string" || !path) return;
+      addRecentRepo(path);
+      setSelectedRepo(path);
+      setRecents(getRecentRepos());
+    } catch {
+      /* not in the desktop app, or user cancelled */
+    }
+  }
 
   useEffect(() => {
     void refreshSessions();
@@ -121,9 +146,14 @@ export default function App() {
     });
   }
 
-  async function handleSend(text: string, model: ModelInfo | null) {
+  async function handleSend(
+    text: string,
+    model: ModelInfo | null,
+    opts?: { repo?: string; permissionMode?: string },
+  ) {
     const isNew = activeSessionId === null;
     const sessionId = activeSessionId ?? crypto.randomUUID();
+    const repo = opts?.repo ?? ".";
     // Set the ref synchronously before the first await so the cross-session guard
     // is exact for new sessions (id now known up front, not after startSession resolves).
     setActive(sessionId);
@@ -134,7 +164,7 @@ export default function App() {
       const now = Date.now();
       const row: SessionSummary = existing
         ? { ...existing, status: "running", updatedAt: now }
-        : { id: sessionId, agent: "claude", repo: ".", branch: `agent/${sessionId}`, title: titleFromPrompt(text), status: "running", createdAt: now, updatedAt: now };
+        : { id: sessionId, agent: "claude", repo, branch: `agent/${sessionId}`, title: titleFromPrompt(text), status: "running", createdAt: now, updatedAt: now };
       return [row, ...prev.filter((s) => s.id !== sessionId)];
     });
     closeRight();
@@ -151,7 +181,7 @@ export default function App() {
     const modelArg = model && model.agent === "claude" ? model.value : undefined;
     try {
       if (isNew) {
-        await startSession({ prompt: text, repo: ".", sessionId, model: modelArg, onEvent });
+        await startSession({ prompt: text, repo, sessionId, model: modelArg, permissionMode: opts?.permissionMode, onEvent });
       } else {
         await sendMessage({ sessionId, prompt: text, model: modelArg, onEvent });
       }
@@ -165,6 +195,15 @@ export default function App() {
         try { setStoredEvents(await sessionEvents(sessionId)); } catch { /* ignore */ }
       }
     }
+  }
+
+  // Start a brand-new session from the NewSession composer, threading repo,
+  // permissionMode, and the currently selected model into the shared send path.
+  function handleStartNewSession(text: string) {
+    return handleSend(text, selectedModel, {
+      repo: selectedRepo ?? ".",
+      permissionMode: autoEdit ? "acceptEdits" : "default",
+    });
   }
 
   async function handleSelectSession(id: string) {
@@ -243,37 +282,62 @@ export default function App() {
           {/* Chat column — hidden only while the right pane is expanded to fullscreen. */}
           {!rightExpanded && (
             <section className="flex flex-1 flex-col min-w-0 min-h-0">
-              {/* Stable top toolbar — single toggle; switching Context vs Diff lives in the pane tabs. */}
-              {activeSessionId !== null && (
-                <div className="flex items-center justify-end px-4 py-2 border-b border-border">
-                  <Button
-                    variant={rightTab !== null ? "secondary" : "ghost"}
-                    size="sm"
-                    onClick={() => (rightTab ? closeRight() : setRightTab("context"))}
-                    aria-label="Toggle context panel"
-                  >
-                    <PanelRight data-icon />
-                    Panel
-                    {changedCount > 0 && (
-                      <Badge variant="secondary" className="ml-1 tabular-nums">
-                        {changedCount}
-                      </Badge>
-                    )}
-                  </Button>
-                </div>
+              {activeSessionId === null ? (
+                /* No active session — show the new-session composer. */
+                <NewSession
+                  repo={selectedRepo}
+                  recents={recents}
+                  agents={agents}
+                  agent={selectedAgent}
+                  models={models}
+                  model={selectedModel}
+                  autoEdit={autoEdit}
+                  running={running}
+                  onPickRepo={pickRepo}
+                  onPickRecent={(p) => {
+                    addRecentRepo(p);
+                    setSelectedRepo(p);
+                    setRecents(getRecentRepos());
+                  }}
+                  onAgentChange={setSelectedAgent}
+                  onModelChange={setSelectedModel}
+                  onAutoEditChange={setAutoEdit}
+                  onStart={handleStartNewSession}
+                />
+              ) : (
+                /* Active session — toolbar + conversation + prompt bar. */
+                <>
+                  {/* Stable top toolbar — single toggle; switching Context vs Diff lives in the pane tabs. */}
+                  <div className="flex items-center justify-end px-4 py-2 border-b border-border">
+                    <Button
+                      variant={rightTab !== null ? "secondary" : "ghost"}
+                      size="sm"
+                      onClick={() => (rightTab ? closeRight() : setRightTab("context"))}
+                      aria-label="Toggle context panel"
+                    >
+                      <PanelRight data-icon />
+                      Panel
+                      {changedCount > 0 && (
+                        <Badge variant="secondary" className="ml-1 tabular-nums">
+                          {changedCount}
+                        </Badge>
+                      )}
+                    </Button>
+                  </div>
+                  <div className="flex flex-1 flex-col overflow-auto min-h-0">
+                    <div className="mt-auto w-full max-w-3xl mx-auto px-4">
+                      <Conversation turns={turns} running={running} />
+                    </div>
+                  </div>
+                  <PromptBar
+                    onStart={handleSend}
+                    running={running}
+                    models={models}
+                    model={selectedModel}
+                    onModelChange={setSelectedModel}
+                  />
+                </>
               )}
-              <div className="flex flex-1 flex-col overflow-auto min-h-0">
-                <div className="mt-auto w-full max-w-3xl mx-auto px-4">
-                  <Conversation turns={turns} running={running} />
-                </div>
-              </div>
-              <PromptBar
-                onStart={handleSend}
-                running={running}
-                models={models}
-                model={selectedModel}
-                onModelChange={setSelectedModel}
-              />
             </section>
           )}
 
