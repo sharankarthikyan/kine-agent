@@ -54,7 +54,6 @@ interface NavItem {
   Icon: React.ComponentType<{ className?: string }>;
   countKey?: keyof CustomizationCounts;
   description: string;
-  actionLabel: string;
 }
 
 const NAV_ITEMS: NavItem[] = [
@@ -63,7 +62,6 @@ const NAV_ITEMS: NavItem[] = [
     label: "Overview",
     Icon: LayoutGrid,
     description: "All customizations at a glance",
-    actionLabel: "",
   },
   {
     id: "agents",
@@ -71,7 +69,6 @@ const NAV_ITEMS: NavItem[] = [
     Icon: Bot,
     countKey: "agents",
     description: "Subagents available in this session",
-    actionLabel: "New agent...",
   },
   {
     id: "skills",
@@ -79,7 +76,6 @@ const NAV_ITEMS: NavItem[] = [
     Icon: Zap,
     countKey: "skills",
     description: "Slash commands and reusable skill scripts",
-    actionLabel: "Browse skills...",
   },
   {
     id: "instructions",
@@ -87,7 +83,6 @@ const NAV_ITEMS: NavItem[] = [
     Icon: FileText,
     countKey: "instructions",
     description: "CLAUDE.md and other rule files",
-    actionLabel: "New rule...",
   },
   {
     id: "hooks",
@@ -95,7 +90,6 @@ const NAV_ITEMS: NavItem[] = [
     Icon: Webhook,
     countKey: "hooks",
     description: "Lifecycle hooks configured for this agent",
-    actionLabel: "New hook...",
   },
   {
     id: "mcp",
@@ -103,14 +97,12 @@ const NAV_ITEMS: NavItem[] = [
     Icon: Server,
     countKey: "mcpServers",
     description: "Model Context Protocol server connections",
-    actionLabel: "Add server...",
   },
   {
     id: "plugins",
     label: "Plugins",
     Icon: Puzzle,
     description: "Installed Claude Code plugins",
-    actionLabel: "Browse plugins...",
   },
 ];
 
@@ -224,45 +216,27 @@ interface OverviewCardProps {
 }
 
 function OverviewCard({ item, count, onNavigate }: OverviewCardProps) {
-  const { id, label, Icon, description, actionLabel } = item;
+  const { id, label, Icon, description } = item;
   if (id === "overview") return null;
   return (
-    <div className="rounded-lg border border-border bg-muted/20 overflow-hidden">
-      {/* Clickable area — navigates to the matching section. */}
-      <button
-        type="button"
-        className="flex flex-col gap-2.5 p-3 w-full text-left hover:bg-muted/10 transition-colors"
-        onClick={() => onNavigate(id)}
-      >
-        <div className="flex items-center justify-between gap-2">
-          <Icon className="size-4 text-muted-foreground shrink-0" />
-          {count !== null && (
-            <span className="text-xs tabular-nums text-muted-foreground font-mono">
-              {count}
-            </span>
-          )}
-        </div>
-        <div className="flex flex-col gap-0.5">
-          <p className="text-sm font-medium leading-tight">{label}</p>
-          <p className="text-xs text-muted-foreground leading-snug">{description}</p>
-        </div>
-      </button>
-      {/* Inert create/browse stub — no backend yet. */}
-      {actionLabel && (
-        <div className="px-3 pb-3">
-          <Button
-            variant="outline"
-            size="sm"
-            aria-disabled="true"
-            tabIndex={-1}
-            title="Coming soon"
-            className="h-7 pointer-events-none opacity-50 text-xs"
-          >
-            {actionLabel}
-          </Button>
-        </div>
-      )}
-    </div>
+    <button
+      type="button"
+      className="flex flex-col gap-2.5 p-3 rounded-lg border border-border bg-muted/20 w-full text-left hover:bg-muted/30 transition-colors"
+      onClick={() => onNavigate(id)}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <Icon className="size-4 text-muted-foreground shrink-0" />
+        {count !== null && (
+          <span className="text-xs tabular-nums text-muted-foreground font-mono">
+            {count}
+          </span>
+        )}
+      </div>
+      <div className="flex flex-col gap-0.5">
+        <p className="text-sm font-medium leading-tight">{label}</p>
+        <p className="text-xs text-muted-foreground leading-snug">{description}</p>
+      </div>
+    </button>
   );
 }
 
@@ -314,7 +288,7 @@ function CapabilityRow({
 }) {
   const content = (
     <>
-      <span className="text-sm font-medium shrink-0 truncate max-w-[140px]">
+      <span className="text-sm font-medium shrink-0 whitespace-nowrap">
         {capability.name}
       </span>
       {capability.description && (
