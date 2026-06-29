@@ -288,6 +288,26 @@ pub async fn read_text_file(session_id: String, path: String) -> Result<String, 
     .map_err(|e| e.to_string())?
 }
 
+/// Write `content` to a rule/config or capability file that is already within the
+/// allowed set for this session's worktree. Uses the identical allowlist as
+/// `read_text_file` — only files discovered by `rule_candidates` or
+/// `list_capabilities` (filtered to the worktree / `~/.claude` roots) may be written.
+/// Content larger than 1 MiB or a path not in the allowlist is rejected.
+#[tauri::command]
+pub async fn write_text_file(
+    session_id: String,
+    path: String,
+    content: String,
+) -> Result<(), String> {
+    let root = worktrees_root();
+    tokio::task::spawn_blocking(move || {
+        let wt = crate::worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
+        inspect::write_text_file(&path, &content, &wt.path).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Discover an agent's available skills/subagents/commands for a session's worktree.
 ///
 /// Returns the three capability categories (`skills`, `subagents`, `commands`) as

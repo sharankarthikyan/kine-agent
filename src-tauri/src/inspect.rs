@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 pub enum InspectError {
     #[error("path not allowed: {0}")]
     Forbidden(String),
+    #[error("content too large (max 1 MiB)")]
+    ContentTooLarge,
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -59,25 +61,26 @@ pub fn rule_candidates(worktree: &Path) -> Vec<RuleFile> {
     out
 }
 
-/// Read a rule/config file, but ONLY if it is one of the exact files returned by
-/// `rule_candidates(worktree)`. Exact canonicalized-path matching prevents a caller
-/// from reading arbitrary files inside the worktree or the global config dirs (e.g.
-/// `~/.claude/.credentials.json`). Payload is streamed-and-capped at 256 KB so a
-/// large file cannot be slurped into RAM before the limit is applied.
+/// Build the set of paths that both `read_text_file` and `write_text_file` are
+/// permitted to access. Keeping this in one place ensures the two operations share
+/// identical validation — a drift between them would create a security gap.
 ///
-/// Security: candidates are further filtered so their canonical (symlink-resolved)
-/// path must either reside INSIDE the canonical worktree OR be one of the exact
-/// global config files. This prevents a symlinked rule file from becoming a read
-/// gadget for secrets outside the worktree boundary.
-pub fn read_text_file(path: &str, worktree: &Path) -> Result<String, InspectError> {
-    let target = std::fs::canonicalize(path)?;
-    let canonical_worktree = std::fs::canonicalize(worktree)?;
+/// Includes:
+/// - Rule/config candidates (CLAUDE.md, AGENTS.md, etc.) whose canonical path
+///   resides INSIDE the canonical worktree OR is one of the exact expected global
+///   config files (`is_expected_global`).
+/// - Capability backing files (skills, subagents, commands) whose canonical path
+///   resides INSIDE the canonical worktree OR inside the user's `~/.claude` tree.
+///
+/// Every path is already canonicalized (symlinks fully resolved) so containment
+/// checks are exact; a symlink that escapes the allowed roots is excluded.
+fn allowed_read_write_paths(worktree: &Path, canonical_worktree: &Path) -> Vec<PathBuf> {
     let mut allowed: Vec<PathBuf> = rule_candidates(worktree)
         .into_iter()
         .filter(|r| r.exists)
         .filter_map(|r| {
             let cp = std::fs::canonicalize(&r.path).ok()?;
-            if cp.starts_with(&canonical_worktree) || is_expected_global(&cp) {
+            if cp.starts_with(canonical_worktree) || is_expected_global(&cp) {
                 Some(cp)
             } else {
                 None
@@ -89,7 +92,7 @@ pub fn read_text_file(path: &str, worktree: &Path) -> Result<String, InspectErro
     // boundary guard used for rule files: the canonical path must resolve INSIDE
     // the worktree or the user's `~/.claude` tree. A symlinked capability that
     // resolves outside those roots (e.g. ~/.ssh/id_rsa) is rejected — defence in
-    // depth against a compromised WebView, mirroring the rule-candidate guard.
+    // depth against a compromised WebView.
     let canonical_user_claude = std::env::var_os("HOME")
         .map(PathBuf::from)
         .and_then(|h| std::fs::canonicalize(h.join(".claude")).ok());
@@ -99,7 +102,7 @@ pub fn read_text_file(path: &str, worktree: &Path) -> Result<String, InspectErro
             continue;
         }
         if let Ok(cp) = std::fs::canonicalize(&cap.path) {
-            let in_worktree = cp.starts_with(&canonical_worktree);
+            let in_worktree = cp.starts_with(canonical_worktree);
             let in_user_claude = canonical_user_claude
                 .as_ref()
                 .map(|h| cp.starts_with(h))
@@ -109,6 +112,23 @@ pub fn read_text_file(path: &str, worktree: &Path) -> Result<String, InspectErro
             }
         }
     }
+    allowed
+}
+
+/// Read a rule/config file, but ONLY if it is one of the exact files returned by
+/// `rule_candidates(worktree)` or discovered by `list_capabilities`. Exact
+/// canonicalized-path matching prevents a caller from reading arbitrary files inside
+/// the worktree or the global config dirs (e.g. `~/.claude/.credentials.json`).
+/// Payload is streamed-and-capped at 256 KB so a large file cannot be slurped into
+/// RAM before the limit is applied.
+///
+/// Security: every candidate is canonicalized (symlinks fully resolved) and checked
+/// against the worktree boundary or the known global config roots before being
+/// added to the allowlist. See `allowed_read_write_paths` for the shared logic.
+pub fn read_text_file(path: &str, worktree: &Path) -> Result<String, InspectError> {
+    let target = std::fs::canonicalize(path)?;
+    let canonical_worktree = std::fs::canonicalize(worktree)?;
+    let allowed = allowed_read_write_paths(worktree, &canonical_worktree);
     if !allowed.contains(&target) {
         return Err(InspectError::Forbidden(path.to_string()));
     }
@@ -117,6 +137,32 @@ pub fn read_text_file(path: &str, worktree: &Path) -> Result<String, InspectErro
     let mut buf = Vec::new();
     f.take(256 * 1024).read_to_end(&mut buf)?;
     Ok(String::from_utf8_lossy(&buf).to_string())
+}
+
+/// Write `content` to `path`, but ONLY if `path` resolves to a file already in
+/// the allowlist produced by `allowed_read_write_paths` — identical to the set
+/// that `read_text_file` accepts. This guarantees read and write enforce the same
+/// boundary with no risk of the two drifting apart.
+///
+/// The file must already exist (`canonicalize` fails for nonexistent paths): we edit
+/// discovered files, we do not create arbitrary new ones.
+///
+/// Content larger than 1 MiB is rejected before writing to prevent the UI from
+/// accidentally overwriting a file with a huge payload.
+pub fn write_text_file(path: &str, content: &str, worktree: &Path) -> Result<(), InspectError> {
+    // File must already exist — canonicalize resolves symlinks AND errors when absent.
+    let target = std::fs::canonicalize(path)?;
+    let canonical_worktree = std::fs::canonicalize(worktree)?;
+    let allowed = allowed_read_write_paths(worktree, &canonical_worktree);
+    if !allowed.contains(&target) {
+        return Err(InspectError::Forbidden(path.to_string()));
+    }
+    // 1 MiB cap — large enough for any realistic agent customization file.
+    if content.len() > 1024 * 1024 {
+        return Err(InspectError::ContentTooLarge);
+    }
+    std::fs::write(&target, content)?;
+    Ok(())
 }
 
 /// Returns true when `path` (already canonicalized by the caller) is one of the
@@ -633,6 +679,96 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&secret);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── write_text_file tests ────────────────────────────────────────────────
+
+    #[test]
+    fn write_succeeds_for_discovered_capability_file() {
+        let dir = std::env::temp_dir().join(format!("ae-wrt1-{}", std::process::id()));
+        let agents_dir = dir.join(".claude/agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        let agent_file = agents_dir.join("foo.md");
+        std::fs::write(&agent_file, "original content").unwrap();
+
+        let new_content = "updated agent instructions";
+        write_text_file(&agent_file.display().to_string(), new_content, &dir).unwrap();
+
+        // Verify the new content was written by reading back from disk directly.
+        let on_disk = std::fs::read_to_string(&agent_file).unwrap();
+        assert_eq!(on_disk, new_content);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_forbidden_for_arbitrary_file_not_in_allowlist() {
+        let dir = std::env::temp_dir().join(format!("ae-wrt2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // An arbitrary file inside the worktree but NOT a rule/capability file.
+        let arbitrary = dir.join("arbitrary.txt");
+        std::fs::write(&arbitrary, "should not be writable").unwrap();
+
+        assert!(
+            matches!(
+                write_text_file(&arbitrary.display().to_string(), "new content", &dir),
+                Err(InspectError::Forbidden(_))
+            ),
+            "expected Forbidden for a file not in the allowlist"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_forbidden_for_capability_symlink_escaping_roots() {
+        let dir = std::env::temp_dir().join(format!("ae-wrt3-{}", std::process::id()));
+        let agents_dir = dir.join(".claude/agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        // A file OUTSIDE the worktree and outside ~/.claude.
+        let outside = std::env::temp_dir().join(format!("ae-wrtsec-{}.txt", std::process::id()));
+        std::fs::write(&outside, "TARGET OUTSIDE").unwrap();
+        // A .md capability symlink pointing at the outside file — would be discovered
+        // by collect_md, but the symlink-escape guard must still reject it.
+        let link = agents_dir.join("evil.md");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+
+        assert!(
+            matches!(
+                write_text_file(&link.display().to_string(), "injected", &dir),
+                Err(InspectError::Forbidden(_))
+            ),
+            "expected Forbidden for a write via a symlink escaping the worktree / ~/.claude"
+        );
+
+        // Confirm the outside file was NOT modified.
+        let unchanged = std::fs::read_to_string(&outside).unwrap();
+        assert_eq!(unchanged, "TARGET OUTSIDE");
+
+        let _ = std::fs::remove_file(&outside);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_rejects_content_exceeding_size_cap() {
+        let dir = std::env::temp_dir().join(format!("ae-wrt4-{}", std::process::id()));
+        // A candidate rule file that is allowed.
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("CLAUDE.md"), "initial").unwrap();
+        let target = dir.join("CLAUDE.md");
+
+        // Content just over 1 MiB.
+        let oversized = "x".repeat(1024 * 1024 + 1);
+        assert!(
+            matches!(
+                write_text_file(&target.display().to_string(), &oversized, &dir),
+                Err(InspectError::ContentTooLarge)
+            ),
+            "expected ContentTooLarge for payload exceeding 1 MiB"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

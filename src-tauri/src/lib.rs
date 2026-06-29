@@ -45,6 +45,7 @@ pub fn run() {
             commands::list_models,
             commands::inspect_rules,
             commands::read_text_file,
+            commands::write_text_file,
             commands::list_capabilities,
             commands::customizations_counts,
             commands::session_diffstat,
