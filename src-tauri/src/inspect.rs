@@ -72,7 +72,7 @@ pub fn rule_candidates(worktree: &Path) -> Vec<RuleFile> {
 pub fn read_text_file(path: &str, worktree: &Path) -> Result<String, InspectError> {
     let target = std::fs::canonicalize(path)?;
     let canonical_worktree = std::fs::canonicalize(worktree)?;
-    let allowed: Vec<PathBuf> = rule_candidates(worktree)
+    let mut allowed: Vec<PathBuf> = rule_candidates(worktree)
         .into_iter()
         .filter(|r| r.exists)
         .filter_map(|r| {
@@ -84,6 +84,21 @@ pub fn read_text_file(path: &str, worktree: &Path) -> Result<String, InspectErro
             }
         })
         .collect();
+    // Also permit files discovered by list_capabilities — skills, subagents, and
+    // commands whose canonical path sits inside the worktree boundary or is one of
+    // the expected global config paths. The same traversal guard applies: a
+    // symlinked capability that resolves outside the worktree is NOT added.
+    let caps = list_capabilities("claude", worktree);
+    for cap in caps.skills.into_iter().chain(caps.subagents).chain(caps.commands) {
+        if cap.path.is_empty() {
+            continue;
+        }
+        if let Ok(cp) = std::fs::canonicalize(&cap.path) {
+            if cp.starts_with(&canonical_worktree) || is_expected_global(&cp) {
+                allowed.push(cp);
+            }
+        }
+    }
     if !allowed.contains(&target) {
         return Err(InspectError::Forbidden(path.to_string()));
     }
@@ -121,6 +136,9 @@ pub struct Capability {
     pub description: Option<String>,
     /// `"project"` when found in the worktree, `"user"` when found in `~/.claude/`.
     pub source: String,
+    /// Absolute path to the capability's backing file on disk.
+    /// Empty string when the capability has no known backing file.
+    pub path: String,
 }
 
 /// All capability categories discovered for an agent in a worktree.
@@ -164,7 +182,7 @@ pub fn list_capabilities(agent: &str, worktree: &Path) -> Capabilities {
 }
 
 /// Push one `Capability` per `*.md` file found in `dir`.
-/// Name = file stem; description is extracted best-effort.
+/// Name = file stem; description is extracted best-effort; path is the absolute file path.
 fn collect_md(dir: &Path, source: &str, out: &mut Vec<Capability>) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
@@ -177,11 +195,13 @@ fn collect_md(dir: &Path, source: &str, out: &mut Vec<Capability>) {
             name: name.to_string(),
             description: first_description(&path),
             source: source.to_string(),
+            path: path.display().to_string(),
         });
     }
 }
 
 /// Push one `Capability` per subdirectory of `dir` that contains a `SKILL.md`.
+/// The `path` field is set to the absolute path of the `SKILL.md` file.
 fn collect_skill_dirs(dir: &Path, source: &str, out: &mut Vec<Capability>) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
@@ -197,6 +217,7 @@ fn collect_skill_dirs(dir: &Path, source: &str, out: &mut Vec<Capability>) {
             name,
             description: first_description(&skill_md),
             source: source.to_string(),
+            path: skill_md.display().to_string(),
         });
     }
 }
@@ -463,5 +484,57 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&fake_home);
+    }
+
+    #[test]
+    fn capability_path_is_populated_for_discovered_agent() {
+        let dir = std::env::temp_dir().join(format!("ae-cappath-{}", std::process::id()));
+        let agents_dir = dir.join(".claude/agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(agents_dir.join("foo.md"), "---\ndescription: Does foo\n---\n").unwrap();
+
+        let caps = list_capabilities("claude", &dir);
+        let foo = caps.subagents.iter().find(|c| c.name == "foo")
+            .expect("subagent 'foo' not found");
+        assert!(
+            foo.path.ends_with("/.claude/agents/foo.md"),
+            "expected path ending with /.claude/agents/foo.md, got {:?}",
+            foo.path
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_text_file_succeeds_for_discovered_capability() {
+        let dir = std::env::temp_dir().join(format!("ae-capread-{}", std::process::id()));
+        let agents_dir = dir.join(".claude/agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        let agent_file = agents_dir.join("foo.md");
+        std::fs::write(&agent_file, "agent content here").unwrap();
+
+        let result = read_text_file(&agent_file.display().to_string(), &dir);
+        assert_eq!(result.unwrap(), "agent content here");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_text_file_forbidden_for_arbitrary_file_not_in_capabilities() {
+        let dir = std::env::temp_dir().join(format!("ae-capforbid-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A file inside the worktree directory but NOT a rule/capability file.
+        let arbitrary = dir.join("arbitrary.txt");
+        std::fs::write(&arbitrary, "should not be readable").unwrap();
+
+        assert!(
+            matches!(
+                read_text_file(&arbitrary.display().to_string(), &dir),
+                Err(InspectError::Forbidden(_))
+            ),
+            "expected Forbidden for a file not in the rules/capabilities allowlist"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

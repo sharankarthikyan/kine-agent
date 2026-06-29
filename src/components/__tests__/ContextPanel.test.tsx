@@ -90,7 +90,7 @@ test("renders capability names", () => {
     <ContextPanel
       {...base}
       capabilities={{
-        skills: [{ name: "shadcn", description: "ui", source: "user" }],
+        skills: [{ name: "shadcn", description: "ui", source: "user", path: "" }],
         subagents: [],
         commands: [],
       }}

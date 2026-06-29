@@ -12,6 +12,8 @@ export interface Capability {
   name: string;
   description: string | null;
   source: "project" | "user";
+  /** Absolute path to the capability's backing file on disk. Empty string when unknown. */
+  path: string;
 }
 
 export interface Capabilities {

@@ -14,11 +14,11 @@ const counts: CustomizationCounts = {
 
 const capabilities: Capabilities = {
   skills: [
-    { name: "shadcn", description: "Add shadcn components", source: "user" },
-    { name: "deep-research", description: "Multi-source research", source: "project" },
+    { name: "shadcn", description: "Add shadcn components", source: "user", path: "" },
+    { name: "deep-research", description: "Multi-source research", source: "project", path: "" },
   ],
   subagents: [
-    { name: "code-reviewer", description: "Reviews code for bugs", source: "user" },
+    { name: "code-reviewer", description: "Reviews code for bugs", source: "user", path: "" },
   ],
   commands: [],
 };
