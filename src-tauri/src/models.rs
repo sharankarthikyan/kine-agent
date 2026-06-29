@@ -91,28 +91,23 @@ pub fn claude_fallback() -> Vec<ModelInfo> {
     .collect()
 }
 
-/// Call `GET /v1/models` against the Anthropic REST API and map the response
-/// to `ModelInfo` entries. Returns `None` on ANY failure — network error,
-/// non-200 status, missing fields, empty list — so the caller can fall back
-/// gracefully. Never panics.
-fn fetch_anthropic_models(key: &str) -> Option<Vec<ModelInfo>> {
-    let response = ureq::get("https://api.anthropic.com/v1/models?limit=1000")
-        .set("x-api-key", key)
-        .set("anthropic-version", "2023-06-01")
-        .call()
-        .ok()?;
-
-    let body: serde_json::Value = response.into_json().ok()?;
+/// Pure JSON→`Vec<ModelInfo>` mapper. Expects the parsed Anthropic `/v1/models`
+/// response body. Returns `None` if the `data` key is absent or the array is
+/// empty (so the caller can fall back). Never panics on unexpected JSON shapes.
+///
+/// Only `id` is required per item; `display_name` is optional and falls back to
+/// `id` when absent.
+fn parse_models(body: &serde_json::Value) -> Option<Vec<ModelInfo>> {
     let data = body.get("data")?.as_array()?;
-
     let models: Vec<ModelInfo> = data
         .iter()
         .filter_map(|item| {
             let id = item.get("id")?.as_str()?;
-            let display_name = item.get("display_name")?.as_str().unwrap_or(id);
+            // display_name is optional: fall back to the id string when absent.
+            let label = item.get("display_name").and_then(|v| v.as_str()).unwrap_or(id);
             Some(ModelInfo {
                 value: id.to_string(),
-                label: display_name.to_string(),
+                label: label.to_string(),
                 agent: "claude".to_string(),
                 description: None,
                 source: "api".to_string(),
@@ -120,8 +115,25 @@ fn fetch_anthropic_models(key: &str) -> Option<Vec<ModelInfo>> {
             })
         })
         .collect();
-
     if models.is_empty() { None } else { Some(models) }
+}
+
+/// Call `GET /v1/models` against the Anthropic REST API and map the response
+/// to `ModelInfo` entries. Returns `None` on ANY failure — network error,
+/// timeout, non-200 status, missing fields, empty list — so the caller can fall
+/// back gracefully. Never panics.
+fn fetch_anthropic_models(key: &str) -> Option<Vec<ModelInfo>> {
+    let response = ureq::get("https://api.anthropic.com/v1/models?limit=1000")
+        .set("x-api-key", key)
+        .set("anthropic-version", "2023-06-01")
+        // Without an explicit timeout ureq has no deadline; a hung connection
+        // would block the spawn_blocking thread indefinitely.
+        .timeout(std::time::Duration::from_secs(10))
+        .call()
+        .ok()?;
+
+    let body: serde_json::Value = response.into_json().ok()?;
+    parse_models(&body)
 }
 
 #[cfg(test)]
@@ -162,5 +174,32 @@ mod tests {
     #[test]
     fn list_models_unknown_returns_empty() {
         assert!(list_models("unknown-agent").is_empty());
+    }
+
+    #[test]
+    fn parse_models_maps_data_with_display_name_fallback_to_id() {
+        let json = serde_json::json!({
+            "data": [
+                { "id": "claude-opus-4-6", "display_name": "Claude Opus 4.6" },
+                { "id": "claude-x" }   // no display_name — must fall back to id
+            ]
+        });
+        let models = parse_models(&json).expect("should parse non-empty data array");
+        assert_eq!(models.len(), 2);
+        // first entry: display_name present
+        assert_eq!(models[0].value, "claude-opus-4-6");
+        assert_eq!(models[0].label, "Claude Opus 4.6");
+        assert_eq!(models[0].source, "api");
+        assert!(!models[0].disabled);
+        // second entry: display_name absent — label must equal id
+        assert_eq!(models[1].value, "claude-x");
+        assert_eq!(models[1].label, "claude-x");
+        assert_eq!(models[1].source, "api");
+    }
+
+    #[test]
+    fn parse_models_returns_none_for_empty_data_array() {
+        let json = serde_json::json!({ "data": [] });
+        assert!(parse_models(&json).is_none());
     }
 }
