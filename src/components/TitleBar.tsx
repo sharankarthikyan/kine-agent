@@ -1,35 +1,24 @@
-import type { CSSProperties } from "react";
+import { ThemeToggle } from "./ThemeToggle";
 
 /**
  * Slim draggable window title bar. Pairs with macOS `titleBarStyle: "Overlay"`
  * (native traffic lights render over the left of this bar — hence the left
  * padding) and `data-tauri-drag-region` (made draggable via the CSS rule in
- * tokens.css + the `core:window:allow-start-dragging` capability).
+ * index.css + the `core:window:allow-start-dragging` capability).
  */
 export function TitleBar() {
   return (
-    <div data-tauri-drag-region style={bar}>
-      <span data-tauri-drag-region style={brand}>
+    <div
+      data-tauri-drag-region
+      className="h-10 shrink-0 flex items-center border-b border-border bg-background pl-[78px] pr-2"
+    >
+      <span data-tauri-drag-region className="text-sm font-medium flex-1">
         agent-editor
+      </span>
+      {/* ThemeToggle must not be inside the drag region so it remains clickable. */}
+      <span className="[-webkit-app-region:no-drag]">
+        <ThemeToggle />
       </span>
     </div>
   );
 }
-
-const bar: CSSProperties = {
-  height: "var(--titlebar-h)",
-  flexShrink: 0,
-  display: "flex",
-  alignItems: "center",
-  // Clear the macOS traffic-light cluster (~70px) so the brand isn't hidden.
-  paddingLeft: "78px",
-  borderBottom: "1px solid var(--border-hairline)",
-  background: "var(--bg-surface)",
-};
-
-const brand: CSSProperties = {
-  fontSize: "var(--fs-13)",
-  fontWeight: 600,
-  color: "var(--text-primary)",
-  letterSpacing: "0.01em",
-};

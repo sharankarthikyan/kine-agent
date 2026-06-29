@@ -1,53 +1,178 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { ArrowUp, Bot, ChevronDown, Check, Paperclip } from "lucide-react";
+import { cn } from "@/lib/utils";
+import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
+import { Badge } from "@/components/ui/badge";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { type ModelInfo } from "@/lib/models";
 
 interface PromptBarProps {
-  onStart: (prompt: string) => void;
+  onStart: (text: string, model: ModelInfo | null) => void;
   running: boolean;
+  models: ModelInfo[];
+  model: ModelInfo | null;
+  onModelChange: (m: ModelInfo) => void;
 }
 
-export function PromptBar({ onStart, running }: PromptBarProps) {
-  const [text, setText] = useState("");
-  const canStart = !running && text.trim().length > 0;
+/** Capitalize the first letter of an agent id for use as a group label. */
+function agentLabel(agentId: string): string {
+  return agentId.charAt(0).toUpperCase() + agentId.slice(1);
+}
 
-  function handleSubmit(event: React.FormEvent) {
-    event.preventDefault();
-    if (!canStart) return;
-    onStart(text.trim());
-    setText(""); // clear the composer after sending, like a chat input
+/** Group an array of ModelInfo by their agent field, preserving insertion order. */
+function groupByAgent(models: ModelInfo[]): [string, ModelInfo[]][] {
+  const map = new Map<string, ModelInfo[]>();
+  for (const m of models) {
+    const group = map.get(m.agent) ?? [];
+    group.push(m);
+    map.set(m.agent, group);
+  }
+  return [...map.entries()];
+}
+
+export function PromptBar({ onStart, running, models, model, onModelChange }: PromptBarProps) {
+  const [text, setText] = useState("");
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const canSend = !running && text.trim().length > 0;
+
+  // Auto-grow the textarea up to 240px, then scroll.
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    const next = el.scrollHeight;
+    if (next > 240) {
+      el.style.height = "240px";
+      el.style.overflowY = "auto";
+    } else {
+      el.style.height = `${next}px`;
+      el.style.overflowY = "hidden";
+    }
+  }, [text]);
+
+  function send() {
+    if (!canSend) return;
+    onStart(text.trim(), model);
+    setText("");
   }
 
+  function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+    // Skip during IME composition so committing a CJK candidate doesn't send prematurely.
+    if (e.nativeEvent.isComposing) return;
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      send();
+    }
+  }
+
+  const groups = groupByAgent(models);
+  const hasModels = models.length > 0;
+
   return (
-    <form
-      onSubmit={handleSubmit}
-      style={{
-        display: "flex", gap: "var(--space-2)", padding: "var(--space-3)",
-        borderTop: "1px solid var(--border-hairline)", background: "var(--bg-surface)",
-      }}
-    >
-      <input
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        placeholder="Message the agent…"
-        aria-label="Message the agent"
-        disabled={running}
-        style={{
-          flex: 1, padding: "var(--space-3)", borderRadius: "var(--radius-md)",
-          border: "1px solid var(--border-hairline)", background: "var(--bg-card)",
-          color: "var(--text-primary)", fontSize: "var(--fs-14)",
-        }}
-      />
-      <button
-        type="submit"
-        disabled={!canStart}
-        style={{
-          padding: "var(--space-3) var(--space-4)", borderRadius: "var(--radius-md)",
-          border: "none", background: "var(--status-running)", color: "var(--bg-canvas)",
-          fontWeight: 500, cursor: canStart ? "pointer" : "not-allowed",
-          opacity: canStart ? 1 : 0.45, transition: "opacity var(--dur-fast) var(--ease-out)",
-        }}
-      >
-        Send
-      </button>
-    </form>
+    <div className="px-4 py-3">
+      <div className="rounded-xl border bg-card shadow-sm p-3 flex flex-col gap-2">
+        {/* Composer textarea — card is the visual frame; textarea strips its own border/bg */}
+        <Textarea
+          ref={textareaRef}
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={handleKeyDown}
+          placeholder="Message the agent…"
+          aria-label="Message the agent"
+          disabled={running}
+          rows={1}
+          className="min-h-0 resize-none border-0 bg-transparent p-0 shadow-none focus-visible:ring-0 focus-visible:ring-offset-0"
+        />
+
+        {/* Bottom action row */}
+        <div className="flex items-center justify-between">
+          {/* LEFT: model / agent selector */}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="gap-1.5 px-2 text-muted-foreground hover:text-foreground"
+                aria-label={`Model: ${model?.label ?? "No models"}`}
+              >
+                <Bot data-icon="inline-start" />
+                <span className="text-sm">{model?.label ?? "No models"}</span>
+                {/* Show "fallback" badge when the model list came from hardcoded defaults */}
+                {model?.source === "fallback" && (
+                  <Badge variant="outline" className="text-xs px-1.5 py-0 text-muted-foreground">
+                    {model.source}
+                  </Badge>
+                )}
+                <ChevronDown data-icon="inline-end" className="opacity-50" />
+              </Button>
+            </DropdownMenuTrigger>
+
+            <DropdownMenuContent align="start" className="min-w-56">
+              {hasModels ? (
+                groups.map(([agent, agentModels], groupIndex) => (
+                  <DropdownMenuGroup key={agent}>
+                    {groupIndex > 0 && <DropdownMenuSeparator />}
+                    <DropdownMenuLabel className="text-xs text-muted-foreground font-medium">
+                      {agentLabel(agent)}
+                    </DropdownMenuLabel>
+                    {agentModels.map((m) => (
+                      <DropdownMenuItem
+                        key={m.value}
+                        disabled={m.disabled}
+                        onSelect={() => onModelChange(m)}
+                        className="gap-2"
+                      >
+                        <Check
+                          data-icon
+                          className={cn(
+                            "shrink-0",
+                            m.value === model?.value ? "opacity-100" : "opacity-0",
+                          )}
+                        />
+                        <span className="flex-1">{m.label}</span>
+                        {m.description && (
+                          <span className="text-xs text-muted-foreground truncate max-w-32">
+                            {m.description}
+                          </span>
+                        )}
+                      </DropdownMenuItem>
+                    ))}
+                  </DropdownMenuGroup>
+                ))
+              ) : (
+                <DropdownMenuGroup>
+                  <DropdownMenuItem disabled>No models available</DropdownMenuItem>
+                </DropdownMenuGroup>
+              )}
+            </DropdownMenuContent>
+          </DropdownMenu>
+
+          {/* RIGHT: attach + send */}
+          <div className="flex items-center gap-1">
+            <Button variant="ghost" size="icon" aria-label="Attach" className="size-8">
+              <Paperclip data-icon />
+            </Button>
+            <Button
+              size="icon"
+              aria-label="Send"
+              disabled={!canSend}
+              onClick={send}
+              className="size-8 rounded-full"
+            >
+              <ArrowUp data-icon />
+            </Button>
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }

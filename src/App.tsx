@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { CSSProperties } from "react";
+import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
+import { FileDiff, Maximize2, Minimize2, X } from "lucide-react";
 import { PromptBar } from "./components/PromptBar";
 import { Conversation, type Turn } from "./components/Conversation";
 import { DiffViewer } from "./components/DiffViewer";
 import { TitleBar } from "./components/TitleBar";
 import { SessionList } from "./components/SessionList";
 import { startSession, sendMessage, type AgentEvent } from "./lib/agent";
+import { detectAgents, listModels, type ModelInfo } from "./lib/models";
 import { reviewSession, type SessionDiff } from "./lib/review";
 import { listSessions, sessionEvents, type SessionSummary } from "./lib/sessions";
 import { turnsFromEvents } from "./lib/turns";
@@ -24,6 +27,8 @@ export default function App() {
   const [diff, setDiff] = useState<SessionDiff | null>(null);
   const [diffOpen, setDiffOpen] = useState(false);
   const [diffExpanded, setDiffExpanded] = useState(false);
+  const [models, setModels] = useState<ModelInfo[]>([]);
+  const [selectedModel, setSelectedModel] = useState<ModelInfo | null>(null);
 
   // Synchronous ref keeps the active session ID readable inside async callbacks
   // without stale-closure issues — the guard for cross-session contamination.
@@ -42,6 +47,23 @@ export default function App() {
     }
   }, []);
 
+  // Discover installed agents and their available models on mount.
+  // Best-effort — no-op in the browser preview where IPC is unavailable.
+  const loadModels = useCallback(async () => {
+    try {
+      const agents = await detectAgents();
+      const installed = agents.filter((a) => a.installed);
+      const results = await Promise.allSettled(installed.map((a) => listModels(a.id)));
+      const all = results
+        .flatMap((r) => (r.status === "fulfilled" ? r.value : []))
+        .filter((m) => !m.disabled);
+      setModels(all);
+      setSelectedModel((prev) => prev ?? all[0] ?? null);
+    } catch (err) {
+      console.error("failed to load models", err);
+    }
+  }, []);
+
   // Guard: only apply the fetched diff if the session is still the active one.
   // A late fetch from a prior session must not clobber the now-active session's diff.
   const refreshDiff = useCallback(async (sessionId: string) => {
@@ -56,6 +78,10 @@ export default function App() {
   useEffect(() => {
     void refreshSessions();
   }, [refreshSessions]);
+
+  useEffect(() => {
+    void loadModels();
+  }, [loadModels]);
 
   // closeDiff keeps the "reset both flags together" invariant structural.
   const closeDiff = () => { setDiffOpen(false); setDiffExpanded(false); };
@@ -81,7 +107,7 @@ export default function App() {
     });
   }
 
-  async function handleSend(text: string) {
+  async function handleSend(text: string, model: ModelInfo | null) {
     const isNew = activeSessionId === null;
     const sessionId = activeSessionId ?? crypto.randomUUID();
     // Set the ref synchronously before the first await so the cross-session guard
@@ -107,11 +133,13 @@ export default function App() {
       if (activeSessionIdRef.current !== sessionId) return;
       appendToLastTurn(event);
     };
+    // Forward the model value for Claude; null model → omit → CLI default.
+    const modelArg = model && model.agent === "claude" ? model.value : undefined;
     try {
       if (isNew) {
-        await startSession({ prompt: text, repo: ".", sessionId, onEvent });
+        await startSession({ prompt: text, repo: ".", sessionId, model: modelArg, onEvent });
       } else {
-        await sendMessage({ sessionId, prompt: text, onEvent });
+        await sendMessage({ sessionId, prompt: text, model: modelArg, onEvent });
       }
     } catch (err) {
       onEvent({ kind: "error", data: { message: String(err) } });
@@ -145,60 +173,81 @@ export default function App() {
   const showReviewChip = !running && changedCount > 0 && !diffOpen;
 
   return (
-    <div style={shell}>
+    <div className="flex flex-col h-screen bg-background text-foreground">
       <TitleBar />
-      <div style={{ display: "grid", gridTemplateColumns: "var(--list-pane-w) 1fr", flex: 1, minHeight: 0 }}>
-        <SessionList
-          sessions={sessions}
-          activeId={activeSessionId}
-          onSelect={handleSelectSession}
-          onNew={handleNewSession}
-        />
-        <main style={detail}>
+      <div className="flex flex-1 min-h-0">
+        <div className="w-72 shrink-0">
+          <SessionList
+            sessions={sessions}
+            activeId={activeSessionId}
+            onSelect={handleSelectSession}
+            onNew={handleNewSession}
+          />
+        </div>
+        <main className="flex flex-1 min-h-0">
           {/* Chat column — hidden only while the diff is expanded to fullscreen. */}
           {!diffExpanded && (
-            <section style={chatColumn}>
-              <div style={scrollArea}>
-                <div style={{ marginTop: "auto", width: "100%", maxWidth: "var(--content-measure)" }}>
+            <section className="flex flex-1 flex-col min-w-0 min-h-0">
+              <div className="flex flex-1 flex-col overflow-auto min-h-0">
+                <div className="mt-auto w-full max-w-3xl mx-auto px-4">
                   <Conversation turns={turns} running={running} />
                 </div>
               </div>
               {showReviewChip && (
-                <div style={chipRow}>
-                  <button onClick={() => setDiffOpen(true)} style={reviewChip}>
+                <div className="px-4 py-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="rounded-full"
+                    onClick={() => setDiffOpen(true)}
+                  >
+                    <FileDiff data-icon />
                     {changedCount} file{changedCount === 1 ? "" : "s"} changed — Review
-                  </button>
+                  </Button>
                 </div>
               )}
-              <PromptBar onStart={handleSend} running={running} />
+              <PromptBar
+                onStart={handleSend}
+                running={running}
+                models={models}
+                model={selectedModel}
+                onModelChange={setSelectedModel}
+              />
             </section>
           )}
 
           {/* Diff side-pane — beside the chat, collapsible + expandable. */}
           {diffOpen && diff && (
-            <aside style={{ ...diffPane, ...(diffExpanded ? diffPaneExpanded : null) }}>
-              <header style={diffHeader}>
-                <span style={{ color: "var(--text-muted)", fontSize: "var(--fs-13)" }}>
+            <aside
+              className={cn(
+                "flex flex-col min-w-0 min-h-0 border-l border-border",
+                diffExpanded ? "w-full border-l-0" : "w-[clamp(420px,46%,760px)]"
+              )}
+            >
+              <header className="flex items-center justify-between px-3 py-2 border-b border-border">
+                <span className="text-sm text-muted-foreground tabular-nums">
                   {changedCount} file{changedCount === 1 ? "" : "s"} changed
                 </span>
-                <span style={{ display: "flex", gap: "var(--space-1)" }}>
-                  <button
+                <div className="flex items-center gap-1">
+                  <Button
+                    variant="ghost"
+                    size="icon"
                     onClick={() => setDiffExpanded((v) => !v)}
-                    style={iconButton}
                     aria-label={diffExpanded ? "Collapse diff" : "Expand diff"}
                   >
-                    {diffExpanded ? "⤡" : "⤢"}
-                  </button>
-                  <button
+                    {diffExpanded ? <Minimize2 /> : <Maximize2 />}
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
                     onClick={closeDiff}
-                    style={iconButton}
                     aria-label="Close diff"
                   >
-                    ✕
-                  </button>
-                </span>
+                    <X />
+                  </Button>
+                </div>
               </header>
-              <div style={{ flex: 1, minHeight: 0, overflow: "auto" }}>
+              <div className="flex-1 min-h-0 overflow-auto">
                 <DiffViewer diff={diff} />
               </div>
             </aside>
@@ -208,27 +257,3 @@ export default function App() {
     </div>
   );
 }
-
-const shell: CSSProperties = { display: "flex", flexDirection: "column", height: "100vh" };
-const detail: CSSProperties = { display: "flex", minWidth: 0, minHeight: 0 };
-const chatColumn: CSSProperties = { flex: 1, display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0 };
-const scrollArea: CSSProperties = { flex: 1, overflow: "auto", minHeight: 0, display: "flex", flexDirection: "column" };
-const chipRow: CSSProperties = { padding: "var(--space-2) var(--space-3)" };
-const reviewChip: CSSProperties = {
-  padding: "var(--space-1) var(--space-3)", borderRadius: "var(--radius-full)",
-  border: "1px solid var(--border-hairline)", background: "var(--surface-raised)",
-  color: "var(--text-primary)", cursor: "pointer", fontSize: "var(--fs-12)",
-};
-const diffPane: CSSProperties = {
-  width: "clamp(420px, 46%, 760px)", borderLeft: "1px solid var(--border-hairline)",
-  display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0,
-};
-const diffPaneExpanded: CSSProperties = { width: "100%", borderLeft: "none" };
-const diffHeader: CSSProperties = {
-  display: "flex", alignItems: "center", justifyContent: "space-between",
-  padding: "var(--space-2) var(--space-3)", borderBottom: "1px solid var(--border-hairline)",
-};
-const iconButton: CSSProperties = {
-  width: 28, height: 24, border: "1px solid var(--border-hairline)", borderRadius: "var(--radius-sm)",
-  background: "var(--bg-card)", color: "var(--text-body)", cursor: "pointer", fontSize: "var(--fs-13)",
-};

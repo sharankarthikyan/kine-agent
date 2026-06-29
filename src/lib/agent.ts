@@ -26,6 +26,8 @@ export interface StartSessionArgs {
   prompt: string;
   repo: string;
   sessionId: string;
+  /** Claude CLI model alias (e.g. "opus", "sonnet", "haiku"). Omit to use the CLI default. */
+  model?: string;
   onEvent: (event: AgentEvent) => void;
 }
 
@@ -35,11 +37,11 @@ export interface StartSessionArgs {
  * render an optimistic row immediately). The backend creates an isolated
  * worktree for the session and events stream back via `onEvent`.
  */
-export async function startSession({ prompt, repo, sessionId, onEvent }: StartSessionArgs): Promise<void> {
+export async function startSession({ prompt, repo, sessionId, model, onEvent }: StartSessionArgs): Promise<void> {
   assertDesktop();
   const channel = new Channel<AgentEvent>();
   channel.onmessage = onEvent;
-  await invoke("start_session", { prompt, repo, sessionId, onEvent: channel });
+  await invoke("start_session", { prompt, repo, sessionId, model, onEvent: channel });
 }
 
 export interface CleanupSessionArgs {
@@ -56,13 +58,15 @@ export async function cleanupSession({ repo, sessionId }: CleanupSessionArgs): P
 export interface SendMessageArgs {
   sessionId: string;
   prompt: string;
+  /** Claude CLI model alias (e.g. "opus", "sonnet", "haiku"). Omit to use the CLI default. */
+  model?: string;
   onEvent: (event: AgentEvent) => void;
 }
 
 /** Continue an existing session with a follow-up message. */
-export async function sendMessage({ sessionId, prompt, onEvent }: SendMessageArgs): Promise<void> {
+export async function sendMessage({ sessionId, prompt, model, onEvent }: SendMessageArgs): Promise<void> {
   assertDesktop();
   const channel = new Channel<AgentEvent>();
   channel.onmessage = onEvent;
-  await invoke("send_message", { sessionId, prompt, onEvent: channel });
+  await invoke("send_message", { sessionId, prompt, model, onEvent: channel });
 }

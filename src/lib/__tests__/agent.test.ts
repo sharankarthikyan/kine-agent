@@ -44,6 +44,15 @@ describe("startSession", () => {
     );
   });
 
+  it("forwards model when provided", async () => {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await startSession({ prompt: "hi", repo: "/work/proj", sessionId: "sess-1", model: "opus", onEvent: () => {} });
+    expect(invoke).toHaveBeenCalledWith(
+      "start_session",
+      expect.objectContaining({ model: "opus" }),
+    );
+  });
+
   it("wires onEvent to the channel's onmessage so streamed events are delivered", async () => {
     const { invoke } = await import("@tauri-apps/api/core");
     const received: AgentEvent[] = [];
@@ -81,6 +90,15 @@ describe("sendMessage", () => {
     expect(invoke).toHaveBeenCalledWith(
       "send_message",
       expect.objectContaining({ sessionId: "s1", prompt: "and now add docs", onEvent: expect.any(Channel) }),
+    );
+  });
+
+  it("forwards model when provided", async () => {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await sendMessage({ sessionId: "s1", prompt: "x", model: "sonnet", onEvent: () => {} });
+    expect(invoke).toHaveBeenCalledWith(
+      "send_message",
+      expect.objectContaining({ model: "sonnet" }),
     );
   });
 

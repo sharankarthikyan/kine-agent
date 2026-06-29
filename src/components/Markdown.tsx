@@ -4,7 +4,7 @@ import remarkGfm from "remark-gfm";
 /**
  * Render agent prose as Markdown (Claude emits Markdown: bold, lists, code
  * blocks, tables). Safe by default — react-markdown does not render raw HTML.
- * Styling lives in the `.md` rules in tokens.css.
+ * Styling lives in the `.md` rules in index.css.
  */
 export function Markdown({ children }: { children: string }) {
   return (

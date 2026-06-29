@@ -1,93 +1,127 @@
-import type { CSSProperties } from "react";
-import type { ChangeStatus, SessionDiff } from "../lib/review";
-import { parsePatch, type DiffLineKind } from "../lib/parsePatch";
+import type { CSSProperties, ElementType } from "react";
+import { FileMinus, FilePen, FilePlus, FileX } from "lucide-react";
+import { cn } from "@/lib/utils";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Separator } from "@/components/ui/separator";
+import { Empty, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
+import { parsePatch, type DiffLineKind } from "@/lib/parsePatch";
+import type { ChangeStatus, SessionDiff } from "@/lib/review";
 
 interface DiffViewerProps {
   diff: SessionDiff;
 }
 
-const STATUS_COLOR: Record<ChangeStatus, string> = {
+const STATUS_ICON: Record<ChangeStatus, ElementType> = {
+  added: FilePlus,
+  modified: FilePen,
+  deleted: FileMinus,
+};
+
+const STATUS_COLOR_VAR: Record<ChangeStatus, string> = {
   added: "var(--status-success)",
   modified: "var(--status-running)",
   deleted: "var(--status-error)",
 };
-const STATUS_LABEL: Record<ChangeStatus, string> = { added: "A", modified: "M", deleted: "D" };
 
-const LINE_BG: Partial<Record<DiffLineKind, string>> = {
-  add: "var(--status-success-soft)",
-  del: "var(--status-error-soft)",
-};
-const LINE_FG: Partial<Record<DiffLineKind, string>> = {
-  add: "var(--status-success)",
-  del: "var(--status-error)",
-  hunk: "var(--text-muted)",
-  meta: "var(--text-muted)",
-};
+function patchLineBg(kind: DiffLineKind): CSSProperties {
+  if (kind === "add") {
+    return { backgroundColor: "color-mix(in oklch, var(--status-success) 12%, transparent)" };
+  }
+  if (kind === "del") {
+    return { backgroundColor: "color-mix(in oklch, var(--status-error) 12%, transparent)" };
+  }
+  return {};
+}
 
 export function DiffViewer({ diff }: DiffViewerProps) {
   if (diff.files.length === 0) {
-    return <p style={{ color: "var(--text-muted)", padding: "var(--space-4)" }}>No changes.</p>;
+    return (
+      <div className="flex flex-col h-full min-h-0">
+        <Empty>
+          <EmptyMedia variant="icon">
+            <FileX />
+          </EmptyMedia>
+          <EmptyHeader>
+            <EmptyTitle>No changes</EmptyTitle>
+          </EmptyHeader>
+        </Empty>
+      </div>
+    );
   }
+
   const count = diff.files.length;
   const patchFiles = parsePatch(diff.patch);
+
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
-      <header style={{ padding: "var(--space-2) var(--space-3)", color: "var(--text-muted)", fontSize: "var(--fs-13)" }}>
-        {count} file{count === 1 ? "" : "s"} changed
-      </header>
-      <ul style={{ listStyle: "none", margin: 0, padding: 0, flexShrink: 0 }}>
-        {diff.files.map((file) => (
-          <li key={file.path} style={fileRow}>
-            <span style={{ color: STATUS_COLOR[file.status], fontFamily: "var(--font-mono)", width: "1.5em" }}>
-              {STATUS_LABEL[file.status]}
-            </span>
-            <span style={{ fontFamily: "var(--font-mono)", flex: 1, overflow: "hidden", textOverflow: "ellipsis" }}>
-              {file.path}
-            </span>
-            <span style={{ fontVariantNumeric: "tabular-nums", color: "var(--status-success)" }}>+{file.additions}</span>
-            <span style={{ fontVariantNumeric: "tabular-nums", color: "var(--status-error)" }}>-{file.deletions}</span>
-          </li>
-        ))}
+    <div className="flex flex-col h-full min-h-0">
+      {/* Summary header */}
+      <p className="shrink-0 px-3 py-2 text-sm tabular-nums text-muted-foreground">
+        {count} {count === 1 ? "file" : "files"} changed
+      </p>
+
+      <Separator />
+
+      {/* Changed-files list */}
+      <ul className="shrink-0 list-none p-0 m-0">
+        {diff.files.map((file) => {
+          const Icon = STATUS_ICON[file.status];
+          return (
+            <li
+              key={file.path}
+              className="flex items-center gap-2 px-3 py-1 text-sm border-b border-border"
+            >
+              <Icon
+                className="size-3.5 shrink-0"
+                style={{ color: STATUS_COLOR_VAR[file.status] }}
+              />
+              <span className="font-mono flex-1 truncate">{file.path}</span>
+              <span
+                className="tabular-nums text-xs shrink-0"
+                style={{ color: "var(--status-success)" }}
+              >
+                +{file.additions}
+              </span>
+              <span
+                className="tabular-nums text-xs shrink-0"
+                style={{ color: "var(--status-error)" }}
+              >
+                -{file.deletions}
+              </span>
+            </li>
+          );
+        })}
       </ul>
-      <div style={patchScroll}>
-        {patchFiles.map((pf) => (
-          <section key={pf.path} style={{ marginBottom: "var(--space-3)" }}>
-            <div style={patchFileHeader} aria-hidden="true">
-              {pf.path.split("/").pop() ?? pf.path}
-            </div>
-            <div>
+
+      <Separator />
+
+      {/* Unified patch */}
+      <ScrollArea className="flex-1 min-h-0">
+        <div className="py-2">
+          {patchFiles.map((pf) => (
+            <section key={pf.path} className="mb-3">
+              <div
+                className="sticky top-0 bg-background px-3 py-0.5 font-mono text-xs text-muted-foreground"
+                aria-hidden="true"
+              >
+                {pf.path.split("/").pop() ?? pf.path}
+              </div>
               {pf.lines.map((line, i) => (
                 <div
                   key={i}
-                  style={{
-                    fontFamily: "var(--font-mono)", fontSize: "var(--fs-13)", whiteSpace: "pre",
-                    padding: "0 var(--space-3)",
-                    background: LINE_BG[line.kind] ?? "transparent",
-                    color: LINE_FG[line.kind] ?? "var(--text-body)",
-                  }}
+                  className={cn(
+                    "whitespace-pre px-3 font-mono text-xs leading-5",
+                    (line.kind === "hunk" || line.kind === "meta") &&
+                      "text-muted-foreground",
+                  )}
+                  style={patchLineBg(line.kind)}
                 >
                   {line.text || " "}
                 </div>
               ))}
-            </div>
-          </section>
-        ))}
-      </div>
+            </section>
+          ))}
+        </div>
+      </ScrollArea>
     </div>
   );
 }
-
-const fileRow: CSSProperties = {
-  display: "flex", gap: "var(--space-2)", alignItems: "center",
-  padding: "var(--space-1) var(--space-3)",
-  borderBottom: "1px solid var(--border-hairline)", fontSize: "var(--fs-13)",
-};
-const patchScroll: CSSProperties = {
-  flex: 1, overflow: "auto", minHeight: 0,
-  borderTop: "1px solid var(--border-hairline)", paddingTop: "var(--space-2)",
-  background: "var(--bg-card)",
-};
-const patchFileHeader: CSSProperties = {
-  fontFamily: "var(--font-mono)", fontSize: "var(--fs-13)", color: "var(--text-muted)",
-  padding: "var(--space-1) var(--space-3)", position: "sticky", top: 0, background: "var(--bg-card)",
-};

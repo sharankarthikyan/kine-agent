@@ -2,6 +2,7 @@ pub mod adapter;
 pub mod adapters;
 mod commands;
 pub mod events;
+pub mod models;
 pub mod review;
 pub mod store;
 pub mod worktree;
@@ -24,7 +25,9 @@ pub fn run() {
             commands::review_session,
             commands::send_message,
             commands::list_sessions,
-            commands::session_events
+            commands::session_events,
+            commands::detect_agents,
+            commands::list_models
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

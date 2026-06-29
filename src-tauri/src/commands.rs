@@ -103,11 +103,15 @@ fn worktrees_root() -> PathBuf {
 /// Start a session: create an isolated worktree off `repo` for `session_id`, persist
 /// the session + prompt, then run the Claude agent inside it (streaming + persisting
 /// events). The worktree is left in place for review; `cleanup_session` removes it.
+///
+/// `model` is optional: `Some("opus")` / `Some("claude-opus-4-5")` etc. pass `--model`
+/// to the CLI; `None` (omitted from the IPC call) uses the CLI's own default.
 #[tauri::command]
 pub async fn start_session(
     prompt: String,
     repo: String,
     session_id: String,
+    model: Option<String>,
     on_event: Channel<AgentEvent>,
     store: State<'_, SessionStore>,
 ) -> Result<(), String> {
@@ -141,15 +145,18 @@ pub async fn start_session(
         eprintln!("failed to persist prompt for session {session_id}: {e}");
     }
 
-    run_persisting(&store, session_id, Prompt { text: prompt }, wt.path, false, on_event).await
+    run_persisting(&store, session_id, Prompt { text: prompt, model }, wt.path, false, on_event).await
 }
 
 /// Continue an existing session with a follow-up message (resumes the agent in the
 /// session's worktree, persisting the new prompt + streamed events).
+///
+/// `model` is optional: passes `--model` to the CLI when `Some`, omitted when `None`.
 #[tauri::command]
 pub async fn send_message(
     prompt: String,
     session_id: String,
+    model: Option<String>,
     on_event: Channel<AgentEvent>,
     store: State<'_, SessionStore>,
 ) -> Result<(), String> {
@@ -174,7 +181,7 @@ pub async fn send_message(
         eprintln!("failed to persist prompt for session {session_id}: {e}");
     }
 
-    run_persisting(&store, session_id, Prompt { text: prompt }, wt_path, true, on_event).await
+    run_persisting(&store, session_id, Prompt { text: prompt, model }, wt_path, true, on_event).await
 }
 
 /// Remove the worktree (and branch) for a finished session.
@@ -226,4 +233,25 @@ pub async fn session_events(
 /// Resolve a session's worktree path (validated), erroring via ReviewError.
 fn worktree_resolve(root: &std::path::Path, session_id: &str) -> Result<std::path::PathBuf, review::ReviewError> {
     Ok(crate::worktree::worktree_for(root, session_id)?.path)
+}
+
+/// Probe PATH for each supported agent CLI (claude, codex, gemini) and return
+/// their `AgentInfo` records with `installed` set accordingly. Blocking work is
+/// offloaded from the async runtime via `spawn_blocking`.
+#[tauri::command]
+pub async fn detect_agents() -> Result<Vec<crate::models::AgentInfo>, String> {
+    tokio::task::spawn_blocking(crate::models::detect_agents)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Return the model list for `agent`. For "claude": tries the Anthropic REST
+/// API when `ANTHROPIC_API_KEY` is set, falls back to hardcoded aliases on any
+/// error. Other agents return an empty list. Blocking I/O is offloaded from the
+/// async runtime via `spawn_blocking`.
+#[tauri::command]
+pub async fn list_models(agent: String) -> Result<Vec<crate::models::ModelInfo>, String> {
+    tokio::task::spawn_blocking(move || crate::models::list_models(&agent))
+        .await
+        .map_err(|e| e.to_string())
 }

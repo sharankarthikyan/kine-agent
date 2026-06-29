@@ -20,20 +20,20 @@ test("calls onSelect with the session id when a row is clicked", () => {
   expect(onSelect).toHaveBeenCalledWith("a");
 });
 
-test("calls onNew when the New session control is clicked", () => {
+test("calls onNew when the New session button is clicked", () => {
   const onNew = vi.fn();
   render(<SessionList sessions={sessions} activeId={null} onSelect={() => {}} onNew={onNew} />);
   fireEvent.click(screen.getByRole("button", { name: /new session/i }));
   expect(onNew).toHaveBeenCalled();
 });
 
-test("marks the active session row", () => {
+test("marks the active session row with aria-current", () => {
   render(<SessionList sessions={sessions} activeId="b" onSelect={() => {}} onNew={() => {}} />);
   const active = screen.getByText("fix bug").closest("[aria-current]");
   expect(active).toHaveAttribute("aria-current", "true");
 });
 
-test("shows an empty hint when there are no sessions", () => {
+test("shows empty state when there are no sessions", () => {
   render(<SessionList sessions={[]} activeId={null} onSelect={() => {}} onNew={() => {}} />);
   expect(screen.getByText(/no sessions yet/i)).toBeInTheDocument();
 });
