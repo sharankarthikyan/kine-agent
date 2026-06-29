@@ -40,14 +40,33 @@ pub fn parse_line(line: &str) -> Vec<AgentEvent> {
         Some("result") => {
             let is_error = v.get("is_error").and_then(Value::as_bool).unwrap_or(false);
             let text = v.get("result").and_then(Value::as_str).unwrap_or("").to_string();
-            if is_error {
-                vec![AgentEvent::Error { message: text }]
+            let terminal = if is_error {
+                AgentEvent::Error { message: text }
             } else {
-                vec![AgentEvent::Done { summary: text }]
+                AgentEvent::Done { summary: text }
+            };
+            // Emit Usage before the terminal event when the result carries usage data.
+            match parse_usage(&v) {
+                Some(usage) => vec![usage, terminal],
+                None => vec![terminal],
             }
         }
         _ => vec![], // system/init and anything else: ignore in the skeleton
     }
+}
+
+/// Extract a Usage event from a Claude `result` JSON object, if usage is present.
+fn parse_usage(v: &Value) -> Option<AgentEvent> {
+    let usage = v.get("usage")?;
+    let n = |k: &str| usage.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+    Some(AgentEvent::Usage {
+        input_tokens: n("input_tokens"),
+        output_tokens: n("output_tokens"),
+        cache_read_tokens: n("cache_read_input_tokens"),
+        cache_creation_tokens: n("cache_creation_input_tokens"),
+        cost_usd: v.get("total_cost_usd").and_then(|x| x.as_f64()),
+        model: v.get("model").and_then(|x| x.as_str()).map(String::from),
+    })
 }
 
 fn parse_assistant(v: &Value) -> Vec<AgentEvent> {
@@ -186,6 +205,56 @@ mod tests {
         let events = parse_line(line);
         assert_eq!(events.len(), 1);
         assert!(matches!(&events[0], AgentEvent::Error { message } if message == "boom"));
+    }
+
+    #[test]
+    fn parse_result_with_usage_emits_usage_then_done() {
+        let line = r#"{
+            "type": "result",
+            "is_error": false,
+            "result": "task complete",
+            "usage": {
+                "input_tokens": 512,
+                "output_tokens": 128,
+                "cache_read_input_tokens": 64,
+                "cache_creation_input_tokens": 32
+            },
+            "total_cost_usd": 0.00123,
+            "model": "claude-opus-4-5"
+        }"#;
+        let events = parse_line(line);
+        assert_eq!(events.len(), 2, "expected [Usage, Done], got {events:?}");
+        match &events[0] {
+            AgentEvent::Usage {
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_creation_tokens,
+                cost_usd,
+                model,
+            } => {
+                assert_eq!(*input_tokens, 512);
+                assert_eq!(*output_tokens, 128);
+                assert_eq!(*cache_read_tokens, 64);
+                assert_eq!(*cache_creation_tokens, 32);
+                assert!((cost_usd.unwrap() - 0.00123).abs() < f64::EPSILON);
+                assert_eq!(model.as_deref(), Some("claude-opus-4-5"));
+            }
+            other => panic!("expected Usage, got {other:?}"),
+        }
+        assert!(
+            matches!(&events[1], AgentEvent::Done { summary } if summary == "task complete"),
+            "expected Done as second event, got {:?}",
+            events[1]
+        );
+    }
+
+    #[test]
+    fn parse_result_without_usage_emits_only_done() {
+        let line = r#"{"type":"result","is_error":false,"result":"all done"}"#;
+        let events = parse_line(line);
+        assert_eq!(events.len(), 1, "expected [Done] only, got {events:?}");
+        assert!(matches!(&events[0], AgentEvent::Done { summary } if summary == "all done"));
     }
 
     #[test]

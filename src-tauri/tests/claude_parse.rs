@@ -59,8 +59,8 @@ fn ignores_garbage_lines_without_panicking() {
 /// `claude -p "say hi in exactly one word" --output-format stream-json --verbose`
 /// run (Claude Code 2.1.195; hook_started/hook_response lines removed — they
 /// contained personal developer config). Confirms the parser maps the real
-/// assistant/result shapes and ignores rate_limit lines — exactly two events
-/// out of the remaining stream.
+/// assistant/result shapes and ignores rate_limit lines — three events out of
+/// the remaining stream: Token, Usage (from the result's usage object), Done.
 #[test]
 fn parses_real_recorded_stream() {
     let raw = include_str!("fixtures/claude_stream_real.jsonl");
@@ -69,6 +69,14 @@ fn parses_real_recorded_stream() {
         events,
         vec![
             AgentEvent::Token { text: "Hi.".into() },
+            AgentEvent::Usage {
+                input_tokens: 20090,
+                output_tokens: 6,
+                cache_read_tokens: 14376,
+                cache_creation_tokens: 5872,
+                cost_usd: Some(0.166508),
+                model: None,
+            },
             AgentEvent::Done { summary: "Hi.".into() },
         ],
         "real-output parsing drifted; re-record the fixture and reconcile parse_line"
