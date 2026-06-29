@@ -112,12 +112,13 @@ test("overview is the default active section and shows overview heading", () => 
   expect(screen.getByRole("heading", { name: /^customizations$/i })).toBeInTheDocument();
 });
 
-test("overview section shows inert action stubs that are aria-disabled", () => {
+test("overview section shows cards for each non-overview section", () => {
   render(<CustomizationsDialog {...defaultProps} />);
-  // Each overview card has a unique inert action button — test one
-  const stub = screen.getByRole("button", { name: /^new agent\.\.\.$/i });
-  expect(stub).toHaveAttribute("aria-disabled", "true");
-  expect(stub).toHaveAttribute("tabindex", "-1");
+  // Each non-overview section renders a navigable card — verify a few by their description text
+  expect(screen.getByText("Subagents available in this session")).toBeInTheDocument();
+  expect(screen.getByText("Slash commands and reusable skill scripts")).toBeInTheDocument();
+  // No action stubs ("New agent…" etc.) should be rendered
+  expect(screen.queryByRole("button", { name: /new agent/i })).toBeNull();
 });
 
 test("switching to Agents section shows agent subagent list", async () => {
