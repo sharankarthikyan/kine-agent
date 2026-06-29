@@ -37,13 +37,13 @@ export function SessionList({ sessions, activeId, onSelect, onNew }: SessionList
               <li key={session.id}>
                 <button
                   type="button"
-                  aria-current={active}
+                  aria-current={active || undefined}
                   onClick={() => onSelect(session.id)}
                   style={{ ...row, ...(active ? rowActive : null) }}
                 >
                   <span
                     aria-hidden
-                    style={{ ...dot, background: STATUS_COLOR[session.status] }}
+                    style={{ ...dot, background: STATUS_COLOR[session.status] ?? "var(--text-muted)" }}
                   />
                   <span style={title}>{session.title}</span>
                   <span style={statusText}>{STATUS_LABEL[session.status]}</span>

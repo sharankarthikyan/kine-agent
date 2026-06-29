@@ -10,6 +10,12 @@ import { reviewSession, type SessionDiff } from "./lib/review";
 import { listSessions, sessionEvents, type SessionSummary } from "./lib/sessions";
 import { turnsFromEvents } from "./lib/turns";
 
+/** Derive a short display title from the first non-empty line of the prompt. */
+function titleFromPrompt(text: string): string {
+  const line = text.split("\n").map((l) => l.trim()).find(Boolean) ?? "";
+  return line.length > 60 ? `${line.slice(0, 59)}…` : line || "Untitled session";
+}
+
 export default function App() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [turns, setTurns] = useState<Turn[]>([]);
@@ -76,10 +82,24 @@ export default function App() {
   }
 
   async function handleSend(text: string) {
+    const isNew = activeSessionId === null;
+    const sessionId = activeSessionId ?? crypto.randomUUID();
+    // Set the ref synchronously before the first await so the cross-session guard
+    // is exact for new sessions (id now known up front, not after startSession resolves).
+    setActive(sessionId);
+    // Optimistically upsert a "running" row at the top of the list immediately —
+    // refreshSessions() in finally reconciles the real title/status from the backend.
+    setSessions((prev) => {
+      const existing = prev.find((s) => s.id === sessionId);
+      const now = Date.now();
+      const row: SessionSummary = existing
+        ? { ...existing, status: "running", updatedAt: now }
+        : { id: sessionId, agent: "claude", repo: ".", branch: `agent/${sessionId}`, title: titleFromPrompt(text), status: "running", createdAt: now, updatedAt: now };
+      return [row, ...prev.filter((s) => s.id !== sessionId)];
+    });
     closeDiff();
     setRunning(true);
     setTurns((prev) => [...prev, { prompt: text, events: [] }]);
-    let sessionId = activeSessionId;
     // Guard: if the user switches sessions while this send is streaming, drop the late
     // events from the UI — the backend persists all events regardless, so re-selecting
     // the session rehydrates anything dropped here.
@@ -88,9 +108,8 @@ export default function App() {
       appendToLastTurn(event);
     };
     try {
-      if (sessionId === null) {
-        sessionId = await startSession({ prompt: text, repo: ".", onEvent });
-        setActive(sessionId);
+      if (isNew) {
+        await startSession({ prompt: text, repo: ".", sessionId, onEvent });
       } else {
         await sendMessage({ sessionId, prompt: text, onEvent });
       }
@@ -99,7 +118,7 @@ export default function App() {
     } finally {
       setRunning(false);
       await refreshSessions();
-      if (sessionId) await refreshDiff(sessionId);
+      if (activeSessionIdRef.current === sessionId) await refreshDiff(sessionId);
     }
   }
 

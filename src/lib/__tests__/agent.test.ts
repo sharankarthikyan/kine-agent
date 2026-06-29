@@ -10,7 +10,7 @@ describe("desktop guard", () => {
   it("startSession throws an actionable error outside the desktop app", async () => {
     delete (globalThis as Record<string, unknown>).__TAURI_INTERNALS__;
     await expect(
-      startSession({ prompt: "x", repo: ".", onEvent: () => {} }),
+      startSession({ prompt: "x", repo: ".", sessionId: "x", onEvent: () => {} }),
     ).rejects.toThrow(/desktop app/i);
   });
 });
@@ -30,36 +30,33 @@ describe("startSession", () => {
     vi.clearAllMocks();
   });
 
-  it("invokes start_session with prompt, repo, a sessionId, and a Channel", async () => {
+  it("invokes start_session with prompt, repo, the caller-supplied sessionId, and a Channel", async () => {
     const { invoke, Channel } = await import("@tauri-apps/api/core");
-    await startSession({ prompt: "hi", repo: "/work/proj", onEvent: () => {} });
+    await startSession({ prompt: "hi", repo: "/work/proj", sessionId: "sess-1", onEvent: () => {} });
     expect(invoke).toHaveBeenCalledWith(
       "start_session",
       expect.objectContaining({
         prompt: "hi",
         repo: "/work/proj",
-        sessionId: expect.any(String),
+        sessionId: "sess-1",
         onEvent: expect.any(Channel),
       }),
     );
-    const sessionId = (vi.mocked(invoke).mock.calls[0][1] as Record<string, unknown>).sessionId as string;
-    expect(sessionId.length).toBeGreaterThan(0);
   });
 
   it("wires onEvent to the channel's onmessage so streamed events are delivered", async () => {
     const { invoke } = await import("@tauri-apps/api/core");
     const received: AgentEvent[] = [];
-    await startSession({ prompt: "hi", repo: "/work/proj", onEvent: (e) => received.push(e) });
+    await startSession({ prompt: "hi", repo: "/work/proj", sessionId: "sess-1", onEvent: (e) => received.push(e) });
     const args = vi.mocked(invoke).mock.calls[0][1] as unknown as { onEvent: CapturedChannel };
     const event: AgentEvent = { kind: "token", data: { text: "Hi." } };
     args.onEvent.onmessage?.(event);
     expect(received).toEqual([event]);
   });
 
-  it("returns the sessionId so the caller can clean it up later", async () => {
-    const sessionId = await startSession({ prompt: "hi", repo: "/work/proj", onEvent: () => {} });
-    expect(typeof sessionId).toBe("string");
-    expect(sessionId.length).toBeGreaterThan(0);
+  it("resolves to undefined (caller owns the session id)", async () => {
+    const result = await startSession({ prompt: "hi", repo: "/work/proj", sessionId: "sess-1", onEvent: () => {} });
+    expect(result).toBeUndefined();
   });
 });
 
