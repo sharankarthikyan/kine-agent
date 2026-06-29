@@ -1,6 +1,7 @@
 use crate::adapter::{AgentAdapter, EventSink, Prompt};
 use crate::adapters::claude::ClaudeAdapter;
 use crate::events::AgentEvent;
+use crate::inspect::{self, RuleFile};
 use crate::review::{self, SessionDiff};
 use crate::store::{self, SessionStore, SessionSummary, StoredEvent};
 use crate::worktree;
@@ -254,4 +255,28 @@ pub async fn list_models(agent: String) -> Result<Vec<crate::models::ModelInfo>,
     tokio::task::spawn_blocking(move || crate::models::list_models(&agent))
         .await
         .map_err(|e| e.to_string())
+}
+
+/// List candidate rule/config files for a session's worktree + global config dirs.
+#[tauri::command]
+pub async fn inspect_rules(session_id: String) -> Result<Vec<RuleFile>, String> {
+    let root = worktrees_root();
+    tokio::task::spawn_blocking(move || {
+        let wt = crate::worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
+        Ok::<Vec<RuleFile>, String>(inspect::rule_candidates(&wt.path))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Read a rule/config file (validated to the session's worktree or known config dirs).
+#[tauri::command]
+pub async fn read_text_file(session_id: String, path: String) -> Result<String, String> {
+    let root = worktrees_root();
+    tokio::task::spawn_blocking(move || {
+        let wt = crate::worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
+        inspect::read_text_file(&path, &wt.path).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
