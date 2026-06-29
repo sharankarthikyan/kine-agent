@@ -184,7 +184,7 @@ fn first_description(path: &Path) -> Option<String> {
     for line in text.lines() {
         let l = line.trim();
         if let Some(rest) = l.strip_prefix("description:") {
-            return Some(rest.trim().trim_matches('"').to_string());
+            return Some(rest.trim().trim_matches('"').chars().take(140).collect());
         }
     }
     // Pass 2: first non-empty, non-heading, non-separator line.
