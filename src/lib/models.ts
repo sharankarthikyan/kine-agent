@@ -1,21 +1,35 @@
-export interface AgentModel {
-  id: string;           // value passed to the CLI --model flag (claude aliases: "opus"|"sonnet"|"haiku")
-  label: string;        // display name
-  agent: "claude" | "codex" | "gemini";
-  tier?: string;        // e.g. "MAX"
-  available: boolean;   // false → shown disabled ("Coming soon")
+import { invoke } from "@tauri-apps/api/core";
+import { assertDesktop } from "./agent";
+
+/** Mirrors the Rust `AgentInfo` struct (serde camelCase). */
+export interface AgentInfo {
+  id: string;
+  label: string;
+  installed: boolean;
 }
 
-export const MODELS: AgentModel[] = [
-  { id: "opus",   label: "Claude Opus 4.8",        agent: "claude", tier: "MAX", available: true },
-  { id: "sonnet", label: "Claude Sonnet 4.6",      agent: "claude",              available: true },
-  { id: "haiku",  label: "Claude Haiku 4.5",       agent: "claude",              available: true },
-  { id: "gpt-5",  label: "OpenAI Codex (GPT-5)",   agent: "codex",               available: false },
-  { id: "gemini", label: "Gemini",                 agent: "gemini",              available: false },
-];
+/**
+ * Mirrors the Rust `ModelInfo` struct (serde camelCase).
+ * `value` is what gets forwarded to the CLI `--model` flag.
+ * `source` is "api" when pulled from the live Anthropic catalog, "fallback" when hardcoded defaults.
+ */
+export interface ModelInfo {
+  value: string;
+  label: string;
+  agent: string;
+  description: string | null;
+  source: "api" | "fallback";
+  disabled: boolean;
+}
 
-export const DEFAULT_MODEL = MODELS[0];
+/** Discover which agent CLIs are installed on this machine. */
+export async function detectAgents(): Promise<AgentInfo[]> {
+  assertDesktop();
+  return invoke<AgentInfo[]>("detect_agents");
+}
 
-export function modelById(id: string): AgentModel | undefined {
-  return MODELS.find((m) => m.id === id);
+/** List available models for a given agent. Returns [] for agents with no model discovery. */
+export async function listModels(agent: string): Promise<ModelInfo[]> {
+  assertDesktop();
+  return invoke<ModelInfo[]>("list_models", { agent });
 }

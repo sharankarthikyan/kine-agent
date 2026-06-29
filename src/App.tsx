@@ -6,7 +6,7 @@ import { DiffViewer } from "./components/DiffViewer";
 import { TitleBar } from "./components/TitleBar";
 import { SessionList } from "./components/SessionList";
 import { startSession, sendMessage, type AgentEvent } from "./lib/agent";
-import { DEFAULT_MODEL, type AgentModel } from "./lib/models";
+import { detectAgents, listModels, type ModelInfo } from "./lib/models";
 import { reviewSession, type SessionDiff } from "./lib/review";
 import { listSessions, sessionEvents, type SessionSummary } from "./lib/sessions";
 import { turnsFromEvents } from "./lib/turns";
@@ -25,7 +25,8 @@ export default function App() {
   const [diff, setDiff] = useState<SessionDiff | null>(null);
   const [diffOpen, setDiffOpen] = useState(false);
   const [diffExpanded, setDiffExpanded] = useState(false);
-  const [selectedModel, setSelectedModel] = useState<AgentModel>(DEFAULT_MODEL);
+  const [models, setModels] = useState<ModelInfo[]>([]);
+  const [selectedModel, setSelectedModel] = useState<ModelInfo | null>(null);
 
   // Synchronous ref keeps the active session ID readable inside async callbacks
   // without stale-closure issues — the guard for cross-session contamination.
@@ -39,6 +40,21 @@ export default function App() {
   const refreshSessions = useCallback(async () => {
     try {
       setSessions(await listSessions());
+    } catch {
+      /* not in the desktop app */
+    }
+  }, []);
+
+  // Discover installed agents and their available models on mount.
+  // Best-effort — no-op in the browser preview where IPC is unavailable.
+  const loadModels = useCallback(async () => {
+    try {
+      const agents = await detectAgents();
+      const installed = agents.filter((a) => a.installed);
+      const lists = await Promise.all(installed.map((a) => listModels(a.id)));
+      const all = lists.flat().filter((m) => !m.disabled);
+      setModels(all);
+      setSelectedModel((prev) => prev ?? all[0] ?? null);
     } catch {
       /* not in the desktop app */
     }
@@ -58,6 +74,10 @@ export default function App() {
   useEffect(() => {
     void refreshSessions();
   }, [refreshSessions]);
+
+  useEffect(() => {
+    void loadModels();
+  }, [loadModels]);
 
   // closeDiff keeps the "reset both flags together" invariant structural.
   const closeDiff = () => { setDiffOpen(false); setDiffExpanded(false); };
@@ -83,7 +103,7 @@ export default function App() {
     });
   }
 
-  async function handleSend(text: string, model: AgentModel) {
+  async function handleSend(text: string, model: ModelInfo | null) {
     const isNew = activeSessionId === null;
     const sessionId = activeSessionId ?? crypto.randomUUID();
     // Set the ref synchronously before the first await so the cross-session guard
@@ -109,8 +129,8 @@ export default function App() {
       if (activeSessionIdRef.current !== sessionId) return;
       appendToLastTurn(event);
     };
-    // Forward the Claude model alias; other agents don't use --model yet.
-    const modelArg = model.agent === "claude" ? model.id : undefined;
+    // Forward the model value for Claude; null model → omit → CLI default.
+    const modelArg = model && model.agent === "claude" ? model.value : undefined;
     try {
       if (isNew) {
         await startSession({ prompt: text, repo: ".", sessionId, model: modelArg, onEvent });
@@ -177,6 +197,7 @@ export default function App() {
               <PromptBar
                 onStart={handleSend}
                 running={running}
+                models={models}
                 model={selectedModel}
                 onModelChange={setSelectedModel}
               />

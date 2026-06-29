@@ -9,18 +9,37 @@ import {
   DropdownMenuContent,
   DropdownMenuGroup,
   DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { MODELS, type AgentModel } from "@/lib/models";
+import { type ModelInfo } from "@/lib/models";
 
 interface PromptBarProps {
-  onStart: (text: string, model: AgentModel) => void;
+  onStart: (text: string, model: ModelInfo | null) => void;
   running: boolean;
-  model: AgentModel;
-  onModelChange: (m: AgentModel) => void;
+  models: ModelInfo[];
+  model: ModelInfo | null;
+  onModelChange: (m: ModelInfo) => void;
 }
 
-export function PromptBar({ onStart, running, model, onModelChange }: PromptBarProps) {
+/** Capitalize the first letter of an agent id for use as a group label. */
+function agentLabel(agentId: string): string {
+  return agentId.charAt(0).toUpperCase() + agentId.slice(1);
+}
+
+/** Group an array of ModelInfo by their agent field, preserving insertion order. */
+function groupByAgent(models: ModelInfo[]): [string, ModelInfo[]][] {
+  const map = new Map<string, ModelInfo[]>();
+  for (const m of models) {
+    const group = map.get(m.agent) ?? [];
+    group.push(m);
+    map.set(m.agent, group);
+  }
+  return [...map.entries()];
+}
+
+export function PromptBar({ onStart, running, models, model, onModelChange }: PromptBarProps) {
   const [text, setText] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const canSend = !running && text.trim().length > 0;
@@ -53,6 +72,9 @@ export function PromptBar({ onStart, running, model, onModelChange }: PromptBarP
     }
   }
 
+  const groups = groupByAgent(models);
+  const hasModels = models.length > 0;
+
   return (
     <div className="px-4 py-3">
       <div className="rounded-xl border bg-card shadow-sm p-3 flex flex-col gap-2">
@@ -78,13 +100,14 @@ export function PromptBar({ onStart, running, model, onModelChange }: PromptBarP
                 variant="ghost"
                 size="sm"
                 className="gap-1.5 px-2 text-muted-foreground hover:text-foreground"
-                aria-label={`Model: ${model.label}`}
+                aria-label={`Model: ${model?.label ?? "No models"}`}
               >
                 <Bot data-icon="inline-start" />
-                <span className="text-sm">{model.label}</span>
-                {model.tier && (
-                  <Badge variant="secondary" className="text-xs px-1.5 py-0">
-                    {model.tier}
+                <span className="text-sm">{model?.label ?? "No models"}</span>
+                {/* Show "fallback" badge when the model list came from hardcoded defaults */}
+                {model?.source === "fallback" && (
+                  <Badge variant="outline" className="text-xs px-1.5 py-0 text-muted-foreground">
+                    {model.source}
                   </Badge>
                 )}
                 <ChevronDown data-icon="inline-end" className="opacity-50" />
@@ -92,29 +115,41 @@ export function PromptBar({ onStart, running, model, onModelChange }: PromptBarP
             </DropdownMenuTrigger>
 
             <DropdownMenuContent align="start" className="min-w-56">
-              <DropdownMenuGroup>
-                {MODELS.map((m) => (
-                  <DropdownMenuItem
-                    key={m.id}
-                    disabled={!m.available}
-                    onSelect={() => onModelChange(m)}
-                    className="gap-2"
-                  >
-                    <Check
-                      className={cn("shrink-0", m.id === model.id ? "opacity-100" : "opacity-0")}
-                    />
-                    <span className="flex-1">{m.label}</span>
-                    {m.tier && (
-                      <Badge variant="secondary" className="text-xs px-1.5 py-0">
-                        {m.tier}
-                      </Badge>
-                    )}
-                    {!m.available && (
-                      <span className="text-xs text-muted-foreground">Coming soon</span>
-                    )}
-                  </DropdownMenuItem>
-                ))}
-              </DropdownMenuGroup>
+              {hasModels ? (
+                groups.map(([agent, agentModels], groupIndex) => (
+                  <DropdownMenuGroup key={agent}>
+                    {groupIndex > 0 && <DropdownMenuSeparator />}
+                    <DropdownMenuLabel className="text-xs text-muted-foreground font-medium">
+                      {agentLabel(agent)}
+                    </DropdownMenuLabel>
+                    {agentModels.map((m) => (
+                      <DropdownMenuItem
+                        key={m.value}
+                        disabled={m.disabled}
+                        onSelect={() => onModelChange(m)}
+                        className="gap-2"
+                      >
+                        <Check
+                          className={cn(
+                            "shrink-0",
+                            m.value === model?.value ? "opacity-100" : "opacity-0",
+                          )}
+                        />
+                        <span className="flex-1">{m.label}</span>
+                        {m.description && (
+                          <span className="text-xs text-muted-foreground truncate max-w-32">
+                            {m.description}
+                          </span>
+                        )}
+                      </DropdownMenuItem>
+                    ))}
+                  </DropdownMenuGroup>
+                ))
+              ) : (
+                <DropdownMenuGroup>
+                  <DropdownMenuItem disabled>No models available</DropdownMenuItem>
+                </DropdownMenuGroup>
+              )}
             </DropdownMenuContent>
           </DropdownMenu>
 
