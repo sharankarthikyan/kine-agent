@@ -24,7 +24,7 @@ export interface Diffstat {
 export interface TreeEntry {
   path: string;
   isDir: boolean;
-  /** Git status short-code (e.g. "M", "A", "D"), or null for untracked/clean entries. */
+  /** Full-word git status ("modified" | "added" | "deleted" | "untracked"), or null for clean entries and directories. */
   status: string | null;
 }
 

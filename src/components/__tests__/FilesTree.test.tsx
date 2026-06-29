@@ -7,7 +7,7 @@ const FILE_NODE: TreeNode = {
   name: "index.ts",
   path: "src/index.ts",
   isDir: false,
-  status: "M",
+  status: "modified",
   children: [],
 };
 
@@ -39,6 +39,17 @@ test("renders a nested structure: directory name and child file name are both vi
   render(<FilesTree nodes={[DIR_NODE]} onOpenFile={noop} />);
   expect(screen.getByText("src")).toBeInTheDocument();
   expect(screen.getByText("index.ts")).toBeInTheDocument();
+});
+
+test("maps a full-word status to its single-letter badge with a status color", () => {
+  render(<FilesTree nodes={[FILE_NODE]} onOpenFile={noop} />);
+  // Full-word "modified" renders as the letter "M", not the raw word.
+  const badge = screen.getByText("M");
+  expect(badge).toBeInTheDocument();
+  expect(badge).toHaveAttribute("title", "modified");
+  // A status color is applied (not the muted-foreground fallback for unknown statuses).
+  expect(badge).toHaveStyle({ color: "var(--status-running)" });
+  expect(screen.queryByText("modified")).not.toBeInTheDocument();
 });
 
 // ── File interaction ───────────────────────────────────────────────────────────

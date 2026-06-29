@@ -346,14 +346,16 @@ pub async fn worktree_tree(session_id: String) -> Result<Vec<TreeEntry>, String>
     .map_err(|e| e.to_string())?
 }
 
-/// Return how many commits the session branch is ahead of "main" and the list of
-/// files with uncommitted changes. Both are best-effort (0 / empty on error).
+/// Return how many commits the session branch is ahead of its default base branch
+/// (derived via `git::default_base`, e.g. main/master) and the list of files with
+/// uncommitted changes. Both are best-effort (0 / empty on error).
 #[tauri::command]
 pub async fn branch_changes(session_id: String) -> Result<BranchChanges, String> {
     let root = worktrees_root();
     tokio::task::spawn_blocking(move || {
         let wt = crate::worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
-        Ok::<BranchChanges, String>(git::branch_changes(&wt.path, "main"))
+        let base = git::default_base(&wt.path);
+        Ok::<BranchChanges, String>(git::branch_changes(&wt.path, &base))
     })
     .await
     .map_err(|e| e.to_string())?

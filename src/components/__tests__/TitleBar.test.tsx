@@ -50,12 +50,11 @@ test("calls onOpenTerminal when the open-terminal button is clicked", () => {
 
 // ── Inert stubs ───────────────────────────────────────────────────────────────
 
-test("renders the run stub with aria-disabled", () => {
+test("renders the run stub with aria-disabled and tabIndex=-1 (skipped by keyboard Tab)", () => {
   render(<TitleBar />);
-  expect(screen.getByRole("button", { name: "Run (coming soon)" })).toHaveAttribute(
-    "aria-disabled",
-    "true"
-  );
+  const stub = screen.getByRole("button", { name: "Run (coming soon)" });
+  expect(stub).toHaveAttribute("aria-disabled", "true");
+  expect(stub).toHaveAttribute("tabindex", "-1");
 });
 
 test("renders the split stub with aria-disabled", () => {

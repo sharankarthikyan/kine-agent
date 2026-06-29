@@ -91,6 +91,7 @@ export function TitleBar({
             variant="ghost"
             size="icon"
             aria-disabled="true"
+            tabIndex={-1}
             aria-label="Run (coming soon)"
             className="opacity-50"
           >
@@ -100,6 +101,7 @@ export function TitleBar({
             variant="ghost"
             size="icon"
             aria-disabled="true"
+            tabIndex={-1}
             aria-label="Split (coming soon)"
             className="opacity-50"
           >
@@ -109,6 +111,7 @@ export function TitleBar({
             variant="ghost"
             size="icon"
             aria-disabled="true"
+            tabIndex={-1}
             aria-label="Account (coming soon)"
             className="opacity-50"
           >

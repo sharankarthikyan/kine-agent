@@ -97,6 +97,20 @@ pub fn worktree_tree(worktree: &Path) -> Vec<TreeEntry> {
     entries
 }
 
+/// Best-effort: derive the repo's default base branch for `worktree`.
+///
+/// Resolves `origin/HEAD` (e.g. `origin/main`) and strips the `origin/` prefix. Falls
+/// back to `"main"` when there is no remote, no `origin/HEAD` symref, or the lookup
+/// produces empty output. Never panics.
+pub fn default_base(worktree: &Path) -> String {
+    let head = git_stdout(worktree, &["rev-parse", "--abbrev-ref", "origin/HEAD"]);
+    let head = head.trim();
+    head.strip_prefix("origin/")
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "main".to_string())
+}
+
 /// Return the number of commits `worktree`'s HEAD is ahead of `base`, plus the set of
 /// uncommitted file changes in the working tree (via `review::diff`). Both are
 /// best-effort: errors fall back to 0 / empty so the UI always gets a valid value.
@@ -330,6 +344,15 @@ mod tests {
             !changes.files.is_empty(),
             "expected non-empty files list when there are uncommitted changes"
         );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn default_base_falls_back_to_main_without_remote() {
+        let dir = init_repo("default-base-no-remote");
+        // No remote configured → origin/HEAD cannot resolve → fallback to "main".
+        assert_eq!(default_base(&dir), "main");
 
         let _ = fs::remove_dir_all(&dir);
     }

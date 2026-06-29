@@ -6,11 +6,21 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 
 export type { TreeNode };
 
-// Raw git short-codes from the backend (conductor.ts TreeEntry.status)
+// Full-word git statuses from the backend (conductor.ts TreeEntry.status:
+// "modified" | "added" | "deleted" | "untracked").
 const STATUS_COLOR_VAR: Record<string, string> = {
-  M: "var(--status-running)",   // modified → sky/blue
-  A: "var(--status-success)",   // added → emerald
-  D: "var(--status-error)",     // deleted → red
+  modified: "var(--status-running)",     // sky/blue
+  added: "var(--status-success)",        // emerald
+  deleted: "var(--status-error)",        // red
+  untracked: "var(--muted-foreground)",  // muted
+};
+
+// Single-letter badge per status — keeps the tree "not color-only".
+const STATUS_LETTER: Record<string, string> = {
+  modified: "M",
+  added: "A",
+  deleted: "D",
+  untracked: "?",
 };
 
 export interface FilesTreeProps {
@@ -61,7 +71,7 @@ function TreeNodeRow({ node, depth, onOpenFile }: TreeNodeRowProps) {
               style={{ color: statusColor }}
               title={node.status}
             >
-              {node.status}
+              {STATUS_LETTER[node.status] ?? node.status}
             </span>
           )}
         </button>
@@ -106,7 +116,7 @@ function TreeNodeRow({ node, depth, onOpenFile }: TreeNodeRowProps) {
           style={{ color: statusColor }}
           title={node.status}
         >
-          {node.status}
+          {STATUS_LETTER[node.status] ?? node.status}
         </span>
       )}
     </button>
