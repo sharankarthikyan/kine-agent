@@ -13,6 +13,18 @@ test("renders a token event's text", () => {
   expect(screen.getByText("Hello")).toBeInTheDocument();
 });
 
+test("renders agent token text as Markdown (bold, code)", () => {
+  const events: AgentEvent[] = [
+    { kind: "token", data: { text: "Use **bold** and `code` here" } },
+  ];
+  render(<EventStream events={events} />);
+  // **bold** → <strong>, `code` → <code>
+  const strong = screen.getByText("bold");
+  expect(strong.tagName).toBe("STRONG");
+  const code = screen.getByText("code");
+  expect(code.tagName).toBe("CODE");
+});
+
 test("renders a tool call with its name", () => {
   const events: AgentEvent[] = [{ kind: "toolCall", data: { name: "Write", input: "{}" } }];
   render(<EventStream events={events} />);
