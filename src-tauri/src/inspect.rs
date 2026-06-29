@@ -249,10 +249,17 @@ pub struct CustomizationCounts {
 /// Count customizations for a worktree + the user's ~/.claude home. Best-effort:
 /// any parse failure silently contributes 0 to the relevant field.
 pub fn customizations_counts(worktree: &Path) -> CustomizationCounts {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    customizations_counts_with_home(worktree, home.as_deref())
+}
+
+/// Inner implementation that accepts an explicit `home` path, enabling tests to
+/// inject a fake empty directory without mutating the global environment.
+fn customizations_counts_with_home(worktree: &Path, home: Option<&Path>) -> CustomizationCounts {
     let caps = list_capabilities("claude", worktree);
     let instructions = rule_candidates(worktree).into_iter().filter(|r| r.exists).count() as u32;
-    let hooks = count_hooks(worktree);
-    let mcp_servers = count_mcp(worktree);
+    let hooks = count_hooks(worktree, home);
+    let mcp_servers = count_mcp(worktree, home);
     CustomizationCounts {
         agents: caps.subagents.len() as u32,
         skills: caps.skills.len() as u32,
@@ -263,13 +270,13 @@ pub fn customizations_counts(worktree: &Path) -> CustomizationCounts {
 }
 
 /// Sum the number of hook rules configured in `<wt>/.claude/settings.json` and
-/// `~/.claude/settings.json`. Each top-level entry inside the `hooks` object's
+/// `<home>/.claude/settings.json`. Each top-level entry inside the `hooks` object's
 /// per-event arrays counts as one rule. Returns 0 on any missing/parse error.
-fn count_hooks(worktree: &Path) -> u32 {
+fn count_hooks(worktree: &Path, home: Option<&Path>) -> u32 {
     let mut total = 0u32;
     total += hooks_from_settings(&worktree.join(".claude/settings.json"));
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-        total += hooks_from_settings(&home.join(".claude/settings.json"));
+    if let Some(h) = home {
+        total += hooks_from_settings(&h.join(".claude/settings.json"));
     }
     total
 }
@@ -286,13 +293,13 @@ fn hooks_from_settings(path: &Path) -> u32 {
     .unwrap_or(0)
 }
 
-/// Count MCP servers declared in `<wt>/.mcp.json` + `~/.claude.json`. Returns 0
+/// Count MCP servers declared in `<wt>/.mcp.json` + `<home>/.claude.json`. Returns 0
 /// on any missing/parse error.
-fn count_mcp(worktree: &Path) -> u32 {
+fn count_mcp(worktree: &Path, home: Option<&Path>) -> u32 {
     let mut total = 0u32;
     total += mcp_servers_from_file(&worktree.join(".mcp.json"));
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-        total += mcp_servers_from_file(&home.join(".claude.json"));
+    if let Some(h) = home {
+        total += mcp_servers_from_file(&h.join(".claude.json"));
     }
     total
 }
@@ -433,8 +440,8 @@ mod tests {
     #[test]
     fn customizations_counts_detects_agent_and_mcp() {
         let dir = std::env::temp_dir().join(format!("ae-cust-{}", std::process::id()));
-        // Use an empty fake home so ~/.claude.json and ~/.claude/settings.json
-        // from the developer's real home don't leak into the counts.
+        // Empty fake home passed directly to the inner helper — no global env mutation,
+        // so this test is safe to run in parallel with siblings that also read HOME.
         let fake_home = std::env::temp_dir().join(format!("ae-cust-home-{}", std::process::id()));
         std::fs::create_dir_all(&fake_home).unwrap();
 
@@ -450,16 +457,7 @@ mod tests {
         )
         .unwrap();
 
-        let orig_home = std::env::var_os("HOME");
-        // SAFETY: test-only override to isolate from the developer's real global config.
-        // No other thread is reading HOME concurrently for this test's scope.
-        unsafe { std::env::set_var("HOME", &fake_home) };
-        let counts = customizations_counts(&dir);
-        match orig_home {
-            Some(h) => unsafe { std::env::set_var("HOME", h) },
-            None => unsafe { std::env::remove_var("HOME") },
-        }
-
+        let counts = customizations_counts_with_home(&dir, Some(&fake_home));
         assert!(counts.agents >= 1, "expected at least 1 agent, got {}", counts.agents);
         assert_eq!(counts.mcp_servers, 1, "expected exactly 1 MCP server");
 
