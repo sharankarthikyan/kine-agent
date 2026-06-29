@@ -59,28 +59,26 @@ pub fn rule_candidates(worktree: &Path) -> Vec<RuleFile> {
     out
 }
 
-/// Read a text file, but ONLY if it is inside the worktree root or the user's
-/// `~/.claude`/`~/.codex`/`~/.gemini` config dirs. Rejects traversal/other paths.
+/// Read a rule/config file, but ONLY if it is one of the exact files returned by
+/// `rule_candidates(worktree)`. Exact canonicalized-path matching prevents a caller
+/// from reading arbitrary files inside the worktree or the global config dirs (e.g.
+/// `~/.claude/.credentials.json`). Payload is streamed-and-capped at 256 KB so a
+/// large file cannot be slurped into RAM before the limit is applied.
 pub fn read_text_file(path: &str, worktree: &Path) -> Result<String, InspectError> {
     let target = std::fs::canonicalize(path)?;
-    let mut allowed: Vec<PathBuf> = Vec::new();
-    if let Ok(wt) = std::fs::canonicalize(worktree) {
-        allowed.push(wt);
-    }
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-        for d in [".claude", ".codex", ".gemini"] {
-            if let Ok(c) = std::fs::canonicalize(home.join(d)) {
-                allowed.push(c);
-            }
-        }
-    }
-    if !allowed.iter().any(|root| target.starts_with(root)) {
+    let allowed: Vec<PathBuf> = rule_candidates(worktree)
+        .into_iter()
+        .filter(|r| r.exists)
+        .filter_map(|r| std::fs::canonicalize(&r.path).ok())
+        .collect();
+    if !allowed.contains(&target) {
         return Err(InspectError::Forbidden(path.to_string()));
     }
-    // Cap at ~256KB so a huge file can't blow up the IPC payload.
-    let bytes = std::fs::read(&target)?;
-    let slice = &bytes[..bytes.len().min(256 * 1024)];
-    Ok(String::from_utf8_lossy(slice).to_string())
+    use std::io::Read;
+    let f = std::fs::File::open(&target)?;
+    let mut buf = Vec::new();
+    f.take(256 * 1024).read_to_end(&mut buf)?;
+    Ok(String::from_utf8_lossy(&buf).to_string())
 }
 
 #[cfg(test)]
@@ -103,16 +101,30 @@ mod tests {
     fn read_inside_worktree_ok_outside_forbidden() {
         let dir = std::env::temp_dir().join(format!("ae-insp2-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
+
+        // A candidate rule file — must be readable.
         std::fs::write(dir.join("CLAUDE.md"), "hello rules").unwrap();
         let inside = dir.join("CLAUDE.md");
         assert_eq!(
             read_text_file(&inside.display().to_string(), &dir).unwrap(),
             "hello rules"
         );
+
+        // A file outside the worktree entirely — must be forbidden.
         assert!(matches!(
             read_text_file("/etc/hosts", &dir),
             Err(InspectError::Forbidden(_))
         ));
+
+        // A non-candidate file inside the worktree — must also be forbidden,
+        // proving the allow-list is per-file, not per-directory.
+        std::fs::write(dir.join("secret.txt"), "credentials").unwrap();
+        let non_candidate = dir.join("secret.txt");
+        assert!(matches!(
+            read_text_file(&non_candidate.display().to_string(), &dir),
+            Err(InspectError::Forbidden(_))
+        ));
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
