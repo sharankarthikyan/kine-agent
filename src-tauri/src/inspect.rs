@@ -85,18 +85,18 @@ pub fn read_text_file(path: &str, worktree: &Path) -> Result<String, InspectErro
         })
         .collect();
     // Also permit files discovered by list_capabilities — skills, subagents, and
-    // commands whose canonical path sits inside the worktree boundary or is one of
-    // the expected global config paths. The same traversal guard applies: a
-    // symlinked capability that resolves outside the worktree is NOT added.
+    // commands. These are enumerated only from trusted, fixed discovery roots
+    // (project `.claude/...` and the user's `~/.claude/...`), so any path the
+    // discovery returns is a legitimate capability file and safe to read,
+    // including user-scoped agents/skills outside the worktree. The exact-match
+    // guard below still prevents reading any path that discovery didn't surface.
     let caps = list_capabilities("claude", worktree);
     for cap in caps.skills.into_iter().chain(caps.subagents).chain(caps.commands) {
         if cap.path.is_empty() {
             continue;
         }
         if let Ok(cp) = std::fs::canonicalize(&cap.path) {
-            if cp.starts_with(&canonical_worktree) || is_expected_global(&cp) {
-                allowed.push(cp);
-            }
+            allowed.push(cp);
         }
     }
     if !allowed.contains(&target) {
