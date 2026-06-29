@@ -383,6 +383,9 @@ export default function App() {
       setRunning(false);
       await refreshSessions();
       if (activeSessionIdRef.current === sessionId) {
+        // Refresh this session's diffstat so the sidebar row + SessionHeader stay
+        // current after files are edited — one targeted call, not a fan-out.
+        void fetchDiffstat(sessionId);
         await refreshDiff(sessionId);
         try { setStoredEvents(await sessionEvents(sessionId)); } catch { /* ignore */ }
       }
