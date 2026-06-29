@@ -48,7 +48,7 @@ function TreeNodeRow({ node, depth, onOpenFile }: TreeNodeRowProps) {
       <>
         <button
           type="button"
-          className="flex w-full items-center gap-1.5 py-0.5 pr-2 text-sm hover:bg-muted/50 cursor-pointer text-left"
+          className="flex w-full items-center gap-1.5 py-0.5 pr-2 text-sm hover:bg-muted/50 cursor-pointer text-left rounded-md"
           style={indentStyle}
           onClick={() => setOpen((prev) => !prev)}
           aria-expanded={open}
@@ -91,7 +91,7 @@ function TreeNodeRow({ node, depth, onOpenFile }: TreeNodeRowProps) {
   return (
     <button
       type="button"
-      className="flex w-full items-center gap-1.5 py-0.5 pr-2 text-sm hover:bg-muted/50 cursor-pointer text-left"
+      className="flex w-full items-center gap-1.5 py-0.5 pr-2 text-sm hover:bg-muted/50 cursor-pointer text-left rounded-md"
       style={indentStyle}
       onClick={() => onOpenFile(node.path)}
       aria-label={`Open ${node.name}`}
@@ -134,10 +134,12 @@ export function FilesTree({ nodes, onOpenFile }: FilesTreeProps) {
 
   return (
     <ScrollArea className="h-full">
-      <div className="py-1">
-        {nodes.map((node) => (
-          <TreeNodeRow key={node.path} node={node} depth={0} onOpenFile={onOpenFile} />
-        ))}
+      <div className="p-3">
+        <div className="rounded-lg border border-border bg-muted/20 py-1">
+          {nodes.map((node) => (
+            <TreeNodeRow key={node.path} node={node} depth={0} onOpenFile={onOpenFile} />
+          ))}
+        </div>
       </div>
     </ScrollArea>
   );

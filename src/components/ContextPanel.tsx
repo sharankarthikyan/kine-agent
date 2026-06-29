@@ -3,7 +3,6 @@ import type { RuleFile, Capabilities, Capability } from "@/lib/inspect";
 import type { ModelInfo } from "@/lib/models";
 import { cn } from "@/lib/utils";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Separator } from "@/components/ui/separator";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
@@ -27,7 +26,16 @@ const FILE_ACTION_ICON = {
 } as const;
 
 function SectionHeading({ children }: { children: React.ReactNode }) {
-  return <p className="text-sm font-medium text-foreground">{children}</p>;
+  return <p className="text-xs font-medium text-muted-foreground">{children}</p>;
+}
+
+// Shared inset card wrapper for section bodies
+function SectionCard({ children, className }: { children: React.ReactNode; className?: string }) {
+  return (
+    <div className={cn("rounded-lg border border-border bg-muted/20", className)}>
+      {children}
+    </div>
+  );
 }
 
 // ─── Window Usage ────────────────────────────────────────────────────────────
@@ -97,7 +105,7 @@ function CapabilitySubsection({ label, items }: CapabilitySubsectionProps) {
     <div className="flex flex-col gap-1">
       <p className="text-xs text-muted-foreground">{label}</p>
       {items.map((cap) => (
-        <div key={cap.name} className={cn("flex items-center gap-2 px-1")}>
+        <div key={cap.name} className={cn("flex items-center gap-2 px-1 py-0.5 rounded-md")}>
           <span className="text-xs font-medium">{cap.name}</span>
           {cap.description && (
             <span className="truncate text-xs text-muted-foreground flex-1">
@@ -135,104 +143,106 @@ export function ContextPanel({
     <ScrollArea className="h-full">
       <div className="flex flex-col gap-4 p-3">
         {/* ── Window usage ─────────────────────────── */}
-        <section className="flex flex-col gap-2">
+        <section className="flex flex-col gap-1.5">
           <SectionHeading>Window usage</SectionHeading>
-          {usage === null ? (
-            <p className="text-sm text-muted-foreground">Usage unavailable</p>
-          ) : (
-            <WindowUsage usage={usage} model={model} />
-          )}
+          <SectionCard>
+            {usage === null ? (
+              <p className="px-3 py-2 text-sm text-muted-foreground">Usage unavailable</p>
+            ) : (
+              <div className="p-3">
+                <WindowUsage usage={usage} model={model} />
+              </div>
+            )}
+          </SectionCard>
         </section>
 
-        <Separator />
-
         {/* ── Files this session ────────────────────── */}
-        <section className="flex flex-col gap-2">
+        <section className="flex flex-col gap-1.5">
           <SectionHeading>Files this session</SectionHeading>
-          {files.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No files yet</p>
-          ) : (
-            <div className="flex flex-col gap-0.5">
-              {files.map((file) => {
-                const Icon = FILE_ACTION_ICON[file.action];
-                return (
+          <SectionCard>
+            {files.length === 0 ? (
+              <p className="px-3 py-2 text-sm text-muted-foreground">No files yet</p>
+            ) : (
+              <div className="p-1 flex flex-col gap-0.5">
+                {files.map((file) => {
+                  const Icon = FILE_ACTION_ICON[file.action];
+                  return (
+                    <Button
+                      key={file.path}
+                      variant="ghost"
+                      size="sm"
+                      className="h-auto w-full justify-start gap-2 px-2 py-1 font-normal"
+                      onClick={() => onOpenFile?.(file.path)}
+                    >
+                      <Icon data-icon="inline-start" />
+                      <span className="flex-1 truncate text-left font-mono text-xs">
+                        {file.path}
+                      </span>
+                      <Badge variant="secondary" className="ml-auto">
+                        {file.action}
+                      </Badge>
+                    </Button>
+                  );
+                })}
+              </div>
+            )}
+          </SectionCard>
+        </section>
+
+        {/* ── Rules & config ────────────────────────── */}
+        <section className="flex flex-col gap-1.5">
+          <SectionHeading>Rules & config</SectionHeading>
+          <SectionCard>
+            {existingRules.length === 0 ? (
+              <p className="px-3 py-2 text-sm text-muted-foreground">No rules found</p>
+            ) : (
+              <div className="p-1 flex flex-col gap-0.5">
+                {existingRules.map((rule) => (
                   <Button
-                    key={file.path}
+                    key={rule.path}
                     variant="ghost"
                     size="sm"
                     className="h-auto w-full justify-start gap-2 px-2 py-1 font-normal"
-                    onClick={() => onOpenFile?.(file.path)}
+                    onClick={() => onOpenRule(rule)}
                   >
-                    <Icon data-icon="inline-start" />
-                    <span className="flex-1 truncate text-left font-mono text-xs">
-                      {file.path}
-                    </span>
-                    <Badge variant="secondary" className="ml-auto">
-                      {file.action}
+                    <FileCode data-icon="inline-start" />
+                    <span className="flex-1 truncate text-left text-xs">{rule.label}</span>
+                    <Badge variant="outline" className="ml-auto">
+                      {rule.scope}
                     </Badge>
                   </Button>
-                );
-              })}
-            </div>
-          )}
+                ))}
+              </div>
+            )}
+          </SectionCard>
         </section>
-
-        <Separator />
-
-        {/* ── Rules & config ────────────────────────── */}
-        <section className="flex flex-col gap-2">
-          <SectionHeading>Rules & config</SectionHeading>
-          {existingRules.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No rules found</p>
-          ) : (
-            <div className="flex flex-col gap-0.5">
-              {existingRules.map((rule) => (
-                <Button
-                  key={rule.path}
-                  variant="ghost"
-                  size="sm"
-                  className="h-auto w-full justify-start gap-2 px-2 py-1 font-normal"
-                  onClick={() => onOpenRule(rule)}
-                >
-                  <FileCode data-icon="inline-start" />
-                  <span className="flex-1 truncate text-left text-xs">{rule.label}</span>
-                  <Badge variant="outline" className="ml-auto">
-                    {rule.scope}
-                  </Badge>
-                </Button>
-              ))}
-            </div>
-          )}
-        </section>
-
-        <Separator />
 
         {/* ── Capabilities ──────────────────────────── */}
-        <section className="flex flex-col gap-2">
+        <section className="flex flex-col gap-1.5">
           <SectionHeading>Capabilities</SectionHeading>
-          {!hasCapabilities ? (
-            <p className="text-sm text-muted-foreground">No capabilities found</p>
-          ) : (
-            <div className="flex flex-col gap-3">
-              {capabilities!.skills.length > 0 && (
-                <CapabilitySubsection label="Skills" items={capabilities!.skills} />
-              )}
-              {capabilities!.subagents.length > 0 && (
-                <CapabilitySubsection label="Subagents" items={capabilities!.subagents} />
-              )}
-              {capabilities!.commands.length > 0 && (
-                <CapabilitySubsection label="Commands" items={capabilities!.commands} />
-              )}
-            </div>
-          )}
+          <SectionCard>
+            {!hasCapabilities ? (
+              <p className="px-3 py-2 text-sm text-muted-foreground">No capabilities found</p>
+            ) : (
+              <div className="p-3 flex flex-col gap-3">
+                {capabilities!.skills.length > 0 && (
+                  <CapabilitySubsection label="Skills" items={capabilities!.skills} />
+                )}
+                {capabilities!.subagents.length > 0 && (
+                  <CapabilitySubsection label="Subagents" items={capabilities!.subagents} />
+                )}
+                {capabilities!.commands.length > 0 && (
+                  <CapabilitySubsection label="Commands" items={capabilities!.commands} />
+                )}
+              </div>
+            )}
+          </SectionCard>
         </section>
 
-        <Separator />
-
         {/* ── Settings ─────────────────────────────── */}
-        <section className="flex flex-col gap-2">
+        <section className="flex flex-col gap-1.5">
           <SectionHeading>Settings</SectionHeading>
-          <div className="flex flex-col gap-1 text-sm">
+          <SectionCard className="p-3 flex flex-col gap-1 text-sm">
             <div className="flex items-center gap-2">
               <span className="text-muted-foreground">Model</span>
               <span className="font-medium">{model?.label ?? "—"}</span>
@@ -240,7 +250,7 @@ export function ContextPanel({
             <p className="text-xs text-muted-foreground">
               Autonomy: default · Sandbox: default
             </p>
-          </div>
+          </SectionCard>
         </section>
       </div>
     </ScrollArea>

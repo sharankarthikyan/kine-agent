@@ -565,7 +565,7 @@ export default function App() {
                 onValueChange={(v) => setRightTab(v as "context" | "changes" | "files")}
                 className="flex flex-col min-h-0 flex-1"
               >
-                <header className="flex items-center justify-between px-3 py-2 border-b border-border">
+                <header className="flex items-center justify-between px-3 py-1.5 border-b border-border/60">
                   <TabsList>
                     <TabsTrigger value="context">Context</TabsTrigger>
                     <TabsTrigger value="changes">Changes</TabsTrigger>
@@ -574,7 +574,7 @@ export default function App() {
                   <div className="flex items-center gap-1">
                     <Button
                       variant="ghost"
-                      size="icon"
+                      size="icon-sm"
                       onClick={() => setRightExpanded((v) => !v)}
                       aria-label={rightExpanded ? "Collapse panel" : "Expand panel"}
                     >
@@ -582,7 +582,7 @@ export default function App() {
                     </Button>
                     <Button
                       variant="ghost"
-                      size="icon"
+                      size="icon-sm"
                       onClick={closeRight}
                       aria-label="Close panel"
                     >

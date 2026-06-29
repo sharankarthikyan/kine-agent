@@ -5,7 +5,6 @@ import type { ChangeStatus } from "@/lib/review";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Separator } from "@/components/ui/separator";
 
 export type { BranchChanges };
 
@@ -119,50 +118,50 @@ export function ChangesPanel({ branch, onCommit, onOpenFile, committing }: Chang
         </div>
       )}
 
-      <Separator />
-
       {/* ── File list or empty state ──────────────────────────────────── */}
       {!hasChanges ? (
         <div className="flex flex-1 items-center justify-center">
           <p className="text-sm text-muted-foreground">No changes</p>
         </div>
       ) : (
-        <ScrollArea className="flex-1 min-h-0">
-          <ul className="list-none p-0 m-0">
-            {branch.files.map((file) => (
-              <li key={file.path}>
-                <button
-                  type="button"
-                  className="flex w-full items-center gap-2 px-3 py-1.5 text-sm hover:bg-muted/50 cursor-pointer text-left border-b border-border"
-                  onClick={() => onOpenFile(file.path)}
-                  aria-label={`Open ${file.path}`}
-                >
-                  {/* Status letter — never color-only */}
-                  <span
-                    className="shrink-0 font-mono text-xs font-semibold w-4 text-center"
-                    style={{ color: STATUS_COLOR_VAR[file.status] }}
-                    title={file.status}
+        <div className="flex-1 min-h-0 mx-3 mb-3 rounded-lg border border-border bg-muted/20 overflow-hidden">
+          <ScrollArea className="h-full">
+            <ul className="list-none p-1 m-0 flex flex-col gap-0.5">
+              {branch.files.map((file) => (
+                <li key={file.path}>
+                  <button
+                    type="button"
+                    className="flex w-full items-center gap-2 px-2 py-1.5 text-sm hover:bg-muted/50 cursor-pointer text-left rounded-md"
+                    onClick={() => onOpenFile(file.path)}
+                    aria-label={`Open ${file.path}`}
                   >
-                    {STATUS_LETTER[file.status]}
-                  </span>
-                  <span className="flex-1 font-mono text-xs truncate">{file.path}</span>
-                  <span
-                    className="tabular-nums text-xs shrink-0"
-                    style={{ color: "var(--status-success)" }}
-                  >
-                    +{file.additions}
-                  </span>
-                  <span
-                    className="tabular-nums text-xs shrink-0"
-                    style={{ color: "var(--status-error)" }}
-                  >
-                    -{file.deletions}
-                  </span>
-                </button>
-              </li>
-            ))}
-          </ul>
-        </ScrollArea>
+                    {/* Status letter — never color-only */}
+                    <span
+                      className="shrink-0 font-mono text-xs font-semibold w-4 text-center"
+                      style={{ color: STATUS_COLOR_VAR[file.status] }}
+                      title={file.status}
+                    >
+                      {STATUS_LETTER[file.status]}
+                    </span>
+                    <span className="flex-1 font-mono text-xs truncate">{file.path}</span>
+                    <span
+                      className="tabular-nums text-xs shrink-0"
+                      style={{ color: "var(--status-success)" }}
+                    >
+                      +{file.additions}
+                    </span>
+                    <span
+                      className="tabular-nums text-xs shrink-0"
+                      style={{ color: "var(--status-error)" }}
+                    >
+                      -{file.deletions}
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </ScrollArea>
+        </div>
       )}
     </div>
   );
