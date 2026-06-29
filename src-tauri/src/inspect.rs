@@ -233,12 +233,47 @@ fn collect_skill_dirs(dir: &Path, source: &str, out: &mut Vec<Capability>) {
 /// Returns `None` when the file is empty or unreadable.
 fn first_description(path: &Path) -> Option<String> {
     let text = std::fs::read_to_string(path).ok()?;
+    let lines: Vec<&str> = text.lines().collect();
     // Pass 1: look for an explicit `description:` key anywhere in the file.
-    for line in text.lines() {
-        let l = line.trim();
-        if let Some(rest) = l.strip_prefix("description:") {
-            return Some(rest.trim().trim_matches('"').chars().take(140).collect());
+    for (i, line) in lines.iter().enumerate() {
+        let Some(rest) = line.trim_start().strip_prefix("description:") else {
+            continue;
+        };
+        let value = rest.trim();
+        // YAML block scalar (`>`, `>-`, `|`, `|-`, …) or an empty value means the
+        // real text lives on the following more-indented lines — fold them into
+        // one line instead of returning the `>-`/`|` indicator itself.
+        let is_block = value.is_empty() || value.starts_with('>') || value.starts_with('|');
+        if is_block {
+            let key_indent = line.len() - line.trim_start().len();
+            let mut folded = String::new();
+            for next in &lines[i + 1..] {
+                if next.trim().is_empty() {
+                    if folded.is_empty() {
+                        continue; // leading blank lines inside the block
+                    }
+                    break; // blank line ends the first paragraph
+                }
+                let indent = next.len() - next.trim_start().len();
+                if indent <= key_indent {
+                    break; // dedent → next key or closing `---`
+                }
+                if !folded.is_empty() {
+                    folded.push(' ');
+                }
+                folded.push_str(next.trim());
+                if folded.len() >= 140 {
+                    break;
+                }
+            }
+            let folded = folded.trim();
+            return if folded.is_empty() {
+                None
+            } else {
+                Some(folded.chars().take(140).collect())
+            };
         }
+        return Some(value.trim_matches('"').chars().take(140).collect());
     }
     // Pass 2: first non-empty, non-heading, non-separator line.
     for line in text.lines() {
@@ -441,6 +476,33 @@ mod tests {
             .expect("skill 'bar' not found");
         assert_eq!(bar.description.as_deref(), Some("Bar skill"));
         assert_eq!(bar.source, "project");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn description_folds_yaml_block_scalar_instead_of_returning_indicator() {
+        let dir = std::env::temp_dir().join(format!("ae-caps-fold-{}", std::process::id()));
+        let agents_dir = dir.join(".claude/agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        // YAML folded block scalar — the real description is on the indented lines.
+        std::fs::write(
+            agents_dir.join("folded.md"),
+            "---\nname: folded\ndescription: >-\n  Use this agent for thorough\n  code reviews.\n---\n",
+        )
+        .unwrap();
+
+        let caps = list_capabilities("claude", &dir);
+        let folded = caps
+            .subagents
+            .iter()
+            .find(|c| c.name == "folded")
+            .expect("subagent 'folded' not found");
+        // Not the ">-" indicator — the folded text, joined into one line.
+        assert_eq!(
+            folded.description.as_deref(),
+            Some("Use this agent for thorough code reviews.")
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
