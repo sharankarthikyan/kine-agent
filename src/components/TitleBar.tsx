@@ -41,7 +41,7 @@ export function TitleBar({
         <span className="[-webkit-app-region:no-drag]">
           <Button
             variant="ghost"
-            size="icon"
+            size="icon-sm"
             onClick={onToggleSidebar}
             aria-label={sidebarLabel}
           >
@@ -71,7 +71,7 @@ export function TitleBar({
         <span className="[-webkit-app-region:no-drag] flex items-center">
           <Button
             variant="ghost"
-            size="icon"
+            size="icon-sm"
             onClick={onOpenEditor}
             aria-label="Open in editor"
           >
@@ -79,7 +79,7 @@ export function TitleBar({
           </Button>
           <Button
             variant="ghost"
-            size="icon"
+            size="icon-sm"
             onClick={onOpenTerminal}
             aria-label="Open terminal"
           >
@@ -89,7 +89,7 @@ export function TitleBar({
           {/* Inert placeholders — visual only, no handlers */}
           <Button
             variant="ghost"
-            size="icon"
+            size="icon-sm"
             aria-disabled="true"
             tabIndex={-1}
             aria-label="Run (coming soon)"
@@ -99,7 +99,7 @@ export function TitleBar({
           </Button>
           <Button
             variant="ghost"
-            size="icon"
+            size="icon-sm"
             aria-disabled="true"
             tabIndex={-1}
             aria-label="Split (coming soon)"
@@ -109,7 +109,7 @@ export function TitleBar({
           </Button>
           <Button
             variant="ghost"
-            size="icon"
+            size="icon-sm"
             aria-disabled="true"
             tabIndex={-1}
             aria-label="Account (coming soon)"

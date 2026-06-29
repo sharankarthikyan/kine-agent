@@ -97,6 +97,7 @@ export function SessionList({
             type="button"
             variant="outline"
             size="sm"
+            className="h-8 px-2.5"
             onClick={onNew}
           >
             <Plus data-icon="inline-start" />

@@ -10,7 +10,7 @@ export function ThemeToggle() {
   const { theme, toggle } = useTheme();
 
   return (
-    <Button variant="ghost" size="icon" onClick={toggle} aria-label="Toggle theme">
+    <Button variant="ghost" size="icon-sm" onClick={toggle} aria-label="Toggle theme">
       {theme === "dark" ? <Sun /> : <Moon />}
     </Button>
   );
