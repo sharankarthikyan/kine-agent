@@ -1,6 +1,7 @@
 import type { CSSProperties } from "react";
 import type { AgentEvent } from "../lib/agent";
 import { EmptyState } from "./EmptyState";
+import { Markdown } from "./Markdown";
 
 interface EventStreamProps {
   events: AgentEvent[];
@@ -37,7 +38,8 @@ const rowStyle: CSSProperties = {
 function renderEvent(event: AgentEvent) {
   switch (event.kind) {
     case "token":
-      return <span style={{ color: "var(--text-body)" }}>{event.data.text}</span>;
+      // Agent prose is Markdown — render it (bold, lists, code blocks, tables).
+      return <Markdown>{event.data.text}</Markdown>;
     case "toolCall":
       return (
         <span style={{ fontFamily: "var(--font-mono)", color: "var(--status-running)" }}>
