@@ -93,6 +93,11 @@ export default function App() {
     setActiveSessionId(id);
   };
 
+  // Ref that tracks sidebarCollapsed for reading inside async callbacks without
+  // stale-closure issues (same pattern as activeSessionIdRef above).
+  const sidebarCollapsedRef = useRef(sidebarCollapsed);
+  useEffect(() => { sidebarCollapsedRef.current = sidebarCollapsed; }, [sidebarCollapsed]);
+
   // Fetch diffstat for a single session and merge into the diffstats record.
   // Best-effort — silently ignores IPC failures (e.g. browser preview, no worktree yet).
   const fetchDiffstat = useCallback(async (sessionId: string) => {
@@ -104,19 +109,32 @@ export default function App() {
     }
   }, []);
 
-  // Best-effort refreshers — no-op in a plain browser preview (assertDesktop throws).
-  const refreshSessions = useCallback(async () => {
+  // Fetch diffstats for all sessions in one Promise.allSettled, then merge
+  // into a SINGLE setDiffstats call — avoids N separate re-renders and N subprocess
+  // spawns. Skipped entirely when the sidebar is collapsed (rows aren't rendered).
+  const refreshAllDiffstats = useCallback(async (list: SessionSummary[]) => {
+    if (sidebarCollapsedRef.current || list.length === 0) return;
+    const results = await Promise.allSettled(list.map((s) => sessionDiffstat(s.id)));
+    const updates: Record<string, Diffstat> = {};
+    list.forEach((s, i) => {
+      const r = results[i];
+      if (r.status === "fulfilled") updates[s.id] = r.value;
+    });
+    setDiffstats((prev) => ({ ...prev, ...updates }));
+  }, []);
+
+  // Returns the session list so callers can pipe it into refreshAllDiffstats.
+  // Best-effort — no-op in a plain browser preview (assertDesktop throws).
+  const refreshSessions = useCallback(async (): Promise<SessionSummary[]> => {
     try {
       const list = await listSessions();
       setSessions(list);
-      // Opportunistically refresh diffstats for all listed sessions.
-      for (const s of list) {
-        void fetchDiffstat(s.id);
-      }
+      return list;
     } catch {
       /* not in the desktop app */
+      return [];
     }
-  }, [fetchDiffstat]);
+  }, []);
 
   // Discover installed agents and their available models on mount.
   // Best-effort — no-op in the browser preview where IPC is unavailable.
@@ -182,9 +200,13 @@ export default function App() {
     }
   }
 
+  // On mount: load sessions then batch-refresh all diffstats in one shot.
   useEffect(() => {
-    void refreshSessions();
-  }, [refreshSessions]);
+    (async () => {
+      const list = await refreshSessions();
+      void refreshAllDiffstats(list);
+    })();
+  }, [refreshSessions, refreshAllDiffstats]);
 
   useEffect(() => {
     void loadModels();
@@ -204,8 +226,8 @@ export default function App() {
     })();
   }, [activeSessionId]);
 
-  // Fetch diffstat for the active session when it changes (in addition to the
-  // opportunistic refresh inside refreshSessions).
+  // Fetch diffstat for the active session whenever it changes (new session start
+  // or session switch) — keeps the SessionHeader diffstat current without a full refresh.
   useEffect(() => {
     if (!activeSessionId) return;
     void fetchDiffstat(activeSessionId);
@@ -279,11 +301,15 @@ export default function App() {
     try {
       const result = await commitSession(sessionId, message);
       toast.success(`Committed ${result.sha.slice(0, 7)}`);
-      // Refresh changes list and full diff after a successful commit.
+      // Refresh changes, diff, sessions list, and all diffstats after a successful commit.
+      // Sessions + diffstats are chained (need the list) while branch + diff run in parallel.
       await Promise.allSettled([
         refreshBranchChanges(sessionId),
         refreshDiff(sessionId),
-        refreshSessions(),
+        (async () => {
+          const list = await refreshSessions();
+          await refreshAllDiffstats(list);
+        })(),
       ]);
     } catch (err) {
       toast.error(String(err));
