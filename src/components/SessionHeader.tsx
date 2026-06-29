@@ -1,4 +1,4 @@
-import { Check, Pin, X } from "lucide-react";
+import { Check, PanelRight, Pin, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import type { Diffstat } from "@/lib/conductor";
@@ -23,9 +23,19 @@ export interface SessionHeaderProps {
   status: string;
   diffstat: Diffstat | null;
   onClose: () => void;
+  onTogglePanel: () => void;
+  panelOpen: boolean;
 }
 
-export function SessionHeader({ title, repo, status, diffstat, onClose }: SessionHeaderProps) {
+export function SessionHeader({
+  title,
+  repo,
+  status,
+  diffstat,
+  onClose,
+  onTogglePanel,
+  panelOpen,
+}: SessionHeaderProps) {
   const config = STATUS_CONFIG[status as SessionStatus] ?? FALLBACK_CONFIG;
 
   return (
@@ -60,6 +70,17 @@ export function SessionHeader({ title, repo, status, diffstat, onClose }: Sessio
 
       {/* Right: action buttons */}
       <div className="flex items-center gap-1 shrink-0">
+        {/* Panel toggle — opens/closes the right pane */}
+        <Button
+          variant={panelOpen ? "secondary" : "ghost"}
+          size="icon"
+          aria-label="Toggle panel"
+          aria-pressed={panelOpen}
+          className="size-7"
+          onClick={onTogglePanel}
+        >
+          <PanelRight data-icon />
+        </Button>
         {/* Approve — inert stub, no handler */}
         <Button
           variant="ghost"

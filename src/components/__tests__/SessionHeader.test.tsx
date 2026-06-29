@@ -6,6 +6,7 @@ const DIFFSTAT: Diffstat = { additions: 12, deletions: 3, filesChanged: 5 };
 
 function setup(overrides: Partial<React.ComponentProps<typeof SessionHeader>> = {}) {
   const onClose = vi.fn();
+  const onTogglePanel = vi.fn();
   render(
     <SessionHeader
       title="Fix the login bug"
@@ -13,10 +14,12 @@ function setup(overrides: Partial<React.ComponentProps<typeof SessionHeader>> = 
       status="idle"
       diffstat={DIFFSTAT}
       onClose={onClose}
+      onTogglePanel={onTogglePanel}
+      panelOpen={false}
       {...overrides}
     />,
   );
-  return { onClose };
+  return { onClose, onTogglePanel };
 }
 
 // ── Title and repo ────────────────────────────────────────────────────────────
@@ -94,6 +97,22 @@ test("clicking pin does not invoke onClose", () => {
   const { onClose } = setup();
   fireEvent.click(screen.getByRole("button", { name: "Pin" }));
   expect(onClose).not.toHaveBeenCalled();
+});
+
+// ── Panel toggle ──────────────────────────────────────────────────────────────
+
+test("panel toggle calls onTogglePanel", () => {
+  const { onTogglePanel } = setup();
+  fireEvent.click(screen.getByRole("button", { name: "Toggle panel" }));
+  expect(onTogglePanel).toHaveBeenCalledTimes(1);
+});
+
+test("panel toggle reflects panelOpen via aria-pressed", () => {
+  setup({ panelOpen: true });
+  expect(screen.getByRole("button", { name: "Toggle panel" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
 });
 
 // ── Status label ──────────────────────────────────────────────────────────────

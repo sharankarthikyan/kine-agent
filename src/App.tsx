@@ -2,9 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
-import { Maximize2, Minimize2, PanelRight, X } from "lucide-react";
+import { Maximize2, Minimize2, X } from "lucide-react";
 import { PromptBar } from "./components/PromptBar";
 import { NewSession } from "./components/NewSession";
 import { Conversation, type Turn } from "./components/Conversation";
@@ -447,7 +446,6 @@ export default function App() {
 
   const files = filesFromEvents(storedEvents);
   const usage = latestUsage(storedEvents);
-  const changedCount = diff?.files.length ?? 0;
 
   // Derived: active session object and its display values for TitleBar + SessionHeader.
   const activeSession = sessions.find((s) => s.id === activeSessionId) ?? null;
@@ -532,24 +530,9 @@ export default function App() {
                     status={activeSession?.status ?? "idle"}
                     diffstat={diffstats[activeSessionId] ?? null}
                     onClose={handleNewSession}
+                    panelOpen={rightTab !== null}
+                    onTogglePanel={() => (rightTab ? closeRight() : setRightTab("context"))}
                   />
-                  {/* Stable top toolbar — single toggle; switching Context vs Diff lives in the pane tabs. */}
-                  <div className="flex items-center justify-end px-4 py-2 border-b border-border">
-                    <Button
-                      variant={rightTab !== null ? "secondary" : "ghost"}
-                      size="sm"
-                      onClick={() => (rightTab ? closeRight() : setRightTab("context"))}
-                      aria-label="Toggle context panel"
-                    >
-                      <PanelRight data-icon />
-                      Panel
-                      {changedCount > 0 && (
-                        <Badge variant="secondary" className="ml-1 tabular-nums">
-                          {changedCount}
-                        </Badge>
-                      )}
-                    </Button>
-                  </div>
                   <div className="flex flex-1 flex-col overflow-auto min-h-0">
                     <div className="mt-auto w-full max-w-3xl mx-auto px-4">
                       <Conversation turns={turns} running={running} />
