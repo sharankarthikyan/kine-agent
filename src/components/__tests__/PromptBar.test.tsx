@@ -31,3 +31,10 @@ test("submits on Enter key in the input", async () => {
   );
   expect(onStart).toHaveBeenCalledWith("ship it");
 });
+
+test("disabled Start is visually inert (reduced opacity)", () => {
+  render(<PromptBar onStart={vi.fn()} running={false} />);
+  const btn = screen.getByRole("button", { name: "Start" });
+  expect(btn).toBeDisabled();
+  expect(btn.style.opacity).toBe("0.45");
+});

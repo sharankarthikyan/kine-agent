@@ -38,7 +38,8 @@ export function PromptBar({ onStart, running }: PromptBarProps) {
         style={{
           padding: "var(--space-3) var(--space-4)", borderRadius: "var(--radius-md)",
           border: "none", background: "var(--status-running)", color: "var(--bg-canvas)",
-          fontWeight: 500, cursor: canStart ? "pointer" : "default",
+          fontWeight: 500, cursor: canStart ? "pointer" : "not-allowed",
+          opacity: canStart ? 1 : 0.45, transition: "opacity var(--dur-fast) var(--ease-out)",
         }}
       >
         {running ? "Running…" : "Start"}
