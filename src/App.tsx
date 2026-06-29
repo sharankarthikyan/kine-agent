@@ -16,6 +16,7 @@ import { startSession, sendMessage, type AgentEvent } from "./lib/agent";
 import { detectAgents, listModels, type ModelInfo } from "./lib/models";
 import { reviewSession, type SessionDiff } from "./lib/review";
 import { listSessions, sessionEvents, type SessionSummary, type StoredEvent } from "./lib/sessions";
+import { groupByWorkspace } from "./lib/workspaces";
 import { filesFromEvents, latestUsage } from "./lib/contextDerive";
 import { inspectRules, readTextFile, listCapabilities, type RuleFile, type Capabilities } from "./lib/inspect";
 import { turnsFromEvents } from "./lib/turns";
@@ -40,6 +41,8 @@ export default function App() {
   const [ruleView, setRuleView] = useState<{ label: string; content: string } | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [selectedModel, setSelectedModel] = useState<ModelInfo | null>(null);
+  // Milestone 6 will wire counts/diffstats; search is local for now.
+  const [sessionSearch, setSessionSearch] = useState("");
 
   // Synchronous ref keeps the active session ID readable inside async callbacks
   // without stale-closure issues — the guard for cross-session contamination.
@@ -226,10 +229,14 @@ export default function App() {
       <div className="flex flex-1 min-h-0">
         <div className="w-72 shrink-0">
           <SessionList
-            sessions={sessions}
+            groups={groupByWorkspace(sessions)}
             activeId={activeSessionId}
             onSelect={handleSelectSession}
             onNew={handleNewSession}
+            counts={null}
+            diffstats={{}}
+            search={sessionSearch}
+            onSearchChange={setSessionSearch}
           />
         </div>
         <main className="flex flex-1 min-h-0">
