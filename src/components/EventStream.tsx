@@ -1,8 +1,10 @@
-import type { CSSProperties } from "react";
 import { Fragment } from "react";
 import type { AgentEvent } from "../lib/agent";
 import { EmptyState } from "./EmptyState";
 import { Markdown } from "./Markdown";
+import { Badge } from "@/components/ui/badge";
+import { Alert, AlertTitle, AlertDescription } from "@/components/ui/alert";
+import { Wrench, Pencil } from "lucide-react";
 
 interface EventStreamProps {
   events: AgentEvent[];
@@ -11,9 +13,9 @@ interface EventStreamProps {
 /**
  * Renders one agent turn's activity as a single cohesive flow — prose as the
  * dominant element, tool calls / file writes as compact muted chips, errors as a
- * red-accented block. No per-event dividers (research: separate with space, not
- * lines). The `done` result is NOT re-rendered when prose already exists — the
- * streamed text is the answer; it's only shown when the turn produced no prose.
+ * destructive Alert. No per-event dividers (space, not lines). The `done` result
+ * is NOT re-rendered when prose already exists — the streamed text is the answer;
+ * it's only shown when the turn produced no prose.
  */
 export function EventStream({ events }: EventStreamProps) {
   if (events.length === 0) {
@@ -26,7 +28,7 @@ export function EventStream({ events }: EventStreamProps) {
   }
   const hasProse = events.some((e) => e.kind === "token");
   return (
-    <div style={flow}>
+    <div className="flex flex-col items-start gap-3">
       {events.map((event, i) => (
         <Fragment key={i}>{renderEvent(event, hasProse)}</Fragment>
       ))}
@@ -34,52 +36,59 @@ export function EventStream({ events }: EventStreamProps) {
   );
 }
 
-const flow: CSSProperties = {
-  display: "flex",
-  flexDirection: "column",
-  alignItems: "flex-start",
-  gap: "var(--space-3)",
-};
-
 function renderEvent(event: AgentEvent, hasProse: boolean) {
   switch (event.kind) {
     case "token":
       // Agent prose is Markdown and is the dominant element of the turn.
       return <Markdown>{event.data.text}</Markdown>;
+
     case "toolCall":
       return (
-        <span style={chip} title={event.data.input}>
-          <span style={{ color: "var(--status-running)" }}>{event.data.name}</span>
-          <span style={{ color: "var(--text-muted)" }}>{summarize(event.data.input)}</span>
-        </span>
+        <Badge
+          variant="secondary"
+          className="gap-1 max-w-full overflow-hidden font-mono font-normal"
+          title={event.data.input}
+        >
+          <Wrench className="size-3 shrink-0" />
+          <span className="truncate">
+            {event.data.name}
+            {summarize(event.data.input)}
+          </span>
+        </Badge>
       );
+
     case "fileWrite":
       return (
-        <span style={chip}>
-          <span style={{ color: "var(--text-muted)" }}>✎</span>
-          <span>{event.data.path}</span>
-        </span>
+        <Badge
+          variant="secondary"
+          className="gap-1 max-w-full overflow-hidden font-mono font-normal"
+        >
+          <Pencil className="size-3 shrink-0" />
+          <span className="truncate">{event.data.path}</span>
+        </Badge>
       );
+
     case "approvalNeeded":
       // The one event that earns a real card — it's an interactive gate.
       return (
-        <div style={approvalCard}>
-          <div style={{ color: "var(--status-waiting)", fontWeight: 500, marginBottom: "var(--space-1)" }}>
-            Needs approval
-          </div>
-          <div style={{ color: "var(--text-body)" }}>{event.data.prompt}</div>
-        </div>
+        <Alert className="w-full">
+          <AlertTitle>Needs approval</AlertTitle>
+          <AlertDescription>{event.data.prompt}</AlertDescription>
+        </Alert>
       );
+
     case "done":
       // Don't echo the final text — the prose already showed it. Only render the
       // summary when the turn produced no prose at all.
       return hasProse ? null : <Markdown>{event.data.summary}</Markdown>;
+
     case "error":
       return (
-        <div role="alert" style={errorBlock}>
-          {event.data.message}
-        </div>
+        <Alert variant="destructive" className="w-full">
+          <AlertDescription>{event.data.message}</AlertDescription>
+        </Alert>
       );
+
     default: {
       // Exhaustiveness guard: a new AgentEvent variant without a case becomes a
       // compile error here instead of silently rendering nothing.
@@ -96,36 +105,3 @@ function summarize(input: string): string {
   const oneLine = trimmed.replace(/\s+/g, " ");
   return ` ${oneLine.length > 60 ? `${oneLine.slice(0, 57)}…` : oneLine}`;
 }
-
-const chip: CSSProperties = {
-  display: "inline-flex",
-  alignItems: "center",
-  gap: "var(--space-1)",
-  maxWidth: "100%",
-  padding: "2px 8px",
-  borderRadius: "var(--radius-sm)",
-  background: "var(--bg-card)",
-  fontFamily: "var(--font-mono)",
-  fontSize: "var(--fs-12)",
-  whiteSpace: "nowrap",
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-};
-
-const approvalCard: CSSProperties = {
-  width: "100%",
-  padding: "var(--space-3)",
-  borderRadius: "var(--radius-md)",
-  border: "1px solid var(--status-waiting)",
-  background: "var(--bg-card)",
-  fontSize: "var(--fs-13)",
-};
-
-const errorBlock: CSSProperties = {
-  width: "100%",
-  paddingLeft: "var(--space-3)",
-  borderLeft: "2px solid var(--status-error)",
-  color: "var(--status-error)",
-  fontSize: "var(--fs-13)",
-  whiteSpace: "pre-wrap",
-};

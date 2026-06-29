@@ -1,5 +1,4 @@
 import { useEffect, useRef } from "react";
-import type { CSSProperties } from "react";
 import type { AgentEvent } from "../lib/agent";
 import { EventStream } from "./EventStream";
 import { EmptyState } from "./EmptyState";
@@ -35,18 +34,25 @@ export function Conversation({ turns, running }: ConversationProps) {
   }
 
   return (
-    <div style={thread}>
+    // More space between turns than within a single turn (no divider lines).
+    <div className="flex flex-col gap-6 p-4">
       {turns.map((turn, i) => (
-        <div key={i} style={turnGroup}>
-          {/* User message: a subtle tinted card so "what I asked" is scannable. */}
-          <section style={turnBlock}>
-            <div style={role}>You</div>
-            <div style={userCard}>{turn.prompt}</div>
+        <div key={i} className="flex flex-col gap-3">
+          {/* User message: subtle muted bubble, contained (not full-width). */}
+          <section className="flex flex-col gap-2">
+            <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+              You
+            </div>
+            <div className="self-start max-w-prose rounded-lg bg-muted px-4 py-3 text-foreground whitespace-pre-wrap">
+              {turn.prompt}
+            </div>
           </section>
-          {/* Agent message: plain on the canvas — room for prose, chips, code. */}
+          {/* Agent output: plain on the canvas — room for prose, chips, code. */}
           {turn.events.length > 0 && (
-            <section style={turnBlock}>
-              <div style={role}>Agent</div>
+            <section className="flex flex-col gap-2">
+              <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                Agent
+              </div>
               <EventStream events={turn.events} />
             </section>
           )}
@@ -57,21 +63,3 @@ export function Conversation({ turns, running }: ConversationProps) {
     </div>
   );
 }
-
-// Bigger gap between turns than within one (research: "more space around a group
-// than within it"); no divider lines anywhere.
-const thread: CSSProperties = { display: "flex", flexDirection: "column", gap: "var(--space-6)", padding: "var(--space-4)" };
-const turnGroup: CSSProperties = { display: "flex", flexDirection: "column", gap: "var(--space-3)" };
-const turnBlock: CSSProperties = { display: "flex", flexDirection: "column", gap: "var(--space-2)" };
-const role: CSSProperties = {
-  fontSize: "var(--fs-12)", textTransform: "uppercase", letterSpacing: "0.04em",
-  fontWeight: 600, color: "var(--text-muted)",
-};
-const userCard: CSSProperties = {
-  background: "var(--surface-raised)",
-  border: "1px solid var(--border-hairline)",
-  borderRadius: "var(--radius-md)",
-  padding: "var(--space-3) var(--space-4)",
-  color: "var(--text-primary)",
-  whiteSpace: "pre-wrap",
-};
