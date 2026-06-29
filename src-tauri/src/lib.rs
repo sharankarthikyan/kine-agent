@@ -20,6 +20,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(store)
         .invoke_handler(tauri::generate_handler![
             commands::start_session,
@@ -37,7 +38,9 @@ pub fn run() {
             commands::session_diffstat,
             commands::worktree_tree,
             commands::branch_changes,
-            commands::commit_session
+            commands::commit_session,
+            commands::open_in_editor,
+            commands::open_terminal
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -359,6 +359,50 @@ pub async fn branch_changes(session_id: String) -> Result<BranchChanges, String>
     .map_err(|e| e.to_string())?
 }
 
+/// Open the session's worktree in VS Code by spawning `code <path>`. Returns a
+/// friendly error if `code` is not on PATH; does not wait for VS Code to exit.
+#[tauri::command]
+pub async fn open_in_editor(session_id: String) -> Result<(), String> {
+    let root = worktrees_root();
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let wt = worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
+        std::process::Command::new("code")
+            .arg(&wt.path)
+            .spawn()
+            .map_err(|_| "VS Code (code) not found on PATH".to_string())?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Open a terminal at the session's worktree. macOS only (uses `open -a Terminal`);
+/// returns a friendly error on other platforms.
+#[tauri::command]
+pub async fn open_terminal(session_id: String) -> Result<(), String> {
+    let root = worktrees_root();
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let wt = worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
+        #[cfg(target_os = "macos")]
+        {
+            std::process::Command::new("open")
+                .arg("-a")
+                .arg("Terminal")
+                .arg(&wt.path)
+                .spawn()
+                .map_err(|e| format!("failed to open Terminal: {e}"))?;
+            Ok(())
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            drop(wt);
+            Err("Opening a terminal is only supported on macOS for now".into())
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Stage all changes in the session's worktree (`git add -A`) and commit them with
 /// `message`. Returns the new HEAD sha. Errors when the message is blank, the tree is
 /// clean, or git fails for any reason. Never pushes, merges, or switches branches.
