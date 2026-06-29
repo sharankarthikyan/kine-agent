@@ -1,7 +1,7 @@
 import { useState } from "react";
 import type { BranchChanges } from "@/lib/conductor";
 import type { ChangeStatus } from "@/lib/review";
-import { cn } from "@/lib/utils";
+
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -58,7 +58,7 @@ export function ChangesPanel({ branch, onCommit, onOpenFile, committing }: Chang
     <div className="flex flex-col h-full min-h-0">
       {/* ── Header: summary + primary action ─────────────────────────────── */}
       <div className="shrink-0 flex items-center gap-2 px-3 py-2">
-        <p className={cn("flex-1 text-sm tabular-nums", hasChanges ? "text-muted-foreground" : "text-muted-foreground")}>
+        <p className="flex-1 text-sm tabular-nums text-muted-foreground">
           Branch Changes
           {hasChanges && (
             <>

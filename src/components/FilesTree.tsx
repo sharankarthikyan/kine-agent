@@ -45,12 +45,13 @@ function TreeNodeRow({ node, depth, onOpenFile }: TreeNodeRowProps) {
           aria-label={node.name}
         >
           <ChevronRight
+            data-icon
             className={cn("size-3.5 shrink-0 transition-transform duration-150", open && "rotate-90")}
           />
           {open ? (
-            <FolderOpen className="size-3.5 shrink-0 text-muted-foreground" />
+            <FolderOpen data-icon className="size-3.5 shrink-0 text-muted-foreground" />
           ) : (
-            <Folder className="size-3.5 shrink-0 text-muted-foreground" />
+            <Folder data-icon className="size-3.5 shrink-0 text-muted-foreground" />
           )}
           <span className="flex-1 text-xs truncate">{node.name}</span>
           {/* Status letter — not color-only */}
@@ -88,6 +89,7 @@ function TreeNodeRow({ node, depth, onOpenFile }: TreeNodeRowProps) {
       {/* Spacer aligned with chevron */}
       <span className="size-3.5 shrink-0" aria-hidden="true" />
       <File
+        data-icon
         className="size-3.5 shrink-0"
         style={statusColor ? { color: statusColor } : undefined}
       />
