@@ -10,6 +10,7 @@ import { Conversation, type Turn } from "./components/Conversation";
 import { DiffViewer } from "./components/DiffViewer";
 import { TitleBar } from "./components/TitleBar";
 import { SessionList } from "./components/SessionList";
+import { CustomizationsDialog, type CustomizationSection } from "./components/CustomizationsDialog";
 import { SessionHeader } from "./components/SessionHeader";
 import { ContextPanel } from "./components/ContextPanel";
 import { ChangesPanel } from "./components/ChangesPanel";
@@ -73,6 +74,9 @@ export default function App() {
   });
   // Customization counts for the active session, fetched best-effort.
   const [counts, setCounts] = useState<CustomizationCounts | null>(null);
+  // Customizations dialog state — section defaults to "overview" until set by the sidebar row click.
+  const [custDialogOpen, setCustDialogOpen] = useState(false);
+  const [custSection, setCustSection] = useState<CustomizationSection>("overview");
   // Per-session diffstats, fetched opportunistically and retained across session switches.
   const [diffstats, setDiffstats] = useState<Record<string, Diffstat>>({});
   // Changes tab state.
@@ -259,6 +263,25 @@ export default function App() {
       catch { if (activeSessionIdRef.current === sessionId) setCapabilities(null); }
     })();
   }, [rightTab, activeSessionId, selectedModel?.agent]);
+
+  // Fetch rules + capabilities when the Customizations dialog opens for an active session.
+  // Best-effort, mirrors the Context-tab logic. If the Context tab has already fetched
+  // these, the setters are idempotent and the IPC round-trip is cheap.
+  useEffect(() => {
+    if (!custDialogOpen || !activeSessionId) return;
+    const sessionId = activeSessionId;
+    (async () => {
+      try {
+        const r = await inspectRules(sessionId);
+        if (activeSessionIdRef.current === sessionId) setRules(r);
+      } catch { /* best-effort */ }
+      try {
+        const c = await listCapabilities(sessionId, selectedModel?.agent ?? "claude");
+        if (activeSessionIdRef.current === sessionId) setCapabilities(c);
+      } catch { /* best-effort */ }
+    })();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [custDialogOpen, activeSessionId, selectedModel?.agent]);
 
   // Fetch branch-level changes when the Changes tab becomes active.
   useEffect(() => {
@@ -491,6 +514,10 @@ export default function App() {
               diffstats={diffstats}
               search={sessionSearch}
               onSearchChange={setSessionSearch}
+              onOpenCustomization={(section) => {
+                setCustSection(section);
+                setCustDialogOpen(true);
+              }}
             />
           </div>
         )}
@@ -645,6 +672,17 @@ export default function App() {
           </ScrollArea>
         </SheetContent>
       </Sheet>
+
+      {/* Customizations dialog — opened when a sidebar Customizations row is clicked. */}
+      <CustomizationsDialog
+        open={custDialogOpen}
+        onOpenChange={setCustDialogOpen}
+        initialSection={custSection}
+        counts={counts}
+        capabilities={capabilities}
+        rules={rules}
+        onOpenRule={handleOpenRule}
+      />
 
       <Toaster />
     </div>

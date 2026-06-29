@@ -49,6 +49,7 @@ const defaultProps = {
   diffstats: {} as Record<string, Diffstat>,
   search: "",
   onSearchChange: () => {},
+  onOpenCustomization: () => {},
 };
 
 test("renders workspace header", () => {
@@ -122,6 +123,27 @@ test("shows muted dashes for all five rows when counts is null", () => {
   render(<SessionList {...defaultProps} counts={null} />);
   const dashes = screen.getAllByText("—");
   expect(dashes.length).toBe(5);
+});
+
+test("clicking a Customizations row calls onOpenCustomization with the right section", () => {
+  const onOpenCustomization = vi.fn();
+  render(<SessionList {...defaultProps} counts={counts} onOpenCustomization={onOpenCustomization} />);
+  fireEvent.click(screen.getByRole("button", { name: /open agents customizations/i }));
+  expect(onOpenCustomization).toHaveBeenCalledWith("agents");
+});
+
+test("clicking Skills Customizations row fires with 'skills' section", () => {
+  const onOpenCustomization = vi.fn();
+  render(<SessionList {...defaultProps} counts={counts} onOpenCustomization={onOpenCustomization} />);
+  fireEvent.click(screen.getByRole("button", { name: /open skills customizations/i }));
+  expect(onOpenCustomization).toHaveBeenCalledWith("skills");
+});
+
+test("clicking MCP Servers row fires with 'mcp' section", () => {
+  const onOpenCustomization = vi.fn();
+  render(<SessionList {...defaultProps} counts={counts} onOpenCustomization={onOpenCustomization} />);
+  fireEvent.click(screen.getByRole("button", { name: /open mcp servers customizations/i }));
+  expect(onOpenCustomization).toHaveBeenCalledWith("mcp");
 });
 
 test("calls onSearchChange when typing in the search input", () => {

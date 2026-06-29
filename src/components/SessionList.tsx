@@ -15,6 +15,7 @@ import {
 } from "@/components/ui/empty";
 import type { SessionSummary, SessionStatus } from "../lib/sessions";
 import type { CustomizationCounts, Diffstat } from "../lib/conductor";
+import type { CustomizationSection } from "./CustomizationsDialog";
 import { relativeTime } from "../lib/relativeTime";
 
 interface SessionListProps {
@@ -26,6 +27,7 @@ interface SessionListProps {
   diffstats: Record<string, Diffstat>;
   search: string;
   onSearchChange: (s: string) => void;
+  onOpenCustomization: (section: CustomizationSection) => void;
 }
 
 type StatusConfig = { label: string; color: string };
@@ -42,11 +44,11 @@ const FALLBACK_CONFIG: StatusConfig = {
 };
 
 const CUSTOMIZATION_ROWS = [
-  { key: "agents" as const, label: "Agents", Icon: Bot },
-  { key: "skills" as const, label: "Skills", Icon: Zap },
-  { key: "instructions" as const, label: "Instructions", Icon: FileText },
-  { key: "hooks" as const, label: "Hooks", Icon: Webhook },
-  { key: "mcpServers" as const, label: "MCP Servers", Icon: Server },
+  { key: "agents" as const, section: "agents" as const, label: "Agents", Icon: Bot },
+  { key: "skills" as const, section: "skills" as const, label: "Skills", Icon: Zap },
+  { key: "instructions" as const, section: "instructions" as const, label: "Instructions", Icon: FileText },
+  { key: "hooks" as const, section: "hooks" as const, label: "Hooks", Icon: Webhook },
+  { key: "mcpServers" as const, section: "mcp" as const, label: "MCP Servers", Icon: Server },
 ];
 
 export function SessionList({
@@ -58,6 +60,7 @@ export function SessionList({
   diffstats,
   search,
   onSearchChange,
+  onOpenCustomization,
 }: SessionListProps) {
   const [searchOpen, setSearchOpen] = useState(false);
   const now = Date.now();
@@ -213,14 +216,21 @@ export function SessionList({
             <span className="text-xs font-medium text-muted-foreground mb-1 select-none">
               Customizations
             </span>
-            {CUSTOMIZATION_ROWS.map(({ key, label, Icon }) => (
-              <div key={key} className="flex items-center gap-2 py-0.5">
-                <Icon className="size-3.5 text-muted-foreground shrink-0" />
-                <span className="text-xs text-muted-foreground flex-1">{label}</span>
-                <span className="text-xs text-muted-foreground tabular-nums font-mono">
+            {CUSTOMIZATION_ROWS.map(({ key, section, label, Icon }) => (
+              <Button
+                key={key}
+                type="button"
+                variant="ghost"
+                className="w-full justify-start h-auto py-0.5 px-2 gap-2 text-muted-foreground hover:text-foreground"
+                onClick={() => onOpenCustomization(section)}
+                aria-label={`Open ${label} customizations`}
+              >
+                <Icon className="size-3.5 shrink-0" />
+                <span className="text-xs flex-1 text-left">{label}</span>
+                <span className="text-xs tabular-nums font-mono ml-auto">
                   {counts !== null ? counts[key] : "—"}
                 </span>
-              </div>
+              </Button>
             ))}
           </div>
         </>
