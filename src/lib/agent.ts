@@ -25,21 +25,21 @@ export type AgentEvent =
 export interface StartSessionArgs {
   prompt: string;
   repo: string;
+  sessionId: string;
   onEvent: (event: AgentEvent) => void;
 }
 
 /**
- * Start a session against `repo`. A fresh session id is generated, the backend
- * creates an isolated worktree for it, and events stream back via `onEvent`.
- * Returns the session id so the caller can later `cleanupSession`.
+ * Start a session against `repo`. The caller owns the session id (typically
+ * generated with `crypto.randomUUID()` before calling this, so the UI can
+ * render an optimistic row immediately). The backend creates an isolated
+ * worktree for the session and events stream back via `onEvent`.
  */
-export async function startSession({ prompt, repo, onEvent }: StartSessionArgs): Promise<string> {
+export async function startSession({ prompt, repo, sessionId, onEvent }: StartSessionArgs): Promise<void> {
   assertDesktop();
-  const sessionId = crypto.randomUUID();
   const channel = new Channel<AgentEvent>();
   channel.onmessage = onEvent;
   await invoke("start_session", { prompt, repo, sessionId, onEvent: channel });
-  return sessionId;
 }
 
 export interface CleanupSessionArgs {
