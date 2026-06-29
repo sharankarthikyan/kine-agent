@@ -1,5 +1,19 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { startSession, cleanupSession, sendMessage, type AgentEvent } from "../agent";
+
+describe("desktop guard", () => {
+  const internals = (globalThis as Record<string, unknown>).__TAURI_INTERNALS__;
+  afterEach(() => {
+    (globalThis as Record<string, unknown>).__TAURI_INTERNALS__ = internals;
+  });
+
+  it("startSession throws an actionable error outside the desktop app", async () => {
+    delete (globalThis as Record<string, unknown>).__TAURI_INTERNALS__;
+    await expect(
+      startSession({ prompt: "x", repo: ".", onEvent: () => {} }),
+    ).rejects.toThrow(/desktop app/i);
+  });
+});
 
 // The factory is hoisted above imports, so the mock Channel must be defined inline.
 vi.mock("@tauri-apps/api/core", () => {

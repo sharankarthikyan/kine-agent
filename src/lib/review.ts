@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { assertDesktop } from "./agent";
 
 export type ChangeStatus = "added" | "modified" | "deleted";
 
@@ -20,5 +21,6 @@ export interface ReviewSessionArgs {
 
 /** Fetch the diff of a session's worktree for review. */
 export async function reviewSession({ sessionId }: ReviewSessionArgs): Promise<SessionDiff> {
+  assertDesktop();
   return invoke<SessionDiff>("review_session", { sessionId });
 }

@@ -67,12 +67,14 @@ export default function App() {
           <button onClick={handleNewSession} style={newSessionButton}>+ New session</button>
         </aside>
         <main style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
-          {/* Scrollable conversation (or diff), grows to fill; composer sits below it. */}
-          <div style={{ flex: 1, overflow: "auto", minHeight: 0 }}>
+          {/* Scrollable conversation (or diff), grows to fill; composer sits below it.
+              Flex column so the conversation can bottom-anchor (margin-top:auto): a
+              short chat sits just above the composer and grows upward, then scrolls. */}
+          <div style={{ flex: 1, overflow: "auto", minHeight: 0, display: "flex", flexDirection: "column" }}>
             {diff ? (
               <DiffViewer diff={diff} />
             ) : (
-              <div style={{ maxWidth: "var(--content-measure)" }}>
+              <div style={{ marginTop: "auto", width: "100%", maxWidth: "var(--content-measure)" }}>
                 <Conversation turns={turns} running={running} />
               </div>
             )}
