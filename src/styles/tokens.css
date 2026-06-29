@@ -5,6 +5,7 @@
   --font-mono:ui-monospace,"JetBrains Mono",SFMono-Regular,Menlo,Consolas,monospace;
   --fs-12:12px; --fs-13:13px; --fs-14:14px; --fs-16:16px; --lh-body:1.55;
   --bg-canvas:#07080A; --bg-surface:#0D0D0D; --bg-card:#121212;
+  --surface-raised:rgba(255,255,255,.045);
   --border-hairline:#242728;
   --text-primary:#F4F4F6; --text-body:#CDCDCD; --text-muted:#9C9C9D; --text-disabled:#6A6B6C;
   --status-running:#57C1FF; --status-success:#59D499; --status-error:#FF6161; --status-waiting:#FFC533;
