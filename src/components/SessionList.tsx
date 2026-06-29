@@ -25,7 +25,7 @@ export function SessionList({ sessions, activeId, onSelect, onNew }: SessionList
     <nav style={pane} aria-label="Sessions">
       <div style={header}>
         <span style={heading}>SESSIONS</span>
-        <button onClick={onNew} style={newButton}>+ New session</button>
+        <button type="button" onClick={onNew} style={newButton}>+ New session</button>
       </div>
       {sessions.length === 0 ? (
         <p style={emptyHint}>No sessions yet.</p>
@@ -76,11 +76,14 @@ const newButton: CSSProperties = {
 const list: CSSProperties = { listStyle: "none", margin: 0, padding: "0 var(--space-2)" };
 const row: CSSProperties = {
   display: "flex", alignItems: "center", gap: "var(--space-2)", width: "100%",
-  padding: "var(--space-2) var(--space-3)", border: "none", borderRadius: "var(--radius-md)",
-  background: "transparent", color: "var(--text-body)", cursor: "pointer",
-  fontSize: "var(--fs-13)", textAlign: "left",
+  padding: "var(--space-2) var(--space-3)", border: "none", borderLeft: "2px solid transparent",
+  borderRadius: "var(--radius-md)", background: "transparent", color: "var(--text-body)",
+  cursor: "pointer", fontSize: "var(--fs-13)", textAlign: "left",
 };
-const rowActive: CSSProperties = { background: "var(--surface-raised)", color: "var(--text-primary)" };
+const rowActive: CSSProperties = {
+  background: "var(--surface-raised)", color: "var(--text-primary)",
+  borderLeft: "2px solid var(--status-running)", fontWeight: 600,
+};
 const dot: CSSProperties = { width: 8, height: 8, borderRadius: "var(--radius-full)", flex: "0 0 auto" };
 const title: CSSProperties = { flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };
 const statusText: CSSProperties = { color: "var(--text-muted)", fontSize: "var(--fs-12)", flex: "0 0 auto" };

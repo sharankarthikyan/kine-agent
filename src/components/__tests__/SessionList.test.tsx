@@ -37,3 +37,9 @@ test("shows an empty hint when there are no sessions", () => {
   render(<SessionList sessions={[]} activeId={null} onSelect={() => {}} onNew={() => {}} />);
   expect(screen.getByText(/no sessions yet/i)).toBeInTheDocument();
 });
+
+test("shows the textual status label for each session", () => {
+  render(<SessionList sessions={sessions} activeId={null} onSelect={() => {}} onNew={() => {}} />);
+  expect(screen.getByText("Idle")).toBeInTheDocument();
+  expect(screen.getByText("Running")).toBeInTheDocument();
+});
