@@ -19,7 +19,7 @@ const sample: SessionDiff = {
 
 test("shows empty state when no files changed", () => {
   render(<DiffViewer diff={{ files: [], patch: "" }} />);
-  expect(screen.getByText("No changes.")).toBeInTheDocument();
+  expect(screen.getByText("No changes")).toBeInTheDocument();
 });
 
 test("lists each changed file with its path", () => {
