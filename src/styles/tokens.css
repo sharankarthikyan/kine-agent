@@ -10,9 +10,12 @@
   --status-running:#57C1FF; --status-success:#59D499; --status-error:#FF6161; --status-waiting:#FFC533;
   --status-success-soft:rgba(89,212,153,.12); --status-error-soft:rgba(255,97,97,.12);
   --content-measure:760px;
-  --topbar-h:52px; --sidebar-w:240px; --list-pane-w:320px; --row-h:32px;
+  --topbar-h:52px; --titlebar-h:40px; --sidebar-w:240px; --list-pane-w:320px; --row-h:32px;
   --dur-fast:120ms; --ease-out:cubic-bezier(.16,1,.3,1);
 }
 body { margin:0; font-family:var(--font-ui); font-size:var(--fs-14); line-height:var(--lh-body);
   background:var(--bg-canvas); color:var(--text-body);
   -webkit-user-select:none; user-select:none; }
+/* Custom titlebar drag region (Tauri). Children that must stay clickable
+   should set `app-region: no-drag`. */
+*[data-tauri-drag-region] { -webkit-app-region: drag; app-region: drag; }
