@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024" role="img" aria-label="Kineloop logo">
+  <rect x="64" y="64" width="896" height="896" rx="225" fill="#09090b" stroke="#27272a" stroke-width="2"/>
+  <g fill="none" stroke="#ffffff" stroke-width="76" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M 444 318 C 394 268 348 230 286 230 C 202 230 152 310 152 414 L 152 650 C 152 754 204 822 292 822 C 356 822 404 790 450 740 L 704 462"/>
+    <path d="M 420 728 L 736 378 C 790 318 870 352 870 444 C 870 506 834 554 786 586"/>
+    <path d="M 612 760 C 676 824 776 824 834 754 C 896 678 858 568 756 522"/>
+    <path d="M 600 260 L 372 486 C 330 528 332 590 376 632 L 456 708"/>
+  </g>
+  <circle cx="755" cy="462" r="62" fill="#09090b"/>
+  <circle cx="755" cy="462" r="36" fill="#3B82F6"/>
+</svg>
