@@ -48,13 +48,14 @@ pub struct ModelInfo {
 /// disables (greyed-out) ones that are missing.
 pub fn detect_agents() -> Vec<AgentInfo> {
     [
-        ("claude", "Claude Code"),
-        ("codex", "OpenAI Codex"),
-        ("gemini", "Gemini"),
+        ("claude", "claude", "Claude Code"),
+        ("codex", "codex", "OpenAI Codex"),
+        ("antigravity", "agy", "Antigravity"),
+        ("gemini", "gemini", "Gemini"),
     ]
     .iter()
-    .map(|(bin, label)| AgentInfo {
-        id: bin.to_string(),
+    .map(|(id, bin, label)| AgentInfo {
+        id: id.to_string(),
         label: label.to_string(),
         installed: which::which(bin).is_ok(),
     })
@@ -90,6 +91,7 @@ pub fn list_models(agent: &str) -> Vec<ModelInfo> {
     match agent {
         "claude" => aliases_to_models(&read_cache().unwrap_or_default()),
         "codex" => list_codex_models(),
+        "antigravity" => list_antigravity_models(),
         _ => vec![],
     }
 }
@@ -342,6 +344,114 @@ fn write_codex_cache(cache: &CodexModelCache) {
     }
 }
 
+// ===== Antigravity models =====
+
+/// Return Antigravity models from the on-disk cache. Like Codex, the list comes from
+/// the CLI itself (`agy models`) and is cached; a cold cache yields none until
+/// [`refresh_antigravity_models`] runs.
+pub fn list_antigravity_models() -> Vec<ModelInfo> {
+    antigravity_cache_to_models(&read_antigravity_cache().unwrap_or_default())
+}
+
+/// Re-read the Antigravity model list from `agy models` and persist it. Skips the read
+/// while the cache is fresh (younger than [`CACHE_TTL_SECS`]). `agy models` prints one
+/// human-readable model name per line, which is also what `--model` accepts, so each
+/// line is used verbatim as both value and label.
+pub fn refresh_antigravity_models() -> Vec<ModelInfo> {
+    if let Some(cache) = read_antigravity_cache() {
+        let fresh =
+            !cache.models.is_empty() && now_unix().saturating_sub(cache.fetched_at) < CACHE_TTL_SECS;
+        if fresh {
+            return antigravity_cache_to_models(&cache);
+        }
+    }
+
+    let Some(output) = fetch_antigravity_models() else {
+        return antigravity_cache_to_models(&read_antigravity_cache().unwrap_or_default());
+    };
+    let models = parse_antigravity_models(&output);
+    if models.is_empty() {
+        return antigravity_cache_to_models(&read_antigravity_cache().unwrap_or_default());
+    }
+    let cache = AntigravityModelCache {
+        fetched_at: now_unix(),
+        models,
+    };
+    write_antigravity_cache(&cache);
+    antigravity_cache_to_models(&cache)
+}
+
+/// Parse `agy models` output into the cached model name list: every non-empty,
+/// trimmed line, de-duplicated while preserving order.
+fn parse_antigravity_models(output: &str) -> Vec<String> {
+    let mut seen = std::collections::BTreeSet::new();
+    output
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .filter(|l| seen.insert(l.to_string()))
+        .map(str::to_string)
+        .collect()
+}
+
+fn antigravity_cache_to_models(cache: &AntigravityModelCache) -> Vec<ModelInfo> {
+    cache
+        .models
+        .iter()
+        .map(|name| ModelInfo {
+            value: name.clone(),
+            label: name.clone(),
+            agent: "antigravity".to_string(),
+            description: None,
+            disabled: false,
+            context_window: None,
+        })
+        .collect()
+}
+
+fn fetch_antigravity_models() -> Option<String> {
+    let program = crate::agent_paths::resolve_program("agy");
+    let output = Command::new(program)
+        .arg("models")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout).ok()
+}
+
+/// On-disk cache of `agy models`. No CLI-version key (agy exposes no stable version
+/// string headlessly); freshness is TTL-only.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct AntigravityModelCache {
+    #[serde(default)]
+    models: Vec<String>,
+    #[serde(default)]
+    fetched_at: u64,
+}
+
+fn antigravity_cache_path() -> PathBuf {
+    crate::agent_paths::data_dir().join("antigravity-model-cache.json")
+}
+
+fn read_antigravity_cache() -> Option<AntigravityModelCache> {
+    let bytes = std::fs::read(antigravity_cache_path()).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn write_antigravity_cache(cache: &AntigravityModelCache) {
+    let path = antigravity_cache_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_vec_pretty(cache) {
+        let _ = std::fs::write(path, json);
+    }
+}
+
 /// Turn a full Claude model id into a friendly label.
 /// `claude-opus-4-8` → `"Claude Opus 4.8"`; `claude-fable-5` → `"Claude Fable 5"`.
 /// A trailing 8-digit date snapshot (`-20251101`) is dropped. Falls back to the
@@ -492,9 +602,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn detect_agents_returns_exactly_three_entries() {
+    fn detect_agents_returns_all_known_agents() {
         let agents = detect_agents();
-        assert_eq!(agents.len(), 3);
+        assert_eq!(agents.len(), 4);
+        let ids: Vec<&str> = agents.iter().map(|a| a.id.as_str()).collect();
+        assert!(ids.contains(&"claude"));
+        assert!(ids.contains(&"codex"));
+        assert!(ids.contains(&"antigravity"));
+        assert!(ids.contains(&"gemini"));
+    }
+
+    #[test]
+    fn parse_antigravity_models_trims_dedups_and_drops_blanks() {
+        let out = "Gemini 3.5 Flash (Medium)\n\n  Claude Opus 4.6 (Thinking)  \nGemini 3.5 Flash (Medium)\n";
+        let models = parse_antigravity_models(out);
+        assert_eq!(
+            models,
+            vec![
+                "Gemini 3.5 Flash (Medium)".to_string(),
+                "Claude Opus 4.6 (Thinking)".to_string(),
+            ]
+        );
     }
 
     #[test]

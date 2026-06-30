@@ -1,0 +1,348 @@
+use crate::adapter::{AgentAdapter, EventSink, Prompt, SessionError};
+use crate::events::AgentEvent;
+use serde_json::Value;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use tokio::process::Command;
+
+/// Adapter that drives the `codex` CLI via `codex exec --json`.
+///
+/// Codex mints its own conversation id (`thread_id`), reported in the first
+/// `thread.started` event. We capture it into [`CodexAdapter::captured_thread`] so
+/// the command layer can persist it and later resume with `codex exec resume <id>`.
+pub struct CodexAdapter {
+    captured_thread: Arc<Mutex<Option<String>>>,
+}
+
+impl CodexAdapter {
+    pub fn new(captured_thread: Arc<Mutex<Option<String>>>) -> Self {
+        Self { captured_thread }
+    }
+}
+
+impl AgentAdapter for CodexAdapter {
+    fn run(
+        &self,
+        prompt: Prompt,
+        cwd: PathBuf,
+        session_id: String,
+        resume: bool,
+        sink: Box<dyn EventSink>,
+    ) -> impl std::future::Future<Output = Result<(), SessionError>> + Send {
+        spawn_and_stream(prompt, cwd, session_id, resume, sink, self.captured_thread.clone())
+    }
+}
+
+/// Map Kineloop's permission mode to a Codex `--sandbox` mode. Headless `codex exec`
+/// has no interactive approval prompt, so the sandbox mode is the only blast-radius
+/// control. `acceptEdits`/`default` allow writes inside the worktree; `plan` is read-only.
+fn sandbox_for(permission_mode: Option<&str>) -> &'static str {
+    match permission_mode {
+        Some("plan") => "read-only",
+        _ => "workspace-write",
+    }
+}
+
+/// Parse one `codex exec --json` event line into zero or more AgentEvents.
+///
+/// Returns an empty Vec for blank lines, non-JSON input, and event types we don't
+/// surface — never panics on malformed output. The `thread.started` id is handled
+/// separately (it isn't an AgentEvent); see [`thread_id_from_line`].
+pub fn parse_line(line: &str) -> Vec<AgentEvent> {
+    let line = line.trim();
+    if line.is_empty() {
+        return vec![];
+    }
+    let v: Value = match serde_json::from_str(line) {
+        Ok(v) => v,
+        Err(_) => return vec![],
+    };
+    match v.get("type").and_then(Value::as_str) {
+        Some("item.completed") | Some("item.updated") => parse_item(v.get("item")),
+        Some("turn.completed") => parse_usage(v.get("usage")).into_iter().collect(),
+        Some("turn.failed") | Some("error") => {
+            let message = v
+                .get("error")
+                .and_then(|e| e.get("message").and_then(Value::as_str))
+                .or_else(|| v.get("message").and_then(Value::as_str))
+                .unwrap_or("codex turn failed")
+                .to_string();
+            vec![AgentEvent::Error { message }]
+        }
+        _ => vec![],
+    }
+}
+
+/// Extract the conversation/thread id from a `thread.started` line, if present.
+pub fn thread_id_from_line(line: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(line.trim()).ok()?;
+    if v.get("type").and_then(Value::as_str) != Some("thread.started") {
+        return None;
+    }
+    v.get("thread_id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+/// Map a Codex `item` object to an AgentEvent. Known item types:
+/// `agent_message` (assistant text), `command_execution` (shell tool),
+/// `file_change`/`patch` (file edits), `mcp_tool_call` (tool). Unknown types are ignored.
+fn parse_item(item: Option<&Value>) -> Vec<AgentEvent> {
+    let Some(item) = item else { return vec![] };
+    match item.get("type").and_then(Value::as_str) {
+        Some("agent_message") => item
+            .get("text")
+            .and_then(Value::as_str)
+            .filter(|t| !t.is_empty())
+            .map(|t| vec![AgentEvent::Token { text: t.to_string() }])
+            .unwrap_or_default(),
+        Some("command_execution") => {
+            let command = item
+                .get("command")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            vec![AgentEvent::ToolCall {
+                name: "shell".to_string(),
+                input: command,
+            }]
+        }
+        Some("mcp_tool_call") => {
+            let name = item
+                .get("tool")
+                .and_then(Value::as_str)
+                .or_else(|| item.get("name").and_then(Value::as_str))
+                .unwrap_or("tool")
+                .to_string();
+            let input = item
+                .get("arguments")
+                .map(|a| a.to_string())
+                .unwrap_or_default();
+            vec![AgentEvent::ToolCall { name, input }]
+        }
+        Some("file_change") | Some("patch") => file_paths_from_change(item)
+            .into_iter()
+            .map(|path| AgentEvent::FileWrite { path })
+            .collect(),
+        _ => vec![],
+    }
+}
+
+/// Pull edited file paths out of a `file_change`/`patch` item. Codex reports changes
+/// either as a `changes` array of `{path,...}` or as a `path` scalar.
+fn file_paths_from_change(item: &Value) -> Vec<String> {
+    if let Some(changes) = item.get("changes").and_then(Value::as_array) {
+        return changes
+            .iter()
+            .filter_map(|c| {
+                c.get("path")
+                    .or_else(|| c.get("file"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .collect();
+    }
+    item.get("path")
+        .and_then(Value::as_str)
+        .map(|p| vec![p.to_string()])
+        .unwrap_or_default()
+}
+
+/// Map a Codex `turn.completed` usage object to a Usage event. Codex reports no cost.
+fn parse_usage(usage: Option<&Value>) -> Option<AgentEvent> {
+    let usage = usage?;
+    let n = |k: &str| usage.get(k).and_then(Value::as_u64).unwrap_or(0);
+    Some(AgentEvent::Usage {
+        input_tokens: n("input_tokens"),
+        output_tokens: n("output_tokens"),
+        cache_read_tokens: n("cached_input_tokens"),
+        cache_creation_tokens: 0,
+        cost_usd: None,
+        model: None,
+    })
+}
+
+/// Spawn `codex exec --json` headless, read stdout line-by-line, emit parsed events,
+/// and capture the conversation id for resume. On resume, `session_id` is the
+/// previously-captured Codex thread id passed to `codex exec resume`.
+#[allow(clippy::too_many_arguments)]
+pub async fn spawn_and_stream(
+    prompt: Prompt,
+    cwd: PathBuf,
+    session_id: String,
+    resume: bool,
+    sink: Box<dyn EventSink>,
+    captured_thread: Arc<Mutex<Option<String>>>,
+) -> Result<(), SessionError> {
+    let model = prompt.model.as_deref();
+    let sandbox = sandbox_for(prompt.permission_mode.as_deref());
+
+    let mut command = Command::new(crate::agent_paths::resolve_program("codex"));
+    command.arg("exec");
+    if resume {
+        // `session_id` here is the Codex thread id captured from the first run.
+        command.arg("resume").arg(&session_id);
+    }
+    command
+        .arg("--json")
+        .arg("--skip-git-repo-check");
+    if let Some(m) = model {
+        command.arg("--model").arg(m);
+    }
+    // `--sandbox`/`--cd` are only accepted by `codex exec` (new runs); `exec resume`
+    // reuses the original session's config and the process cwd.
+    if !resume {
+        command.arg("--sandbox").arg(sandbox).arg("--cd").arg(&cwd);
+    }
+    command.arg(&prompt.text);
+
+    let mut child = command
+        .current_dir(&cwd)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| SessionError::Spawn(e.to_string()))?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| SessionError::Spawn("no stdout".into()))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| SessionError::Spawn("no stderr".into()))?;
+
+    // Drain stderr concurrently so a full pipe buffer can't deadlock stdout. Codex
+    // writes MCP/transport diagnostics here that we keep only as an error tail.
+    let stderr_task = tokio::spawn(async move {
+        let mut buf = String::new();
+        let _ = BufReader::new(stderr).read_to_string(&mut buf).await;
+        let lines: Vec<&str> = buf.lines().collect();
+        let start = lines.len().saturating_sub(20);
+        lines[start..].join("\n")
+    });
+
+    let mut reader = BufReader::new(stdout);
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        let read = reader.read_until(b'\n', &mut buf).await?;
+        if read == 0 {
+            break;
+        }
+        while matches!(buf.last(), Some(b'\n' | b'\r')) {
+            buf.pop();
+        }
+        let line = String::from_utf8_lossy(&buf);
+        if let Some(thread_id) = thread_id_from_line(&line) {
+            if let Ok(mut slot) = captured_thread.lock() {
+                *slot = Some(thread_id);
+            }
+        }
+        for event in parse_line(&line) {
+            sink.emit(event);
+        }
+    }
+
+    let stderr_tail = stderr_task.await.unwrap_or_default();
+    let status = child.wait().await?;
+    if !status.success() {
+        let message = if stderr_tail.trim().is_empty() {
+            format!("codex exited with {status}")
+        } else {
+            format!("codex exited with {status}: {}", stderr_tail.trim())
+        };
+        sink.emit(AgentEvent::Error { message });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_blank_and_non_json_return_empty() {
+        assert!(parse_line("").is_empty());
+        assert!(parse_line("   ").is_empty());
+        assert!(parse_line("not json").is_empty());
+    }
+
+    #[test]
+    fn parse_agent_message_emits_token() {
+        let line = r#"{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"pong"}}"#;
+        let events = parse_line(line);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], AgentEvent::Token { text } if text == "pong"));
+    }
+
+    #[test]
+    fn parse_command_execution_emits_tool_call() {
+        let line = r#"{"type":"item.completed","item":{"type":"command_execution","command":"ls -la"}}"#;
+        let events = parse_line(line);
+        assert_eq!(events.len(), 1);
+        assert!(
+            matches!(&events[0], AgentEvent::ToolCall { name, input } if name == "shell" && input == "ls -la"),
+        );
+    }
+
+    #[test]
+    fn parse_file_change_emits_file_writes() {
+        let line = r#"{"type":"item.completed","item":{"type":"file_change","changes":[{"path":"src/a.rs"},{"path":"src/b.rs"}]}}"#;
+        let events = parse_line(line);
+        assert_eq!(events.len(), 2);
+        assert!(matches!(&events[0], AgentEvent::FileWrite { path } if path == "src/a.rs"));
+        assert!(matches!(&events[1], AgentEvent::FileWrite { path } if path == "src/b.rs"));
+    }
+
+    #[test]
+    fn parse_turn_completed_emits_usage() {
+        let line = r#"{"type":"turn.completed","usage":{"input_tokens":12408,"cached_input_tokens":4992,"output_tokens":5,"reasoning_output_tokens":0}}"#;
+        let events = parse_line(line);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            AgentEvent::Usage {
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cost_usd,
+                ..
+            } => {
+                assert_eq!(*input_tokens, 12408);
+                assert_eq!(*output_tokens, 5);
+                assert_eq!(*cache_read_tokens, 4992);
+                assert!(cost_usd.is_none());
+            }
+            other => panic!("expected Usage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_turn_failed_emits_error() {
+        let line = r#"{"type":"turn.failed","error":{"message":"model overloaded"}}"#;
+        let events = parse_line(line);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], AgentEvent::Error { message } if message == "model overloaded"));
+    }
+
+    #[test]
+    fn thread_started_id_is_extracted() {
+        let line = r#"{"type":"thread.started","thread_id":"019f19d0-c3cf-7623-9afa-b988b2d42763"}"#;
+        assert_eq!(
+            thread_id_from_line(line).as_deref(),
+            Some("019f19d0-c3cf-7623-9afa-b988b2d42763")
+        );
+        assert!(thread_id_from_line(r#"{"type":"turn.started"}"#).is_none());
+    }
+
+    #[test]
+    fn sandbox_mapping_matches_permission_mode() {
+        assert_eq!(sandbox_for(Some("plan")), "read-only");
+        assert_eq!(sandbox_for(Some("acceptEdits")), "workspace-write");
+        assert_eq!(sandbox_for(Some("default")), "workspace-write");
+        assert_eq!(sandbox_for(None), "workspace-write");
+    }
+}

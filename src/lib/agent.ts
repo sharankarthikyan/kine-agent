@@ -37,7 +37,9 @@ export interface StartSessionArgs {
   prompt: string;
   repo: string;
   sessionId: string;
-  /** Claude CLI model alias (e.g. "opus", "sonnet", "haiku"). Omit to use the CLI default. */
+  /** Which agent CLI to spawn ("claude" | "codex" | "antigravity"). Omit ⇒ "claude". */
+  agent?: string;
+  /** Model id/alias forwarded to the agent CLI's --model. Omit to use the CLI default. */
   model?: string;
   /** Permission mode forwarded to the agent CLI. The backend only allows default, acceptEdits, and plan. */
   permissionMode?: string;
@@ -50,11 +52,11 @@ export interface StartSessionArgs {
  * render an optimistic row immediately). The backend creates an isolated
  * worktree for the session and events stream back via `onEvent`.
  */
-export async function startSession({ prompt, repo, sessionId, model, permissionMode, onEvent }: StartSessionArgs): Promise<void> {
+export async function startSession({ prompt, repo, sessionId, agent, model, permissionMode, onEvent }: StartSessionArgs): Promise<void> {
   assertDesktop();
   const channel = new Channel<AgentEvent>();
   channel.onmessage = onEvent;
-  await invoke("start_session", { prompt, repo, sessionId, model, permissionMode, onEvent: channel });
+  await invoke("start_session", { prompt, repo, sessionId, agent, model, permissionMode, onEvent: channel });
 }
 
 /** Remove the worktree and branch for a finished session. */

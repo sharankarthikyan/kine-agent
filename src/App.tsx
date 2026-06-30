@@ -354,7 +354,7 @@ export default function App() {
     try {
       const discovered = await detectAgents();
       const supported = discovered.filter(
-        (a) => a.id === "claude" || a.id === "codex",
+        (a) => a.id === "claude" || a.id === "codex" || a.id === "antigravity",
       );
       const installed = supported.filter((a) => a.installed);
       const results = await Promise.allSettled(
@@ -927,7 +927,7 @@ export default function App() {
   async function handleSend(
     text: string,
     model: ModelInfo | null,
-    opts?: { repo?: string; permissionMode?: string },
+    opts?: { repo?: string; permissionMode?: string; agent?: string },
   ) {
     if (activeSession?.source === "external") {
       toast.error("External CLI sessions are read-only in Kineloop.");
@@ -950,7 +950,7 @@ export default function App() {
         ? { ...existing, status: "running", updatedAt: now }
         : {
             id: sessionId,
-            agent: "claude",
+            agent: opts?.agent ?? model?.agent ?? "claude",
             repo,
             branch: `agent/${sessionId}`,
             title: titleFromPrompt(text),
@@ -972,15 +972,20 @@ export default function App() {
     const onEvent = (event: AgentEvent) => {
       appendToLastTurn(sessionId, event);
     };
-    // Forward the model value for Claude; null model → omit → CLI default.
-    const modelArg =
-      model && model.agent === "claude" ? model.value : undefined;
+    // Forward the selected model verbatim (alias for Claude, concrete id for
+    // Codex/Antigravity); null model → omit → CLI default. The agent is only sent
+    // on new sessions — follow-ups resume the agent recorded on the session row.
+    // Prefer the explicitly-chosen agent (from the New Session picker) over the
+    // model's agent, which can momentarily lag while a new agent's models load.
+    const modelArg = model?.value;
+    const startAgent = opts?.agent ?? model?.agent ?? "claude";
     try {
       if (isNew) {
         await startSession({
           prompt: text,
           repo,
           sessionId,
+          agent: startAgent,
           model: modelArg,
           permissionMode: opts?.permissionMode,
           onEvent,
@@ -1025,6 +1030,7 @@ export default function App() {
     return handleSend(text, selectedModel, {
       repo: selectedRepo ?? ".",
       permissionMode: autoEdit ? "acceptEdits" : "default",
+      agent: selectedAgent?.id ?? selectedModel?.agent ?? "claude",
     });
   }
 

@@ -131,6 +131,12 @@ impl SessionStore {
         )
         .execute(&self.pool)
         .await?;
+        // Resume key for agents that mint their own conversation id (Codex thread id,
+        // Antigravity conversation id). Added via ALTER for DBs created before this
+        // column existed; the duplicate-column error on re-run is expected and ignored.
+        let _ = sqlx::query("ALTER TABLE sessions ADD COLUMN external_thread_id TEXT")
+            .execute(&self.pool)
+            .await;
         Ok(())
     }
 
@@ -160,6 +166,44 @@ impl SessionStore {
         .bind(now)
         .execute(&self.pool)
         .await?;
+        Ok(())
+    }
+
+    /// The agent that owns a session (`"claude"`, `"codex"`, `"antigravity"`), or
+    /// `None` if the session row is absent.
+    pub async fn get_agent(&self, id: &str) -> Result<Option<String>, StoreError> {
+        let agent = sqlx::query_scalar::<_, String>("SELECT agent FROM sessions WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(agent)
+    }
+
+    /// The agent-native conversation id used to resume a session (Codex thread id /
+    /// Antigravity conversation id). `None` when unset or the session is absent.
+    pub async fn get_external_thread_id(&self, id: &str) -> Result<Option<String>, StoreError> {
+        let v = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT external_thread_id FROM sessions WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(v.flatten())
+    }
+
+    /// Record the agent-native conversation id captured from the CLI's first run, so
+    /// later turns can resume the same conversation. Bumps `updated_at`.
+    pub async fn set_external_thread_id(
+        &self,
+        id: &str,
+        thread_id: &str,
+    ) -> Result<(), StoreError> {
+        sqlx::query("UPDATE sessions SET external_thread_id = ?, updated_at = ? WHERE id = ?")
+            .bind(thread_id)
+            .bind(now_ms())
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 

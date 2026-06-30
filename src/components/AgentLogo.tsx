@@ -1,7 +1,7 @@
 import { Bot } from "lucide-react";
 import { cn } from "@/lib/utils";
 import claudeLogo from "@/assets/agents/claude.png";
-import codexLogo from "@/assets/agents/codex.png";
+import codexLogo from "@/assets/agents/codex.svg";
 import geminiLogo from "@/assets/agents/gemini.png";
 import antigravityLogo from "@/assets/agents/antigravity.png";
 

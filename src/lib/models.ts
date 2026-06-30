@@ -26,12 +26,17 @@ export interface ModelInfo {
 }
 
 /**
- * Agent ids Kineloop can currently spawn. Other detected agents still appear in
- * the pickers (so they're discoverable) but are disabled with a "coming soon"
- * hint until their spawn adapter lands. Keep in sync with the backend's
- * `start_session`, which today only drives the Claude adapter.
+ * Agent ids Kineloop can currently spawn. Any other detected agent (e.g. the
+ * deprecated standalone Gemini CLI) still appears in the pickers for
+ * discoverability but is disabled with a "coming soon" hint until its spawn
+ * adapter lands. Keep in sync with the backend's `start_session` dispatch /
+ * `SPAWNABLE_AGENTS`.
  */
-export const SPAWNABLE_AGENT_IDS = new Set<string>(["claude"]);
+export const SPAWNABLE_AGENT_IDS = new Set<string>([
+  "claude",
+  "codex",
+  "antigravity",
+]);
 
 /** Whether Kineloop can currently launch a session with this agent. */
 export function isAgentSpawnable(agentId: string): boolean {

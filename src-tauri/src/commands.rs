@@ -82,12 +82,15 @@ impl EventSink for StoreSink {
 ///
 /// Status is "error" if EITHER the run returned `Err` OR any `AgentEvent::Error`
 /// flowed through the sink — covering in-band agent failures that still return `Ok`.
+#[allow(clippy::too_many_arguments)]
 async fn run_persisting(
     store: &SessionStore,
     session_id: String,
+    agent: String,
     prompt: Prompt,
     cwd: PathBuf,
     resume: bool,
+    external_thread_id: Option<String>,
     on_event: Channel<AgentEvent>,
 ) -> Result<(), String> {
     let (tx, mut rx) = mpsc::unbounded_channel::<AgentEvent>();
@@ -111,10 +114,40 @@ async fn run_persisting(
         }
     });
 
-    let result = ClaudeAdapter
-        .run(prompt, cwd, session_id.clone(), resume, sink)
-        .await;
+    // Dispatch to the agent's adapter. Codex and Antigravity mint their own
+    // conversation id; `captured` collects it during the run so we can persist it for
+    // resume. On resume those adapters take the previously-captured id (not the
+    // Kineloop session id); Claude always uses the Kineloop session id directly.
+    let captured: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let result = match agent.as_str() {
+        "codex" => {
+            let (adapter_id, do_resume) =
+                resume_target(&session_id, resume, external_thread_id.as_deref());
+            crate::adapters::codex::CodexAdapter::new(captured.clone())
+                .run(prompt, cwd, adapter_id, do_resume, sink)
+                .await
+        }
+        "antigravity" => {
+            let (adapter_id, do_resume) =
+                resume_target(&session_id, resume, external_thread_id.as_deref());
+            crate::adapters::antigravity::AntigravityAdapter::new(captured.clone())
+                .run(prompt, cwd, adapter_id, do_resume, sink)
+                .await
+        }
+        _ => {
+            ClaudeAdapter
+                .run(prompt, cwd, session_id.clone(), resume, sink)
+                .await
+        }
+    };
     let _ = drain.await; // flush all persisted events before stamping status
+
+    // Persist a freshly captured external conversation id so later turns can resume it.
+    if let Some(id) = captured.lock().ok().and_then(|g| g.clone()) {
+        if let Err(e) = store.set_external_thread_id(&session_id, &id).await {
+            eprintln!("failed to persist external thread id for {session_id}: {e}");
+        }
+    }
     let status = if result.is_ok() && !saw_error.load(Ordering::Acquire) {
         "idle"
     } else {
@@ -199,11 +232,35 @@ fn validate_permission_mode(mode: Option<String>) -> Result<Option<String>, Stri
     }
 }
 
+/// Agents Kineloop can spawn. The frontend gates the picker, but the backend
+/// re-validates because the IPC boundary is untrusted.
+const SPAWNABLE_AGENTS: [&str; 3] = ["claude", "codex", "antigravity"];
+
+/// Validate the requested agent id, defaulting to `"claude"` when omitted.
+fn validate_agent(agent: Option<String>) -> Result<String, String> {
+    match agent {
+        None => Ok("claude".to_string()),
+        Some(a) if SPAWNABLE_AGENTS.contains(&a.as_str()) => Ok(a),
+        Some(a) => Err(format!("unsupported agent: {a}")),
+    }
+}
+
+/// Pick the id + resume flag to hand an adapter that resumes by a CLI-native id.
+/// Resumes with the captured external id when available; otherwise starts fresh so a
+/// missing/never-captured id degrades to a new turn rather than an error.
+fn resume_target(session_id: &str, resume: bool, external: Option<&str>) -> (String, bool) {
+    match (resume, external) {
+        (true, Some(id)) => (id.to_string(), true),
+        _ => (session_id.to_string(), false),
+    }
+}
+
 /// Validate a model identifier before it is forwarded to the agent CLI's `--model` flag.
 ///
 /// Not shell injection (`Command` takes argv directly), but an unvalidated value can
-/// carry a NUL byte (crashes `spawn`) or be arbitrarily long. Restrict to the shape of
-/// real model ids/aliases: ASCII alphanumerics plus `- _ . :`, capped at 128 chars.
+/// carry a NUL/control byte (crashes `spawn`) or be arbitrarily long. Allow the shape of
+/// real model ids/aliases AND human-readable names like `"Gemini 3.5 Flash (Medium)"`
+/// that `agy models` emits: ASCII alphanumerics plus `- _ . : space ( )`, ≤128 chars.
 fn validate_model(model: Option<String>) -> Result<Option<String>, String> {
     if let Some(m) = model.as_deref() {
         if m.is_empty() || m.len() > 128 {
@@ -211,7 +268,7 @@ fn validate_model(model: Option<String>) -> Result<Option<String>, String> {
         }
         if !m
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':'))
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':' | ' ' | '(' | ')'))
         {
             return Err(format!("invalid model name: {m}"));
         }
@@ -303,6 +360,7 @@ pub async fn start_session(
     prompt: String,
     repo: String,
     session_id: String,
+    agent: Option<String>,
     model: Option<String>,
     permission_mode: Option<String>,
     on_event: Channel<AgentEvent>,
@@ -310,6 +368,7 @@ pub async fn start_session(
     runs: State<'_, RunRegistry>,
 ) -> Result<(), String> {
     let _guard = runs.acquire(&session_id)?;
+    let agent = validate_agent(agent)?;
     let permission_mode = validate_permission_mode(permission_mode)?;
     let model = validate_model(model)?;
     // `canonical_repo_path` does blocking FS + a git subprocess — keep it off the async
@@ -331,7 +390,7 @@ pub async fn start_session(
     if let Err(e) = store
         .create_session(
             &session_id,
-            "claude",
+            &agent,
             &repo,
             &wt.path.display().to_string(),
             &wt.branch,
@@ -358,6 +417,7 @@ pub async fn start_session(
     run_persisting(
         &store,
         session_id,
+        agent,
         Prompt {
             text: prompt,
             model,
@@ -365,6 +425,7 @@ pub async fn start_session(
         },
         wt.path,
         false,
+        None,
         on_event,
     )
     .await
@@ -388,6 +449,16 @@ pub async fn send_message(
     let _guard = runs.acquire(&session_id)?;
     let permission_mode = validate_permission_mode(permission_mode)?;
     let model = validate_model(model)?;
+    // Resume uses the session's own agent + its captured CLI-native conversation id.
+    let agent = store
+        .get_agent(&session_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .unwrap_or_else(|| "claude".to_string());
+    let external_thread_id = store
+        .get_external_thread_id(&session_id)
+        .await
+        .map_err(|e| e.to_string())?;
     let root = worktrees_root();
     let sid = session_id.clone();
     let wt_path = tokio::task::spawn_blocking(move || -> Result<PathBuf, String> {
@@ -418,6 +489,7 @@ pub async fn send_message(
     run_persisting(
         &store,
         session_id,
+        agent,
         Prompt {
             text: prompt,
             model,
@@ -425,6 +497,7 @@ pub async fn send_message(
         },
         wt_path,
         true,
+        external_thread_id,
         on_event,
     )
     .await
@@ -542,6 +615,7 @@ pub async fn refresh_models(agent: String) -> Result<Vec<crate::models::ModelInf
     tokio::task::spawn_blocking(move || match agent.as_str() {
         "claude" => crate::models::refresh_claude_models(),
         "codex" => crate::models::refresh_codex_models(),
+        "antigravity" => crate::models::refresh_antigravity_models(),
         other => crate::models::list_models(other),
     })
     .await
