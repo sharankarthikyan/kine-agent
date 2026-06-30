@@ -164,10 +164,15 @@ fn summarize_claude(path: &Path) -> Option<SessionSummary> {
                     .map(title_from_text);
             }
             Some("user") => {
-                has_conversation = true;
-                turn_count = turn_count.saturating_add(1);
-                if title.is_none() {
-                    title = claude_user_text(&value).map(|text| title_from_text(&text));
+                // Count only genuine user prompts as turns. Tool results are also stored
+                // as `type:"user"` but carry no prompt text, so they must not inflate the
+                // count (this is what the rendered conversation actually shows).
+                if let Some(text) = claude_user_text(&value) {
+                    has_conversation = true;
+                    turn_count = turn_count.saturating_add(1);
+                    if title.is_none() {
+                        title = Some(title_from_text(&text));
+                    }
                 }
             }
             Some("assistant") => {
@@ -443,12 +448,33 @@ fn read_json_lines(path: &Path, max_lines: usize) -> Vec<Value> {
         .collect()
 }
 
+/// Extract a real user prompt's text from a Claude `type:"user"` entry.
+///
+/// Claude stores BOTH genuine user prompts and tool results as `type:"user"`. A prompt's
+/// `message.content` is either a plain string or an array of blocks that includes `text`
+/// blocks (e.g. when images are attached). A tool result is an array containing only
+/// `tool_result` blocks. We return text for the former and `None` for the latter, so
+/// tool results are neither rendered as prompts nor counted as conversation turns.
 fn claude_user_text(value: &Value) -> Option<String> {
-    value
-        .get("message")
-        .and_then(|m| m.get("content"))
-        .and_then(Value::as_str)
-        .map(cap_text)
+    let content = value.get("message").and_then(|m| m.get("content"))?;
+
+    if let Some(s) = content.as_str() {
+        let trimmed = s.trim();
+        return (!trimmed.is_empty()).then(|| cap_text(trimmed));
+    }
+
+    if let Some(blocks) = content.as_array() {
+        let text = blocks
+            .iter()
+            .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
+            .filter_map(|b| b.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let trimmed = text.trim();
+        return (!trimmed.is_empty()).then(|| cap_text(trimmed));
+    }
+
+    None
 }
 
 fn message_content_text(content: Option<&Value>) -> String {
@@ -692,6 +718,46 @@ mod tests {
         assert!(events.iter().any(|e| e.kind == "toolCall"));
 
         let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn claude_turn_count_excludes_tool_results_and_renders_array_text_prompts() {
+        // A real session shape: one string prompt, one array-form (image+text) prompt,
+        // a tool_result (also type:"user"), and an assistant turn. Only the two genuine
+        // prompts count as turns and render; the tool_result must not.
+        let home = temp_home("claude-turns");
+        let dir = home.join(".claude/projects/-repo");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s.jsonl");
+        fs::write(
+            &path,
+            [
+                r#"{"type":"user","cwd":"/repo","message":{"role":"user","content":"first prompt"}}"#,
+                r#"{"type":"assistant","cwd":"/repo","message":{"role":"assistant","content":[{"type":"text","text":"ok"},{"type":"tool_use","name":"Read","input":{"file_path":"a.ts"}}]}}"#,
+                r#"{"type":"user","cwd":"/repo","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"file body"}]}}"#,
+                r#"{"type":"user","cwd":"/repo","message":{"role":"user","content":[{"type":"text","text":"[Image #1] second prompt"}]}}"#,
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+
+        let sessions = list_sessions_in(&home);
+        assert_eq!(sessions.len(), 1);
+        // 2 real prompts, NOT 3 (tool_result excluded).
+        assert_eq!(sessions[0].turn_count, Some(2));
+
+        let events = events_for_session_in(&home, &sessions[0].id).unwrap();
+        let prompts: Vec<&str> = events
+            .iter()
+            .filter(|e| e.kind == "prompt")
+            .map(|e| e.payload_json.as_str())
+            .collect();
+        assert_eq!(prompts.len(), 2, "both prompts should render: {prompts:?}");
+        assert!(prompts.iter().any(|p| p.contains("first prompt")));
+        // The array-form (image+text) prompt must render, not be dropped.
+        assert!(prompts.iter().any(|p| p.contains("second prompt")));
+        // The tool_result must NOT have produced a prompt event.
+        assert!(!prompts.iter().any(|p| p.contains("file body")));
     }
 
     #[test]
