@@ -7,7 +7,13 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 const MAX_SESSION_FILES_PER_AGENT: usize = 300;
+/// Byte budget when reading a transcript for the *detail* (events) view. Large enough
+/// for most full sessions; bounds memory for pathologically huge ones.
 const MAX_SESSION_FILE_BYTES: u64 = 8 * 1024 * 1024;
+/// Byte budget when reading a transcript just to build its *list summary* (title, repo,
+/// branch, approximate counts). Far smaller than the detail budget so a refresh over many
+/// large/active transcripts stays cheap — the title and cwd live in the first lines.
+const SUMMARY_READ_BYTES: u64 = 1024 * 1024;
 const MAX_EVENTS_PER_SESSION: usize = 2_000;
 const MAX_TEXT_BYTES: usize = 24 * 1024;
 
@@ -245,10 +251,14 @@ fn collect_jsonl_inner(agent: &'static str, dir: &Path, depth: usize, out: &mut 
     }
 }
 
+/// Whether `path` is a regular file worth considering as a session transcript.
+///
+/// Deliberately does NOT reject large files: an active Claude/Codex session can be tens
+/// of MB (and grows while running). Reads are independently byte-capped
+/// ([`SUMMARY_READ_BYTES`] / [`MAX_SESSION_FILE_BYTES`]), so size is bounded at read time
+/// rather than by hiding the session entirely.
 fn readable_session_file(path: &Path) -> bool {
-    fs::metadata(path)
-        .map(|m| m.is_file() && m.len() <= MAX_SESSION_FILE_BYTES)
-        .unwrap_or(false)
+    fs::metadata(path).map(|m| m.is_file()).unwrap_or(false)
 }
 
 fn summarize_claude(path: &Path) -> Option<SessionSummary> {
@@ -260,7 +270,7 @@ fn summarize_claude(path: &Path) -> Option<SessionSummary> {
     let mut tool_call_count = 0_u32;
     let mut file_actions = BTreeSet::new();
 
-    for value in read_json_lines(path, MAX_EVENTS_PER_SESSION) {
+    for value in read_json_lines(path, MAX_EVENTS_PER_SESSION, SUMMARY_READ_BYTES) {
         let typ = value.get("type").and_then(Value::as_str);
         if repo.is_none() {
             repo = value
@@ -357,7 +367,7 @@ fn summarize_codex(path: &Path) -> Option<SessionSummary> {
     let mut tool_call_count = 0_u32;
     let mut file_actions = BTreeSet::new();
 
-    for value in read_json_lines(path, MAX_EVENTS_PER_SESSION) {
+    for value in read_json_lines(path, MAX_EVENTS_PER_SESSION, SUMMARY_READ_BYTES) {
         match value.get("type").and_then(Value::as_str) {
             Some("session_meta") => {
                 let payload = value.get("payload").unwrap_or(&Value::Null);
@@ -435,7 +445,7 @@ fn summarize_codex(path: &Path) -> Option<SessionSummary> {
 
 fn parse_claude_events(path: &Path) -> Vec<StoredEvent> {
     let mut out = Vec::new();
-    for value in read_json_lines(path, MAX_EVENTS_PER_SESSION) {
+    for value in read_json_lines(path, MAX_EVENTS_PER_SESSION, MAX_SESSION_FILE_BYTES) {
         match value.get("type").and_then(Value::as_str) {
             Some("user") => {
                 if let Some(text) = claude_user_text(&value) {
@@ -489,7 +499,7 @@ fn parse_claude_events(path: &Path) -> Vec<StoredEvent> {
 
 fn parse_codex_events(path: &Path) -> Vec<StoredEvent> {
     let mut out = Vec::new();
-    for value in read_json_lines(path, MAX_EVENTS_PER_SESSION) {
+    for value in read_json_lines(path, MAX_EVENTS_PER_SESSION, MAX_SESSION_FILE_BYTES) {
         let payload = value.get("payload").unwrap_or(&Value::Null);
         match value.get("type").and_then(Value::as_str) {
             Some("event_msg")
@@ -736,7 +746,7 @@ fn summarize_antigravity(path: &Path) -> Option<SessionSummary> {
     let mut tool_call_count = 0_u32;
     let mut file_actions = BTreeSet::new();
 
-    for value in read_json_lines(path, MAX_EVENTS_PER_SESSION) {
+    for value in read_json_lines(path, MAX_EVENTS_PER_SESSION, SUMMARY_READ_BYTES) {
         match value.get("type").and_then(Value::as_str) {
             Some("USER_INPUT") => {
                 if let Some(text) = antigravity_user_text(&value) {
@@ -787,7 +797,7 @@ fn summarize_antigravity(path: &Path) -> Option<SessionSummary> {
 
 fn parse_antigravity_events(path: &Path) -> Vec<StoredEvent> {
     let mut out = Vec::new();
-    for value in read_json_lines(path, MAX_EVENTS_PER_SESSION) {
+    for value in read_json_lines(path, MAX_EVENTS_PER_SESSION, MAX_SESSION_FILE_BYTES) {
         match value.get("type").and_then(Value::as_str) {
             Some("USER_INPUT") => {
                 if let Some(text) = antigravity_user_text(&value) {
@@ -885,7 +895,7 @@ fn antigravity_workspace(transcript_path: &Path) -> Option<String> {
     let conversation_id = id_dir.file_name()?.to_str()?;
     let cli_root = id_dir.parent()?.parent()?;
     let history = cli_root.join("history.jsonl");
-    for value in read_json_lines(&history, MAX_EVENTS_PER_SESSION) {
+    for value in read_json_lines(&history, MAX_EVENTS_PER_SESSION, MAX_SESSION_FILE_BYTES) {
         if value.get("conversationId").and_then(Value::as_str) == Some(conversation_id) {
             if let Some(ws) = value.get("workspace").and_then(Value::as_str) {
                 let trimmed = ws.trim();
@@ -898,20 +908,18 @@ fn antigravity_workspace(transcript_path: &Path) -> Option<String> {
     None
 }
 
-fn read_json_lines(path: &Path, max_lines: usize) -> Vec<Value> {
+fn read_json_lines(path: &Path, max_lines: usize, max_bytes: u64) -> Vec<Value> {
     let Ok(file) = fs::File::open(path) else {
         return Vec::new();
     };
-    // Decode the whole (size-capped at discovery) file lossily, then split into lines.
-    // Reading bytes + `from_utf8_lossy` means a stray non-UTF-8 byte can neither abort
-    // the parse (which `lines().map_while` would do, truncating later events) nor spin
-    // a fallible iterator — it is simply replaced with U+FFFD.
+    // Read at most `max_bytes` (a session transcript can be tens of MB and grows while
+    // active), decode lossily, then split into lines. Reading bytes + `from_utf8_lossy`
+    // means a stray non-UTF-8 byte can neither abort the parse (which `lines().map_while`
+    // would do, truncating later events) nor spin a fallible iterator — it is simply
+    // replaced with U+FFFD. A trailing line cut mid-way by the byte cap fails to parse
+    // and is dropped, which is harmless.
     let mut bytes = Vec::new();
-    if file
-        .take(MAX_SESSION_FILE_BYTES)
-        .read_to_end(&mut bytes)
-        .is_err()
-    {
+    if file.take(max_bytes).read_to_end(&mut bytes).is_err() {
         return Vec::new();
     }
     String::from_utf8_lossy(&bytes)
@@ -1127,6 +1135,68 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn lists_oversized_claude_session() {
+        // Regression: an active transcript can exceed the per-read byte budget (this one
+        // is >8 MB). It must still appear in the list — summary fields (title, repo) live
+        // in the first lines and are read within SUMMARY_READ_BYTES.
+        let home = temp_home("claude-big");
+        let dir = home.join(".claude/projects/-repo");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("big.jsonl");
+
+        let mut content = String::from(
+            r#"{"type":"user","cwd":"/work/repo","gitBranch":"main","message":{"role":"user","content":"Find the bug"}}"#,
+        );
+        content.push('\n');
+        // Pad past 8 MB with valid assistant lines so the file far exceeds any read cap.
+        let filler = format!(
+            "{}\n",
+            format_args!(
+                r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"{}"}}]}}}}"#,
+                "x".repeat(1000)
+            )
+        );
+        while content.len() < 9 * 1024 * 1024 {
+            content.push_str(&filler);
+        }
+        assert!(content.len() > MAX_SESSION_FILE_BYTES as usize);
+        fs::write(&path, &content).unwrap();
+
+        let sessions = list_sessions_in(&home);
+        assert_eq!(sessions.len(), 1, "oversized session must still be listed");
+        assert_eq!(sessions[0].agent, "claude");
+        assert_eq!(sessions[0].title, "Find the bug");
+        assert_eq!(sessions[0].repo, "/work/repo");
+
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn read_json_lines_respects_byte_budget() {
+        let home = temp_home("budget");
+        let path = home.join("lines.jsonl");
+        let line = r#"{"n":1}"#;
+        // Three identical ~8-byte lines; a budget covering only the first ~1.5 lines must
+        // yield just the first fully-parsed line (a mid-cut trailing line is dropped).
+        fs::write(&path, format!("{line}\n{line}\n{line}\n")).unwrap();
+        let got = read_json_lines(&path, 100, 10);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].get("n").and_then(Value::as_u64), Some(1));
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn readable_session_file_does_not_reject_large_files() {
+        let home = temp_home("readable");
+        let path = home.join("big.jsonl");
+        // A file larger than the read budget is still a valid candidate (size is bounded
+        // at read time, not by hiding the session).
+        fs::write(&path, "x".repeat((MAX_SESSION_FILE_BYTES + 1024) as usize)).unwrap();
+        assert!(readable_session_file(&path));
+        let _ = fs::remove_dir_all(home);
     }
 
     #[test]
