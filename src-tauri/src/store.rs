@@ -131,6 +131,18 @@ impl SessionStore {
         )
         .execute(&self.pool)
         .await?;
+        // Custom titles for sessions we don't own the storage of — chiefly external CLI
+        // history, whose transcript files on disk we never rewrite. The override is keyed
+        // by session id and applied at list time, leaving the source transcript untouched.
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS session_title_overrides (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
         // Resume key for agents that mint their own conversation id (Codex thread id,
         // Antigravity conversation id). Added via ALTER for DBs created before this
         // column existed; the duplicate-column error on re-run is expected and ignored.
@@ -205,6 +217,48 @@ impl SessionStore {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    /// Rename a session and bump `updated_at`. Affects only the given row; returns the
+    /// number of rows changed so callers can tell a missing/non-Kineloop id from a hit.
+    pub async fn set_title(&self, id: &str, title: &str) -> Result<u64, StoreError> {
+        let result = sqlx::query("UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?")
+            .bind(title)
+            .bind(now_ms())
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected())
+    }
+
+    /// Set (or replace) a custom title for a session whose storage we don't own —
+    /// external CLI history. Keyed by session id; the source transcript is never touched.
+    pub async fn set_title_override(&self, id: &str, title: &str) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO session_title_overrides (id, title, updated_at)
+             VALUES (?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET title = excluded.title, updated_at = excluded.updated_at",
+        )
+        .bind(id)
+        .bind(title)
+        .bind(now_ms())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// All custom title overrides as an (id → title) map, applied at list time so external
+    /// sessions show the user's chosen name without rewriting their on-disk transcripts.
+    pub async fn title_overrides(
+        &self,
+    ) -> Result<std::collections::HashMap<String, String>, StoreError> {
+        let rows = sqlx::query("SELECT id, title FROM session_title_overrides")
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| (r.get::<String, _>("id"), r.get::<String, _>("title")))
+            .collect())
     }
 
     /// Update a session's status and bump `updated_at`.
@@ -318,6 +372,35 @@ impl SessionStore {
             .collect())
     }
 
+    /// One ordered page of events for a session.
+    pub async fn session_events_recent_page(
+        &self,
+        session_id: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<StoredEvent>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT seq, kind, payload_json, ts FROM events
+             WHERE session_id = ? ORDER BY seq DESC LIMIT ? OFFSET ?",
+        )
+        .bind(session_id)
+        .bind(limit as i64)
+        .bind(offset as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut events = rows
+            .iter()
+            .map(|r| StoredEvent {
+                seq: r.get("seq"),
+                kind: r.get("kind"),
+                payload_json: r.get("payload_json"),
+                ts: r.get("ts"),
+            })
+            .collect::<Vec<_>>();
+        events.reverse();
+        Ok(events)
+    }
+
     pub async fn session_repo(&self, session_id: &str) -> Result<Option<String>, StoreError> {
         let repo = sqlx::query_scalar::<_, String>("SELECT repo FROM sessions WHERE id = ?")
             .bind(session_id)
@@ -417,6 +500,64 @@ mod tests {
         assert_eq!(sessions[0].title, "do the thing");
         assert_eq!(sessions[0].status, "running");
         assert_eq!(sessions[0].branch, "agent/s1");
+    }
+
+    #[tokio::test]
+    async fn set_title_renames_only_the_target_row() {
+        let store = SessionStore::connect_in_memory().await.unwrap();
+        store
+            .create_session("s1", "claude", "/repo", "/wt/s1", "agent/s1", "old title")
+            .await
+            .unwrap();
+        store
+            .create_session("s2", "claude", "/repo", "/wt/s2", "agent/s2", "untouched")
+            .await
+            .unwrap();
+
+        let rows = store.set_title("s1", "new title").await.unwrap();
+        assert_eq!(rows, 1, "exactly one row should change");
+
+        let sessions = store.list_sessions().await.unwrap();
+        let s1 = sessions.iter().find(|s| s.id == "s1").unwrap();
+        let s2 = sessions.iter().find(|s| s.id == "s2").unwrap();
+        assert_eq!(s1.title, "new title");
+        assert_eq!(s2.title, "untouched");
+    }
+
+    #[tokio::test]
+    async fn set_title_reports_zero_rows_for_missing_session() {
+        let store = SessionStore::connect_in_memory().await.unwrap();
+        let rows = store.set_title("ghost", "whatever").await.unwrap();
+        assert_eq!(rows, 0);
+    }
+
+    #[tokio::test]
+    async fn title_override_upserts_and_is_returned_in_map() {
+        let store = SessionStore::connect_in_memory().await.unwrap();
+        store
+            .set_title_override("external:claude:abc", "first name")
+            .await
+            .unwrap();
+        // A second write to the same id replaces, not duplicates.
+        store
+            .set_title_override("external:claude:abc", "second name")
+            .await
+            .unwrap();
+        store
+            .set_title_override("external:codex:def", "other")
+            .await
+            .unwrap();
+
+        let overrides = store.title_overrides().await.unwrap();
+        assert_eq!(overrides.len(), 2);
+        assert_eq!(
+            overrides.get("external:claude:abc").map(String::as_str),
+            Some("second name")
+        );
+        assert_eq!(
+            overrides.get("external:codex:def").map(String::as_str),
+            Some("other")
+        );
     }
 
     #[tokio::test]

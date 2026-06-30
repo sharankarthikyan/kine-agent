@@ -2,20 +2,11 @@ use crate::store::{SessionSummary, StoredEvent};
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::fs;
-use std::io::Read;
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 const MAX_SESSION_FILES_PER_AGENT: usize = 300;
-/// Byte budget when reading a transcript for the *detail* (events) view. Large enough
-/// for most full sessions; bounds memory for pathologically huge ones.
-const MAX_SESSION_FILE_BYTES: u64 = 8 * 1024 * 1024;
-/// Byte budget when reading a transcript just to build its *list summary* (title, repo,
-/// branch, approximate counts). Far smaller than the detail budget so a refresh over many
-/// large/active transcripts stays cheap — the title and cwd live in the first lines.
-const SUMMARY_READ_BYTES: u64 = 1024 * 1024;
-const MAX_EVENTS_PER_SESSION: usize = 2_000;
-const MAX_TEXT_BYTES: usize = 24 * 1024;
 
 #[derive(Debug, Clone)]
 struct ExternalFile {
@@ -54,6 +45,14 @@ pub fn list_sessions() -> Vec<SessionSummary> {
 
 pub fn events_for_session(session_id: &str) -> Option<Vec<StoredEvent>> {
     events_for_session_from(&discovery_roots(), session_id)
+}
+
+pub fn events_page_for_session(
+    session_id: &str,
+    offset: usize,
+    limit: usize,
+) -> Option<Vec<StoredEvent>> {
+    events_page_for_session_from(&discovery_roots(), session_id, offset, limit)
 }
 
 /// The on-disk repository path for an external session, used to resolve its
@@ -113,6 +112,28 @@ fn events_for_session_from(roots: &DiscoveryRoots, session_id: &str) -> Option<V
         "codex" => Some(parse_codex_events(&file.path)),
         "gemini" => Some(parse_gemini_events(&file.path)),
         "antigravity" => Some(parse_antigravity_events(&file.path)),
+        _ => None,
+    }
+}
+
+fn events_page_for_session_from(
+    roots: &DiscoveryRoots,
+    session_id: &str,
+    offset: usize,
+    limit: usize,
+) -> Option<Vec<StoredEvent>> {
+    let file = discover_files(roots)
+        .into_iter()
+        .find(|f| external_id(f.agent, &f.path) == session_id)?;
+    match file.agent {
+        "claude" => Some(parse_claude_events_page(&file.path, offset, limit)),
+        "codex" => Some(parse_codex_events_page(&file.path, offset, limit)),
+        "gemini" => Some(slice_recent_events(
+            parse_gemini_events(&file.path),
+            offset,
+            limit,
+        )),
+        "antigravity" => Some(parse_antigravity_events_page(&file.path, offset, limit)),
         _ => None,
     }
 }
@@ -254,9 +275,8 @@ fn collect_jsonl_inner(agent: &'static str, dir: &Path, depth: usize, out: &mut 
 /// Whether `path` is a regular file worth considering as a session transcript.
 ///
 /// Deliberately does NOT reject large files: an active Claude/Codex session can be tens
-/// of MB (and grows while running). Reads are independently byte-capped
-/// ([`SUMMARY_READ_BYTES`] / [`MAX_SESSION_FILE_BYTES`]), so size is bounded at read time
-/// rather than by hiding the session entirely.
+/// of MB (and grows while running). Parsing streams JSONL line-by-line so large sessions
+/// are not hidden or artificially truncated by Kineloop.
 fn readable_session_file(path: &Path) -> bool {
     fs::metadata(path).map(|m| m.is_file()).unwrap_or(false)
 }
@@ -270,7 +290,7 @@ fn summarize_claude(path: &Path) -> Option<SessionSummary> {
     let mut tool_call_count = 0_u32;
     let mut file_actions = BTreeSet::new();
 
-    for value in read_json_lines(path, MAX_EVENTS_PER_SESSION, SUMMARY_READ_BYTES) {
+    for value in read_json_lines(path) {
         let typ = value.get("type").and_then(Value::as_str);
         if repo.is_none() {
             repo = value
@@ -367,7 +387,7 @@ fn summarize_codex(path: &Path) -> Option<SessionSummary> {
     let mut tool_call_count = 0_u32;
     let mut file_actions = BTreeSet::new();
 
-    for value in read_json_lines(path, MAX_EVENTS_PER_SESSION, SUMMARY_READ_BYTES) {
+    for value in read_json_lines(path) {
         match value.get("type").and_then(Value::as_str) {
             Some("session_meta") => {
                 let payload = value.get("payload").unwrap_or(&Value::Null);
@@ -445,112 +465,141 @@ fn summarize_codex(path: &Path) -> Option<SessionSummary> {
 
 fn parse_claude_events(path: &Path) -> Vec<StoredEvent> {
     let mut out = Vec::new();
-    for value in read_json_lines(path, MAX_EVENTS_PER_SESSION, MAX_SESSION_FILE_BYTES) {
-        match value.get("type").and_then(Value::as_str) {
-            Some("user") => {
-                if let Some(text) = claude_user_text(&value) {
-                    push_event(&mut out, "prompt", serde_json::json!({ "text": text }));
-                }
+    visit_claude_events(path, |kind, payload| {
+        push_event(&mut out, kind, payload);
+        true
+    });
+    out
+}
+
+fn parse_claude_events_page(path: &Path, offset: usize, limit: usize) -> Vec<StoredEvent> {
+    reverse_events_page(path, offset, limit, claude_event_pairs)
+}
+
+fn visit_claude_events(path: &Path, mut emit: impl FnMut(&str, Value) -> bool) {
+    visit_json_lines(path, |value| {
+        for (kind, payload) in claude_event_pairs(&value) {
+            if !emit(&kind, payload) {
+                return false;
             }
-            Some("assistant") => {
-                let message = value.get("message").unwrap_or(&Value::Null);
-                if let Some(content) = message.get("content").and_then(Value::as_array) {
-                    for item in content {
-                        match item.get("type").and_then(Value::as_str) {
-                            Some("text") => {
-                                if let Some(text) = item.get("text").and_then(Value::as_str) {
-                                    push_event(
-                                        &mut out,
-                                        "token",
-                                        serde_json::json!({ "text": cap_text(text) }),
-                                    );
-                                }
+        }
+        true
+    });
+}
+
+fn claude_event_pairs(value: &Value) -> Vec<(String, Value)> {
+    let mut events = Vec::new();
+    match value.get("type").and_then(Value::as_str) {
+        Some("user") => {
+            if let Some(text) = claude_user_text(value) {
+                events.push(("prompt".to_string(), serde_json::json!({ "text": text })));
+            }
+        }
+        Some("assistant") => {
+            let message = value.get("message").unwrap_or(&Value::Null);
+            if let Some(content) = message.get("content").and_then(Value::as_array) {
+                for item in content {
+                    match item.get("type").and_then(Value::as_str) {
+                        Some("text") => {
+                            if let Some(text) = item.get("text").and_then(Value::as_str) {
+                                events.push((
+                                    "token".to_string(),
+                                    serde_json::json!({ "text": text }),
+                                ));
                             }
-                            Some("tool_use") => {
-                                let name =
-                                    item.get("name").and_then(Value::as_str).unwrap_or("tool");
-                                let input = item
-                                    .get("input")
-                                    .map(compact_json)
-                                    .unwrap_or_else(|| "".to_string());
-                                push_event(
-                                    &mut out,
-                                    "toolCall",
-                                    serde_json::json!({ "name": name, "input": cap_text(&input) }),
-                                );
-                            }
-                            _ => {}
                         }
+                        Some("tool_use") => {
+                            let name = item.get("name").and_then(Value::as_str).unwrap_or("tool");
+                            let input = item
+                                .get("input")
+                                .map(compact_json)
+                                .unwrap_or_else(|| "".to_string());
+                            events.push((
+                                "toolCall".to_string(),
+                                serde_json::json!({ "name": name, "input": input }),
+                            ));
+                        }
+                        _ => {}
                     }
                 }
-                if let Some(usage) = message.get("usage") {
-                    push_usage(
-                        &mut out,
-                        usage,
-                        message.get("model").and_then(Value::as_str),
-                    );
-                }
             }
-            _ => {}
+            if let Some(usage) = message.get("usage") {
+                events.push((
+                    "usage".to_string(),
+                    usage_payload(usage, message.get("model").and_then(Value::as_str)),
+                ));
+            }
         }
+        _ => {}
     }
-    out
+    events
 }
 
 fn parse_codex_events(path: &Path) -> Vec<StoredEvent> {
     let mut out = Vec::new();
-    for value in read_json_lines(path, MAX_EVENTS_PER_SESSION, MAX_SESSION_FILE_BYTES) {
-        let payload = value.get("payload").unwrap_or(&Value::Null);
-        match value.get("type").and_then(Value::as_str) {
-            Some("event_msg")
-                if payload.get("type").and_then(Value::as_str) == Some("user_message") =>
-            {
-                if let Some(text) = payload.get("message").and_then(Value::as_str) {
-                    push_event(
-                        &mut out,
-                        "prompt",
-                        serde_json::json!({ "text": cap_text(text) }),
-                    );
+    visit_codex_events(path, |kind, payload| {
+        push_event(&mut out, kind, payload);
+        true
+    });
+    out
+}
+
+fn parse_codex_events_page(path: &Path, offset: usize, limit: usize) -> Vec<StoredEvent> {
+    reverse_events_page(path, offset, limit, codex_event_pairs)
+}
+
+fn visit_codex_events(path: &Path, mut emit: impl FnMut(&str, Value) -> bool) {
+    visit_json_lines(path, |value| {
+        for (kind, payload) in codex_event_pairs(&value) {
+            if !emit(&kind, payload) {
+                return false;
+            }
+        }
+        true
+    });
+}
+
+fn codex_event_pairs(value: &Value) -> Vec<(String, Value)> {
+    let mut events = Vec::new();
+    let payload = value.get("payload").unwrap_or(&Value::Null);
+    match value.get("type").and_then(Value::as_str) {
+        Some("event_msg")
+            if payload.get("type").and_then(Value::as_str) == Some("user_message") =>
+        {
+            if let Some(text) = payload.get("message").and_then(Value::as_str) {
+                events.push(("prompt".to_string(), serde_json::json!({ "text": text })));
+            }
+        }
+        Some("response_item") => match payload.get("type").and_then(Value::as_str) {
+            Some("message") if payload.get("role").and_then(Value::as_str) == Some("assistant") => {
+                let text = message_content_text(payload.get("content"));
+                if !text.is_empty() {
+                    events.push(("token".to_string(), serde_json::json!({ "text": text })));
                 }
             }
-            Some("response_item") => match payload.get("type").and_then(Value::as_str) {
-                Some("message")
-                    if payload.get("role").and_then(Value::as_str) == Some("assistant") =>
-                {
-                    let text = message_content_text(payload.get("content"));
-                    if !text.is_empty() {
-                        push_event(
-                            &mut out,
-                            "token",
-                            serde_json::json!({ "text": cap_text(&text) }),
-                        );
-                    }
-                }
-                Some("function_call") | Some("custom_tool_call") | Some("tool_search_call") => {
-                    let name = payload
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .unwrap_or("tool");
-                    let input = payload
-                        .get("input")
-                        .or_else(|| payload.get("arguments"))
-                        .map(|v| match v {
-                            Value::String(s) => s.clone(),
-                            other => compact_json(other),
-                        })
-                        .unwrap_or_else(|| "".to_string());
-                    push_event(
-                        &mut out,
-                        "toolCall",
-                        serde_json::json!({ "name": name, "input": cap_text(&input) }),
-                    );
-                }
-                _ => {}
-            },
+            Some("function_call") | Some("custom_tool_call") | Some("tool_search_call") => {
+                let name = payload
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("tool");
+                let input = payload
+                    .get("input")
+                    .or_else(|| payload.get("arguments"))
+                    .map(|v| match v {
+                        Value::String(s) => s.clone(),
+                        other => compact_json(other),
+                    })
+                    .unwrap_or_else(|| "".to_string());
+                events.push((
+                    "toolCall".to_string(),
+                    serde_json::json!({ "name": name, "input": input }),
+                ));
+            }
             _ => {}
-        }
+        },
+        _ => {}
     }
-    out
+    events
 }
 
 fn summarize_gemini(path: &Path) -> Option<SessionSummary> {
@@ -564,7 +613,7 @@ fn summarize_gemini(path: &Path) -> Option<SessionSummary> {
     let mut tool_call_count = 0_u32;
     let mut file_actions = BTreeSet::new();
 
-    for message in messages.iter().take(MAX_EVENTS_PER_SESSION) {
+    for message in messages {
         match message.get("type").and_then(Value::as_str) {
             Some("user") => {
                 if let Some(text) = gemini_user_text(message) {
@@ -635,7 +684,7 @@ fn parse_gemini_events(path: &Path) -> Vec<StoredEvent> {
     let Some(messages) = root.get("messages").and_then(Value::as_array) else {
         return out;
     };
-    for message in messages.iter().take(MAX_EVENTS_PER_SESSION) {
+    for message in messages {
         match message.get("type").and_then(Value::as_str) {
             Some("user") => {
                 if let Some(text) = gemini_user_text(message) {
@@ -646,11 +695,7 @@ fn parse_gemini_events(path: &Path) -> Vec<StoredEvent> {
                 if let Some(text) = message.get("content").and_then(Value::as_str) {
                     let trimmed = text.trim();
                     if !trimmed.is_empty() {
-                        push_event(
-                            &mut out,
-                            "token",
-                            serde_json::json!({ "text": cap_text(trimmed) }),
-                        );
+                        push_event(&mut out, "token", serde_json::json!({ "text": trimmed }));
                     }
                 }
                 if let Some(tool_calls) = message.get("toolCalls").and_then(Value::as_array) {
@@ -663,7 +708,7 @@ fn parse_gemini_events(path: &Path) -> Vec<StoredEvent> {
                         push_event(
                             &mut out,
                             "toolCall",
-                            serde_json::json!({ "name": name, "input": cap_text(&input) }),
+                            serde_json::json!({ "name": name, "input": input }),
                         );
                     }
                 }
@@ -689,7 +734,7 @@ fn gemini_user_text(message: &Value) -> Option<String> {
 
     if let Some(s) = content.as_str() {
         let trimmed = s.trim();
-        return (!trimmed.is_empty()).then(|| cap_text(trimmed));
+        return (!trimmed.is_empty()).then(|| trimmed.to_string());
     }
 
     if let Some(blocks) = content.as_array() {
@@ -699,7 +744,7 @@ fn gemini_user_text(message: &Value) -> Option<String> {
             .collect::<Vec<_>>()
             .join("\n");
         let trimmed = text.trim();
-        return (!trimmed.is_empty()).then(|| cap_text(trimmed));
+        return (!trimmed.is_empty()).then(|| trimmed.to_string());
     }
 
     None
@@ -729,13 +774,9 @@ fn push_gemini_usage(out: &mut Vec<StoredEvent>, tokens: &Value, model: Option<&
     );
 }
 
-/// Read and parse a whole JSON object file (Gemini saved chats), size-capped.
+/// Read and parse a whole JSON object file (Gemini saved chats).
 fn read_json_object(path: &Path) -> Option<Value> {
-    let file = fs::File::open(path).ok()?;
-    let mut bytes = Vec::new();
-    file.take(MAX_SESSION_FILE_BYTES)
-        .read_to_end(&mut bytes)
-        .ok()?;
+    let bytes = fs::read(path).ok()?;
     serde_json::from_slice(&bytes).ok()
 }
 
@@ -746,7 +787,7 @@ fn summarize_antigravity(path: &Path) -> Option<SessionSummary> {
     let mut tool_call_count = 0_u32;
     let mut file_actions = BTreeSet::new();
 
-    for value in read_json_lines(path, MAX_EVENTS_PER_SESSION, SUMMARY_READ_BYTES) {
+    for value in read_json_lines(path) {
         match value.get("type").and_then(Value::as_str) {
             Some("USER_INPUT") => {
                 if let Some(text) = antigravity_user_text(&value) {
@@ -797,40 +838,57 @@ fn summarize_antigravity(path: &Path) -> Option<SessionSummary> {
 
 fn parse_antigravity_events(path: &Path) -> Vec<StoredEvent> {
     let mut out = Vec::new();
-    for value in read_json_lines(path, MAX_EVENTS_PER_SESSION, MAX_SESSION_FILE_BYTES) {
-        match value.get("type").and_then(Value::as_str) {
-            Some("USER_INPUT") => {
-                if let Some(text) = antigravity_user_text(&value) {
-                    push_event(&mut out, "prompt", serde_json::json!({ "text": text }));
-                }
+    visit_antigravity_events(path, |kind, payload| {
+        push_event(&mut out, kind, payload);
+        true
+    });
+    out
+}
+
+fn parse_antigravity_events_page(path: &Path, offset: usize, limit: usize) -> Vec<StoredEvent> {
+    reverse_events_page(path, offset, limit, antigravity_event_pairs)
+}
+
+fn visit_antigravity_events(path: &Path, mut emit: impl FnMut(&str, Value) -> bool) {
+    visit_json_lines(path, |value| {
+        for (kind, payload) in antigravity_event_pairs(&value) {
+            if !emit(&kind, payload) {
+                return false;
             }
-            Some("PLANNER_RESPONSE") => {
-                if let Some(text) = value.get("content").and_then(Value::as_str) {
-                    let trimmed = text.trim();
-                    if !trimmed.is_empty() {
-                        push_event(
-                            &mut out,
-                            "token",
-                            serde_json::json!({ "text": cap_text(trimmed) }),
-                        );
-                    }
-                }
-            }
-            _ => {}
         }
-        if let Some(calls) = value.get("tool_calls").and_then(Value::as_array) {
-            for call in calls {
-                let name = call.get("name").and_then(Value::as_str).unwrap_or("tool");
-                let input = call.get("args").map(compact_json).unwrap_or_default();
-                push_event(
-                    &mut out,
-                    "toolCall",
-                    serde_json::json!({ "name": name, "input": cap_text(&input) }),
-                );
+        true
+    });
+}
+
+fn antigravity_event_pairs(value: &Value) -> Vec<(String, Value)> {
+    let mut events = Vec::new();
+    match value.get("type").and_then(Value::as_str) {
+        Some("USER_INPUT") => {
+            if let Some(text) = antigravity_user_text(value) {
+                events.push(("prompt".to_string(), serde_json::json!({ "text": text })));
             }
+        }
+        Some("PLANNER_RESPONSE") => {
+            if let Some(text) = value.get("content").and_then(Value::as_str) {
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    events.push(("token".to_string(), serde_json::json!({ "text": trimmed })));
+                }
+            }
+        }
+        _ => {}
+    }
+    if let Some(calls) = value.get("tool_calls").and_then(Value::as_array) {
+        for call in calls {
+            let name = call.get("name").and_then(Value::as_str).unwrap_or("tool");
+            let input = call.get("args").map(compact_json).unwrap_or_default();
+            events.push((
+                "toolCall".to_string(),
+                serde_json::json!({ "name": name, "input": input }),
+            ));
         }
     }
-    out
+    events
 }
 
 /// Pull the real prompt out of an Antigravity `USER_INPUT` step. Its `content`
@@ -840,7 +898,7 @@ fn antigravity_user_text(value: &Value) -> Option<String> {
     let content = value.get("content").and_then(Value::as_str)?;
     let inner = extract_xml_tag(content, "USER_REQUEST").unwrap_or(content);
     let trimmed = inner.trim();
-    (!trimmed.is_empty()).then(|| cap_text(trimmed))
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 /// Extract the text between `<tag>` and `</tag>`. Returns `None` if either
@@ -895,7 +953,7 @@ fn antigravity_workspace(transcript_path: &Path) -> Option<String> {
     let conversation_id = id_dir.file_name()?.to_str()?;
     let cli_root = id_dir.parent()?.parent()?;
     let history = cli_root.join("history.jsonl");
-    for value in read_json_lines(&history, MAX_EVENTS_PER_SESSION, MAX_SESSION_FILE_BYTES) {
+    for value in read_json_lines(&history) {
         if value.get("conversationId").and_then(Value::as_str) == Some(conversation_id) {
             if let Some(ws) = value.get("workspace").and_then(Value::as_str) {
                 let trimmed = ws.trim();
@@ -908,25 +966,79 @@ fn antigravity_workspace(transcript_path: &Path) -> Option<String> {
     None
 }
 
-fn read_json_lines(path: &Path, max_lines: usize, max_bytes: u64) -> Vec<Value> {
+fn read_json_lines(path: &Path) -> Vec<Value> {
+    let mut values = Vec::new();
+    visit_json_lines(path, |value| {
+        values.push(value);
+        true
+    });
+    values
+}
+
+fn visit_json_lines(path: &Path, mut visit: impl FnMut(Value) -> bool) {
     let Ok(file) = fs::File::open(path) else {
-        return Vec::new();
+        return;
     };
-    // Read at most `max_bytes` (a session transcript can be tens of MB and grows while
-    // active), decode lossily, then split into lines. Reading bytes + `from_utf8_lossy`
-    // means a stray non-UTF-8 byte can neither abort the parse (which `lines().map_while`
-    // would do, truncating later events) nor spin a fallible iterator — it is simply
-    // replaced with U+FFFD. A trailing line cut mid-way by the byte cap fails to parse
-    // and is dropped, which is harmless.
-    let mut bytes = Vec::new();
-    if file.take(max_bytes).read_to_end(&mut bytes).is_err() {
-        return Vec::new();
+    // Stream line-by-line instead of applying a byte/event budget. Individual malformed
+    // or non-UTF-8 lines are skipped, but later valid lines are still parsed.
+    for value in BufReader::new(file)
+        .split(b'\n')
+        .filter_map(Result::ok)
+        .filter_map(|line| String::from_utf8(line).ok())
+        .filter_map(|line| serde_json::from_str::<Value>(&line).ok())
+    {
+        if !visit(value) {
+            break;
+        }
     }
-    String::from_utf8_lossy(&bytes)
-        .lines()
-        .take(max_lines)
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .collect()
+}
+
+fn visit_json_lines_reversed(path: &Path, mut visit: impl FnMut(Value) -> bool) {
+    const CHUNK_SIZE: u64 = 64 * 1024;
+    let Ok(mut file) = fs::File::open(path) else {
+        return;
+    };
+    let Ok(mut pos) = file.seek(SeekFrom::End(0)) else {
+        return;
+    };
+    let mut carry: Vec<u8> = Vec::new();
+
+    while pos > 0 {
+        let read_size = pos.min(CHUNK_SIZE);
+        pos -= read_size;
+        if file.seek(SeekFrom::Start(pos)).is_err() {
+            return;
+        }
+        let mut chunk = vec![0; read_size as usize];
+        if file.read_exact(&mut chunk).is_err() {
+            return;
+        }
+        chunk.extend_from_slice(&carry);
+        let mut parts = chunk.split(|b| *b == b'\n').collect::<Vec<_>>();
+        carry = parts.first().map_or_else(Vec::new, |part| part.to_vec());
+        for part in parts.drain(1..).rev() {
+            if part.is_empty() {
+                continue;
+            }
+            let Ok(line) = std::str::from_utf8(part) else {
+                continue;
+            };
+            let Ok(value) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            if !visit(value) {
+                return;
+            }
+        }
+    }
+
+    if !carry.is_empty() {
+        if let Ok(line) = std::str::from_utf8(&carry) {
+            if let Ok(value) = serde_json::from_str::<Value>(line) {
+                let _ = visit(value);
+            }
+        }
+    }
 }
 
 /// Extract a real user prompt's text from a Claude `type:"user"` entry.
@@ -941,7 +1053,7 @@ fn claude_user_text(value: &Value) -> Option<String> {
 
     if let Some(s) = content.as_str() {
         let trimmed = s.trim();
-        return (!trimmed.is_empty()).then(|| cap_text(trimmed));
+        return (!trimmed.is_empty()).then(|| trimmed.to_string());
     }
 
     if let Some(blocks) = content.as_array() {
@@ -952,7 +1064,7 @@ fn claude_user_text(value: &Value) -> Option<String> {
             .collect::<Vec<_>>()
             .join("\n");
         let trimmed = text.trim();
-        return (!trimmed.is_empty()).then(|| cap_text(trimmed));
+        return (!trimmed.is_empty()).then(|| trimmed.to_string());
     }
 
     None
@@ -979,25 +1091,63 @@ fn message_content_text(content: Option<&Value>) -> String {
         .join("\n")
 }
 
-fn push_usage(out: &mut Vec<StoredEvent>, usage: &Value, model: Option<&str>) {
-    push_event(
-        out,
-        "usage",
-        serde_json::json!({
-            "inputTokens": usage.get("input_tokens").and_then(Value::as_u64).unwrap_or(0),
-            "outputTokens": usage.get("output_tokens").and_then(Value::as_u64).unwrap_or(0),
-            "cacheReadTokens": usage.get("cache_read_input_tokens").and_then(Value::as_u64).unwrap_or(0),
-            "cacheCreationTokens": usage.get("cache_creation_input_tokens").and_then(Value::as_u64).unwrap_or(0),
-            "costUsd": null,
-            "model": model,
-        }),
-    );
+fn usage_payload(usage: &Value, model: Option<&str>) -> Value {
+    serde_json::json!({
+        "inputTokens": usage.get("input_tokens").and_then(Value::as_u64).unwrap_or(0),
+        "outputTokens": usage.get("output_tokens").and_then(Value::as_u64).unwrap_or(0),
+        "cacheReadTokens": usage.get("cache_read_input_tokens").and_then(Value::as_u64).unwrap_or(0),
+        "cacheCreationTokens": usage.get("cache_creation_input_tokens").and_then(Value::as_u64).unwrap_or(0),
+        "costUsd": null,
+        "model": model,
+    })
+}
+
+fn slice_recent_events(events: Vec<StoredEvent>, offset: usize, limit: usize) -> Vec<StoredEvent> {
+    if limit == 0 || offset >= events.len() {
+        return Vec::new();
+    }
+    let end = events.len() - offset;
+    let start = end.saturating_sub(limit);
+    events[start..end].to_vec()
+}
+
+fn reverse_events_page(
+    path: &Path,
+    offset: usize,
+    limit: usize,
+    pairs: impl Fn(&Value) -> Vec<(String, Value)>,
+) -> Vec<StoredEvent> {
+    let mut seen = 0_usize;
+    let mut newest_first: Vec<(String, Value)> = Vec::new();
+    visit_json_lines_reversed(path, |value| {
+        let mut events = pairs(&value);
+        while let Some((kind, payload)) = events.pop() {
+            if seen < offset {
+                seen = seen.saturating_add(1);
+                continue;
+            }
+            if newest_first.len() >= limit {
+                return false;
+            }
+            newest_first.push((kind, payload));
+            seen = seen.saturating_add(1);
+        }
+        true
+    });
+    newest_first.reverse();
+    newest_first
+        .into_iter()
+        .enumerate()
+        .map(|(seq, (kind, payload))| StoredEvent {
+            seq: seq as i64,
+            kind,
+            payload_json: payload.to_string(),
+            ts: 0,
+        })
+        .collect()
 }
 
 fn push_event(out: &mut Vec<StoredEvent>, kind: &str, payload: Value) {
-    if out.len() >= MAX_EVENTS_PER_SESSION {
-        return;
-    }
     out.push(StoredEvent {
         seq: out.len() as i64,
         kind: kind.to_string(),
@@ -1042,19 +1192,6 @@ fn title_from_text(text: &str) -> String {
     } else {
         capped
     }
-}
-
-fn cap_text(text: &str) -> String {
-    if text.len() <= MAX_TEXT_BYTES {
-        return text.to_string();
-    }
-    let mut end = MAX_TEXT_BYTES;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    let mut out = text[..end].to_string();
-    out.push_str("\n\n[Truncated by Kineloop while reading external CLI history.]");
-    out
 }
 
 fn external_id(agent: &str, path: &Path) -> String {
@@ -1122,6 +1259,16 @@ fn events_for_session_in(home: &Path, session_id: &str) -> Option<Vec<StoredEven
 }
 
 #[cfg(test)]
+fn events_page_for_session_in(
+    home: &Path,
+    session_id: &str,
+    offset: usize,
+    limit: usize,
+) -> Option<Vec<StoredEvent>> {
+    events_page_for_session_from(&test_roots(home), session_id, offset, limit)
+}
+
+#[cfg(test)]
 fn repo_for_session_in(home: &Path, session_id: &str) -> Option<PathBuf> {
     repo_for_session_from(&test_roots(home), session_id)
 }
@@ -1139,9 +1286,8 @@ mod tests {
 
     #[test]
     fn lists_oversized_claude_session() {
-        // Regression: an active transcript can exceed the per-read byte budget (this one
-        // is >8 MB). It must still appear in the list — summary fields (title, repo) live
-        // in the first lines and are read within SUMMARY_READ_BYTES.
+        // Regression: an active transcript can grow very large. It must still appear in
+        // the list, and the summary counts must include events after the old 8 MB budget.
         let home = temp_home("claude-big");
         let dir = home.join(".claude/projects/-repo");
         fs::create_dir_all(&dir).unwrap();
@@ -1151,7 +1297,9 @@ mod tests {
             r#"{"type":"user","cwd":"/work/repo","gitBranch":"main","message":{"role":"user","content":"Find the bug"}}"#,
         );
         content.push('\n');
-        // Pad past 8 MB with valid assistant lines so the file far exceeds any read cap.
+        // Pad past 8 MB with valid assistant lines so the file exceeds the old read cap,
+        // then add another user turn after that boundary. The second turn proves the
+        // summary parser did not stop early.
         let filler = format!(
             "{}\n",
             format_args!(
@@ -1162,7 +1310,10 @@ mod tests {
         while content.len() < 9 * 1024 * 1024 {
             content.push_str(&filler);
         }
-        assert!(content.len() > MAX_SESSION_FILE_BYTES as usize);
+        content.push_str(
+            r#"{"type":"user","cwd":"/work/repo","gitBranch":"main","message":{"role":"user","content":"After old cap"}}"#,
+        );
+        content.push('\n');
         fs::write(&path, &content).unwrap();
 
         let sessions = list_sessions_in(&home);
@@ -1170,21 +1321,42 @@ mod tests {
         assert_eq!(sessions[0].agent, "claude");
         assert_eq!(sessions[0].title, "Find the bug");
         assert_eq!(sessions[0].repo, "/work/repo");
+        assert_eq!(sessions[0].turn_count, Some(2));
+
+        let events = events_for_session_in(&home, &sessions[0].id).unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|event| event.payload_json.contains("After old cap")),
+            "events after the old byte cap must still be returned"
+        );
+        let first_page = events_page_for_session_in(&home, &sessions[0].id, 0, 1).unwrap();
+        let second_page = events_page_for_session_in(&home, &sessions[0].id, 1, 1).unwrap();
+        assert_eq!(first_page.len(), 1);
+        assert_eq!(second_page.len(), 1);
+        assert!(
+            first_page[0].payload_json.contains("After old cap"),
+            "first page must start from the newest end of the transcript"
+        );
+        assert!(
+            !second_page[0].payload_json.contains("After old cap"),
+            "second page must move older from the newest page"
+        );
 
         let _ = fs::remove_dir_all(home);
     }
 
     #[test]
-    fn read_json_lines_respects_byte_budget() {
-        let home = temp_home("budget");
+    fn read_json_lines_reads_all_valid_lines() {
+        let home = temp_home("all-lines");
         let path = home.join("lines.jsonl");
         let line = r#"{"n":1}"#;
-        // Three identical ~8-byte lines; a budget covering only the first ~1.5 lines must
-        // yield just the first fully-parsed line (a mid-cut trailing line is dropped).
-        fs::write(&path, format!("{line}\n{line}\n{line}\n")).unwrap();
-        let got = read_json_lines(&path, 100, 10);
-        assert_eq!(got.len(), 1);
-        assert_eq!(got[0].get("n").and_then(Value::as_u64), Some(1));
+        fs::write(&path, format!("{line}\nnot json\n{line}\n{line}\n")).unwrap();
+        let got = read_json_lines(&path);
+        assert_eq!(got.len(), 3);
+        assert!(got
+            .iter()
+            .all(|value| value.get("n").and_then(Value::as_u64) == Some(1)));
         let _ = fs::remove_dir_all(home);
     }
 
@@ -1192,9 +1364,7 @@ mod tests {
     fn readable_session_file_does_not_reject_large_files() {
         let home = temp_home("readable");
         let path = home.join("big.jsonl");
-        // A file larger than the read budget is still a valid candidate (size is bounded
-        // at read time, not by hiding the session).
-        fs::write(&path, "x".repeat((MAX_SESSION_FILE_BYTES + 1024) as usize)).unwrap();
+        fs::write(&path, "x".repeat(9 * 1024 * 1024)).unwrap();
         assert!(readable_session_file(&path));
         let _ = fs::remove_dir_all(home);
     }

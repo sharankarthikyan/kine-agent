@@ -1,5 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { listSessions, sessionEvents, type SessionSummary, type StoredEvent } from "../sessions";
+import {
+  listSessions,
+  sessionEvents,
+  sessionEventsPage,
+  type SessionSummary,
+  type StoredEvent,
+} from "../sessions";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
@@ -22,5 +28,21 @@ describe("sessions client", () => {
     vi.mocked(invoke).mockResolvedValue(events);
     expect(await sessionEvents("s1")).toEqual(events);
     expect(invoke).toHaveBeenCalledWith("session_events", { sessionId: "s1" });
+  });
+
+  it("sessionEventsPage invokes session_events_page with sessionId, offset, and limit", async () => {
+    const { invoke } = await import("@tauri-apps/api/core");
+    const page = {
+      events: [{ seq: 10, kind: "prompt", payloadJson: '{"text":"hi"}', ts: 1 }],
+      nextOffset: 11,
+      hasMore: true,
+    };
+    vi.mocked(invoke).mockResolvedValue(page);
+    expect(await sessionEventsPage("s1", 10, 50)).toEqual(page);
+    expect(invoke).toHaveBeenCalledWith("session_events_page", {
+      sessionId: "s1",
+      offset: 10,
+      limit: 50,
+    });
   });
 });

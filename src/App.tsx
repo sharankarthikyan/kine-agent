@@ -38,6 +38,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Toaster } from "@/components/ui/sonner";
 import {
   cleanupSession,
+  continueExternalSession,
   listTrustedRepos,
   pickRepository,
   startSession,
@@ -55,7 +56,9 @@ import {
 import { reviewSession, type SessionDiff } from "./lib/review";
 import {
   listSessions,
+  renameSession,
   sessionEvents,
+  sessionEventsPage,
   type SessionSummary,
   type StoredEvent,
 } from "./lib/sessions";
@@ -105,9 +108,15 @@ const CENTER_MIN_WIDTH = 360;
 const MAX_SESSION_PANES = 4;
 const MIN_SPLIT_PANE_WIDTH = 520;
 const MIN_SPLIT_PANE_HEIGHT = 340;
+const EXTERNAL_EVENT_PAGE_SIZE = 300;
 
 type SplitDirection = "vertical" | "horizontal";
 type SessionPane = { id: string; sessionId: string | null };
+type EventPageState = {
+  nextOffset: number;
+  hasMore: boolean;
+  loadingMore: boolean;
+};
 
 function clampNumber(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -146,6 +155,10 @@ function safeErrorMessage(err: unknown): string {
 export default function App() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [turnsBySession, setTurnsBySession] = useState<Record<string, Turn[]>>({});
+  const [eventsBySession, setEventsBySession] = useState<Record<string, StoredEvent[]>>({});
+  const [eventPagesBySession, setEventPagesBySession] = useState<
+    Record<string, EventPageState>
+  >({});
   const [panes, setPanes] = useState<SessionPane[]>([
     { id: "pane-primary", sessionId: null },
   ]);
@@ -289,14 +302,62 @@ export default function App() {
   async function loadSessionEvents(sessionId: string) {
     setSessionLoading(sessionId, true);
     try {
-      const ev = await sessionEvents(sessionId);
-      setSessionTurns(sessionId, turnsFromEvents(ev));
-      if (activeSessionIdRef.current === sessionId) setStoredEvents(ev);
+      const page = await sessionEventsPage(sessionId, 0, EXTERNAL_EVENT_PAGE_SIZE);
+      setEventsBySession((prev) => ({ ...prev, [sessionId]: page.events }));
+      setEventPagesBySession((prev) => ({
+        ...prev,
+        [sessionId]: {
+          nextOffset: page.nextOffset,
+          hasMore: page.hasMore,
+          loadingMore: false,
+        },
+      }));
+      setSessionTurns(sessionId, turnsFromEvents(page.events));
+      if (activeSessionIdRef.current === sessionId) setStoredEvents(page.events);
     } catch {
+      setEventsBySession((prev) => ({ ...prev, [sessionId]: [] }));
+      setEventPagesBySession((prev) => ({
+        ...prev,
+        [sessionId]: { nextOffset: 0, hasMore: false, loadingMore: false },
+      }));
       setSessionTurns(sessionId, []);
       if (activeSessionIdRef.current === sessionId) setStoredEvents([]);
     } finally {
       setSessionLoading(sessionId, false);
+    }
+  }
+
+  async function loadMoreSessionEvents(sessionId: string) {
+    const pageState = eventPagesBySession[sessionId];
+    if (!pageState?.hasMore || pageState.loadingMore) return;
+    setEventPagesBySession((prev) => ({
+      ...prev,
+      [sessionId]: { ...pageState, loadingMore: true },
+    }));
+    try {
+      const page = await sessionEventsPage(
+        sessionId,
+        pageState.nextOffset,
+        EXTERNAL_EVENT_PAGE_SIZE,
+      );
+      const merged = [...page.events, ...(eventsBySession[sessionId] ?? [])];
+      setEventsBySession((prev) => ({ ...prev, [sessionId]: merged }));
+      setSessionTurns(sessionId, turnsFromEvents(merged));
+      if (activeSessionIdRef.current === sessionId) setStoredEvents(merged);
+      setEventPagesBySession((prev) => ({
+        ...prev,
+        [sessionId]: {
+          nextOffset: page.nextOffset,
+          hasMore: page.hasMore,
+          loadingMore: false,
+        },
+      }));
+    } catch {
+      setEventPagesBySession((prev) => ({
+        ...prev,
+        [sessionId]: { ...pageState, loadingMore: false },
+      }));
+      toast.error("Could not load more of this CLI session.");
     }
   }
 
@@ -347,6 +408,23 @@ export default function App() {
       return [];
     }
   }, []);
+
+  // Rename a session: optimistically update the row, then reconcile with the
+  // canonical (trimmed/capped) title the backend stores. On failure, revert by
+  // re-fetching the list and surface the error.
+  const handleRenameSession = useCallback(
+    async (id: string, title: string) => {
+      setSessions((prev) => prev.map((s) => (s.id === id ? { ...s, title } : s)));
+      try {
+        const stored = await renameSession(id, title);
+        setSessions((prev) => prev.map((s) => (s.id === id ? { ...s, title: stored } : s)));
+      } catch (e) {
+        toast.error(typeof e === "string" ? e : "Failed to rename session.");
+        void refreshSessions();
+      }
+    },
+    [refreshSessions],
+  );
 
   // Discover installed agents and their available models on mount.
   // Best-effort — no-op in the browser preview where IPC is unavailable.
@@ -620,6 +698,14 @@ export default function App() {
       }
       if (closing?.sessionId && !next.some((pane) => pane.sessionId === closing.sessionId)) {
         setTurnsBySession((cache) => {
+          const { [closing.sessionId!]: _removed, ...rest } = cache;
+          return rest;
+        });
+        setEventsBySession((cache) => {
+          const { [closing.sessionId!]: _removed, ...rest } = cache;
+          return rest;
+        });
+        setEventPagesBySession((cache) => {
           const { [closing.sessionId!]: _removed, ...rest } = cache;
           return rest;
         });
@@ -929,14 +1015,18 @@ export default function App() {
     model: ModelInfo | null,
     opts?: { repo?: string; permissionMode?: string; agent?: string },
   ) {
-    if (activeSession?.source === "external") {
-      toast.error("External CLI sessions are read-only in Kineloop.");
-      return;
-    }
     const currentSessionId = activeSessionIdRef.current;
-    const isNew = currentSessionId === null;
-    const sessionId = currentSessionId ?? crypto.randomUUID();
-    const repo = opts?.repo ?? ".";
+    const currentSession =
+      sessions.find((session) => session.id === currentSessionId) ?? null;
+    const isExternalContinuation = currentSession?.source === "external";
+    const isNew = currentSessionId === null || isExternalContinuation;
+    const sessionId = isNew ? crypto.randomUUID() : currentSessionId;
+    const repo = opts?.repo ?? currentSession?.repo ?? ".";
+    const modelArg = model?.value;
+    const preferredAgent = opts?.agent ?? model?.agent ?? currentSession?.agent ?? "claude";
+    const startAgent = isAgentSpawnable(preferredAgent)
+      ? preferredAgent
+      : (selectedModel?.agent ?? "claude");
     // Set the ref synchronously before the first await so the cross-session guard
     // is exact for new sessions (id now known up front, not after startSession resolves).
     setActive(sessionId);
@@ -950,7 +1040,7 @@ export default function App() {
         ? { ...existing, status: "running", updatedAt: now }
         : {
             id: sessionId,
-            agent: opts?.agent ?? model?.agent ?? "claude",
+            agent: startAgent,
             repo,
             branch: `agent/${sessionId}`,
             title: titleFromPrompt(text),
@@ -977,10 +1067,18 @@ export default function App() {
     // on new sessions — follow-ups resume the agent recorded on the session row.
     // Prefer the explicitly-chosen agent (from the New Session picker) over the
     // model's agent, which can momentarily lag while a new agent's models load.
-    const modelArg = model?.value;
-    const startAgent = opts?.agent ?? model?.agent ?? "claude";
     try {
-      if (isNew) {
+      if (isExternalContinuation && currentSessionId) {
+        await continueExternalSession({
+          externalSessionId: currentSessionId,
+          prompt: text,
+          sessionId,
+          agent: startAgent,
+          model: modelArg,
+          permissionMode: opts?.permissionMode ?? (autoEdit ? "acceptEdits" : "default"),
+          onEvent,
+        });
+      } else if (isNew) {
         await startSession({
           prompt: text,
           repo,
@@ -1007,14 +1105,22 @@ export default function App() {
         next.delete(sessionId);
         return next;
       });
-      await refreshSessions();
-      if (activeSessionIdRef.current === sessionId) {
+      const refreshed = await refreshSessions();
+      const persisted = refreshed.some((session) => session.id === sessionId);
+      if (!persisted && activeSessionIdRef.current === sessionId) {
+        const fallbackSessionId =
+          isExternalContinuation && currentSessionId ? currentSessionId : null;
+        setActive(fallbackSessionId);
+        updateFocusedPaneSession(fallbackSessionId);
+      }
+      if (persisted && activeSessionIdRef.current === sessionId) {
         // Refresh this session's diffstat so the sidebar row + SessionHeader stay
         // current after files are edited — one targeted call, not a fan-out.
         void fetchDiffstat(sessionId);
         await refreshDiff(sessionId);
         try {
           const ev = await sessionEvents(sessionId);
+          setEventsBySession((prev) => ({ ...prev, [sessionId]: ev }));
           setSessionTurns(sessionId, turnsFromEvents(ev));
           if (activeSessionIdRef.current === sessionId) setStoredEvents(ev);
         } catch {
@@ -1043,21 +1149,9 @@ export default function App() {
       updateFocusedPaneSession(id);
     }
     setActive(id);
-    setSessionLoading(id, true);
     closeRight();
     resetFocusedSessionState();
-    try {
-      const ev = await sessionEvents(id);
-      if (activeSessionIdRef.current !== id) return;
-      setStoredEvents(ev);
-      setSessionTurns(id, turnsFromEvents(ev));
-    } catch {
-      if (activeSessionIdRef.current !== id) return;
-      setStoredEvents([]);
-      setSessionTurns(id, []);
-    } finally {
-      setSessionLoading(id, false);
-    }
+    await loadSessionEvents(id);
     if (selected?.source !== "external") {
       await refreshDiff(id);
     }
@@ -1195,6 +1289,7 @@ export default function App() {
                 sourceFilter={sourceFilter}
                 onStatusFilterChange={setStatusFilter}
                 onSourceFilterChange={setSourceFilter}
+                onRename={handleRenameSession}
                 onOpenCustomization={(section) => {
                   setCustSection(section);
                   setCustDialogOpen(true);
@@ -1253,6 +1348,19 @@ export default function App() {
                   pane.sessionId !== null
                     ? (turnsBySession[pane.sessionId] ?? [])
                     : [];
+                const paneEventPage =
+                  pane.sessionId !== null
+                    ? eventPagesBySession[pane.sessionId]
+                    : undefined;
+                const importedAgent = paneSession?.agent ?? "claude";
+                const paneAgent = isAgentSpawnable(importedAgent)
+                  ? importedAgent
+                  : (selectedModel?.agent ?? models[0]?.agent ?? "claude");
+                const paneModels = models.filter((m) => m.agent === paneAgent);
+                const paneModel =
+                  selectedModel?.agent === paneAgent
+                    ? selectedModel
+                    : (paneModels[0] ?? null);
                 return (
                   <section
                     key={pane.id}
@@ -1323,6 +1431,11 @@ export default function App() {
                           diffstat={diffstats[pane.sessionId] ?? null}
                           onClose={() => closePane(pane.id)}
                           onCleanup={() => void handleCleanupSession()}
+                          onRename={
+                            paneSession
+                              ? (t) => void handleRenameSession(paneSession.id, t)
+                              : undefined
+                          }
                           panelOpen={paneFocused && rightTab !== null}
                           onTogglePanel={() => {
                             if (!paneFocused) {
@@ -1349,6 +1462,13 @@ export default function App() {
                               <Conversation
                                 turns={paneTurns}
                                 running={paneRunning}
+                                hasMore={paneEventPage?.hasMore ?? false}
+                                loadingMore={paneEventPage?.loadingMore ?? false}
+                                onLoadMore={
+                                  pane.sessionId !== null
+                                    ? () => void loadMoreSessionEvents(pane.sessionId!)
+                                    : undefined
+                                }
                                 onOpenFile={(path) => {
                                   if (!paneFocused) focusPane(pane);
                                   void handleOpenFile(path);
@@ -1357,23 +1477,15 @@ export default function App() {
                             )}
                           </div>
                         </div>
-                        {paneSession?.source === "external" ? (
-                          <div className="border-t border-border px-4 py-3 text-sm text-muted-foreground">
-                            External CLI history is read-only in Kineloop.
-                          </div>
-                        ) : (
-                          <PromptBar
-                            onStart={handleSend}
-                            running={paneRunning}
-                            models={models.filter(
-                              (m) => m.agent === (paneSession?.agent ?? "claude"),
-                            )}
-                            model={selectedModel}
-                            onModelChange={handleModelChange}
-                            autoEdit={autoEdit}
-                            onAutoEditChange={setAutoEdit}
-                          />
-                        )}
+                        <PromptBar
+                          onStart={handleSend}
+                          running={paneRunning}
+                          models={paneModels}
+                          model={paneModel}
+                          onModelChange={handleModelChange}
+                          autoEdit={autoEdit}
+                          onAutoEditChange={setAutoEdit}
+                        />
                       </>
                     )}
                   </section>

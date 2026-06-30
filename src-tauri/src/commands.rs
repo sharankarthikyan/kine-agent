@@ -9,6 +9,7 @@ use crate::inspect::{
 use crate::review::{self, Diffstat, SessionDiff};
 use crate::store::{self, SessionStore, SessionSummary, StoredEvent};
 use crate::worktree;
+use serde::Serialize;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,6 +23,14 @@ use tokio::sync::mpsc;
 #[derive(Default)]
 pub struct RunRegistry {
     active: Mutex<HashSet<String>>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionEventsPage {
+    pub events: Vec<StoredEvent>,
+    pub next_offset: usize,
+    pub has_more: bool,
 }
 
 struct RunGuard<'a> {
@@ -178,6 +187,75 @@ fn title_from_prompt(prompt: &str) -> String {
     }
 }
 
+fn json_string(value: &serde_json::Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.trim().to_string())
+}
+
+fn external_event_excerpt(event: &StoredEvent) -> Option<String> {
+    let payload: serde_json::Value = serde_json::from_str(&event.payload_json).ok()?;
+    match event.kind.as_str() {
+        "prompt" => json_string(&payload, "text").map(|text| format!("User: {text}")),
+        "token" => json_string(&payload, "text").map(|text| format!("Assistant: {text}")),
+        "toolCall" => {
+            let name = json_string(&payload, "name").unwrap_or_else(|| "tool".to_string());
+            let input = json_string(&payload, "input").unwrap_or_default();
+            Some(if input.is_empty() {
+                format!("Tool call: {name}")
+            } else {
+                format!("Tool call: {name} {input}")
+            })
+        }
+        "fileWrite" => json_string(&payload, "path").map(|path| format!("File changed: {path}")),
+        "done" => {
+            json_string(&payload, "summary").map(|summary| format!("Assistant summary: {summary}"))
+        }
+        "error" => json_string(&payload, "message").map(|message| format!("Error: {message}")),
+        _ => None,
+    }
+}
+
+fn build_external_continuation_prompt(
+    external_session_id: &str,
+    original_agent: &str,
+    continuation_agent: &str,
+    repo: &Path,
+    prompt: &str,
+    events: &[StoredEvent],
+) -> String {
+    let transcript = events
+        .iter()
+        .filter_map(external_event_excerpt)
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    format!(
+        "You are continuing an imported CLI history session inside Kineloop.\n\
+         External session id: {external_session_id}\n\
+         Original agent: {original_agent}\n\
+         Continuation agent: {continuation_agent}\n\
+         Repository: {}\n\n\
+         Treat the transcript below as prior conversation context. Do not assume the old CLI process is still alive. \
+         Continue from the user's new request using the current repository state.\n\n\
+         --- Imported transcript ---\n\
+         {transcript}\n\
+         --- End imported transcript ---\n\n\
+         New user request:\n\
+         {prompt}",
+        repo.display()
+    )
+}
+
+fn original_agent_from_external_session_id(session_id: &str) -> Result<String, String> {
+    let mut parts = session_id.split(':');
+    match (parts.next(), parts.next()) {
+        (Some("external"), Some(agent)) if !agent.is_empty() => Ok(agent.to_string()),
+        _ => Err("session is not an imported CLI session".to_string()),
+    }
+}
+
 /// Root under which per-session worktrees are created (outside any target repo).
 ///
 /// Uses a stable per-user directory (`<home>/.kineloop/worktrees`), NOT the system
@@ -266,10 +344,9 @@ fn validate_model(model: Option<String>) -> Result<Option<String>, String> {
         if m.is_empty() || m.len() > 128 {
             return Err("model name must be between 1 and 128 characters".to_string());
         }
-        if !m
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':' | ' ' | '(' | ')'))
-        {
+        if !m.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':' | ' ' | '(' | ')')
+        }) {
             return Err(format!("invalid model name: {m}"));
         }
     }
@@ -343,6 +420,70 @@ pub async fn list_trusted_repos(store: State<'_, SessionStore>) -> Result<Vec<St
     store.trusted_repos().await.map_err(|e| e.to_string())
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn create_session_and_run(
+    store: &SessionStore,
+    session_id: String,
+    agent: String,
+    repo_path: PathBuf,
+    repo: String,
+    display_prompt: String,
+    agent_prompt: String,
+    model: Option<String>,
+    permission_mode: Option<String>,
+    on_event: Channel<AgentEvent>,
+) -> Result<(), String> {
+    let root = worktrees_root();
+    let sid = session_id.clone();
+    let create_repo_path = repo_path.clone();
+    let wt = tokio::task::spawn_blocking(move || worktree::create(&create_repo_path, &root, &sid))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+
+    if let Err(e) = store
+        .create_session(
+            &session_id,
+            &agent,
+            &repo,
+            &wt.path.display().to_string(),
+            &wt.branch,
+            &title_from_prompt(&display_prompt),
+        )
+        .await
+    {
+        let cleanup_repo = repo_path.clone();
+        let _ = tokio::task::spawn_blocking(move || worktree::remove(&cleanup_repo, &wt)).await;
+        return Err(e.to_string());
+    }
+    if let Err(e) = store
+        .append_event(
+            &session_id,
+            "prompt",
+            &serde_json::json!({ "text": display_prompt }).to_string(),
+        )
+        .await
+    {
+        eprintln!("failed to persist prompt for session {session_id}: {e}");
+    }
+
+    run_persisting(
+        store,
+        session_id,
+        agent,
+        Prompt {
+            text: agent_prompt,
+            model,
+            permission_mode,
+        },
+        wt.path,
+        false,
+        None,
+        on_event,
+    )
+    .await
+}
+
 /// Start a session: create an isolated worktree off `repo` for `session_id`, persist
 /// the session + prompt, then run the Claude agent inside it (streaming + persisting
 /// events). The worktree is left in place for review; `cleanup_session` removes it.
@@ -378,54 +519,83 @@ pub async fn start_session(
         .await
         .map_err(|e| e.to_string())??;
     let repo = ensure_trusted_repo(&store, &repo_path).await?;
-    let root = worktrees_root();
-    let sid = session_id.clone();
-    let create_repo_path = repo_path.clone();
-    let wt = tokio::task::spawn_blocking(move || worktree::create(&create_repo_path, &root, &sid))
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())?;
 
-    // Persist the session row + the user's prompt (seq 0) before streaming.
-    if let Err(e) = store
-        .create_session(
-            &session_id,
-            &agent,
-            &repo,
-            &wt.path.display().to_string(),
-            &wt.branch,
-            &title_from_prompt(&prompt),
-        )
-        .await
-    {
-        // Roll back the just-created worktree off the async runtime (git subprocess).
-        let cleanup_repo = repo_path.clone();
-        let _ = tokio::task::spawn_blocking(move || worktree::remove(&cleanup_repo, &wt)).await;
-        return Err(e.to_string());
-    }
-    if let Err(e) = store
-        .append_event(
-            &session_id,
-            "prompt",
-            &serde_json::json!({ "text": prompt }).to_string(),
-        )
-        .await
-    {
-        eprintln!("failed to persist prompt for session {session_id}: {e}");
-    }
-
-    run_persisting(
+    create_session_and_run(
         &store,
         session_id,
         agent,
-        Prompt {
-            text: prompt,
-            model,
-            permission_mode,
-        },
-        wt.path,
-        false,
-        None,
+        repo_path,
+        repo,
+        prompt.clone(),
+        prompt,
+        model,
+        permission_mode,
+        on_event,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub async fn continue_external_session(
+    external_session_id: String,
+    prompt: String,
+    session_id: String,
+    agent: Option<String>,
+    model: Option<String>,
+    permission_mode: Option<String>,
+    on_event: Channel<AgentEvent>,
+    store: State<'_, SessionStore>,
+    runs: State<'_, RunRegistry>,
+) -> Result<(), String> {
+    let _guard = runs.acquire(&session_id)?;
+    let original_agent = original_agent_from_external_session_id(&external_session_id)?;
+    let default_agent = SPAWNABLE_AGENTS
+        .contains(&original_agent.as_str())
+        .then(|| original_agent.clone());
+    let agent = validate_agent(agent.or(default_agent))?;
+    let permission_mode = validate_permission_mode(permission_mode)?;
+    let model = validate_model(model)?;
+
+    let repo_lookup_id = external_session_id.clone();
+    let repo_path = tokio::task::spawn_blocking(move || {
+        external_sessions::repo_for_session(&repo_lookup_id)
+            .ok_or_else(|| "imported CLI session does not record a repository path".to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    let repo_path = tokio::task::spawn_blocking(move || canonical_repo_path(repo_path))
+        .await
+        .map_err(|e| e.to_string())??;
+    let repo = ensure_trusted_repo(&store, &repo_path).await?;
+
+    let events_lookup_id = external_session_id.clone();
+    let external_events = tokio::task::spawn_blocking(move || {
+        external_sessions::events_for_session(&events_lookup_id)
+            .ok_or_else(|| "imported CLI session not found".to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
+    let agent_prompt = build_external_continuation_prompt(
+        &external_session_id,
+        &original_agent,
+        &agent,
+        &repo_path,
+        &prompt,
+        &external_events,
+    );
+
+    create_session_and_run(
+        &store,
+        session_id,
+        agent,
+        repo_path,
+        repo,
+        prompt,
+        agent_prompt,
+        model,
+        permission_mode,
         on_event,
     )
     .await
@@ -551,8 +721,61 @@ pub async fn list_sessions(store: State<'_, SessionStore>) -> Result<Vec<Session
         .await
         .map_err(|e| e.to_string())?;
     sessions.extend(external);
+    // Apply user-set title overrides (chiefly for external sessions, whose on-disk
+    // transcripts we never rewrite). Kineloop sessions are renamed in place, so they
+    // normally have no override; if one exists it still wins, which is harmless.
+    let overrides = store.title_overrides().await.map_err(|e| e.to_string())?;
+    if !overrides.is_empty() {
+        for s in &mut sessions {
+            if let Some(title) = overrides.get(&s.id) {
+                s.title = title.clone();
+            }
+        }
+    }
     sessions.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
     Ok(sessions)
+}
+
+/// Trim a user-supplied title and cap it at 60 chars (mirroring `title_from_prompt`),
+/// rejecting titles that are empty after trimming.
+fn normalize_title(title: &str) -> Result<String, String> {
+    let trimmed = title.trim();
+    if trimmed.is_empty() {
+        return Err("Title cannot be empty.".to_string());
+    }
+    if trimmed.chars().count() > 60 {
+        Ok(trimmed.chars().take(60).collect())
+    } else {
+        Ok(trimmed.to_string())
+    }
+}
+
+/// Rename a session. Trims and caps the title at 60 chars (mirroring `title_from_prompt`)
+/// and rejects empty titles. Kineloop sessions are renamed in place; external CLI sessions
+/// get a stored title override (their on-disk transcript is never modified). Returns the
+/// stored title so the frontend can display the canonical form.
+#[tauri::command]
+pub async fn rename_session(
+    session_id: String,
+    title: String,
+    store: State<'_, SessionStore>,
+) -> Result<String, String> {
+    let capped = normalize_title(&title)?;
+    if session_id.starts_with("external:") {
+        store
+            .set_title_override(&session_id, &capped)
+            .await
+            .map_err(|e| e.to_string())?;
+        return Ok(capped);
+    }
+    let rows = store
+        .set_title(&session_id, &capped)
+        .await
+        .map_err(|e| e.to_string())?;
+    if rows == 0 {
+        return Err("Session not found.".to_string());
+    }
+    Ok(capped)
 }
 
 /// A session's persisted events, in order — the frontend rebuilds its turns from these.
@@ -573,6 +796,57 @@ pub async fn session_events(
         .session_events(&session_id)
         .await
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn session_events_page(
+    session_id: String,
+    offset: usize,
+    limit: usize,
+    store: State<'_, SessionStore>,
+) -> Result<SessionEventsPage, String> {
+    if limit == 0 {
+        return Ok(SessionEventsPage {
+            events: Vec::new(),
+            next_offset: offset,
+            has_more: false,
+        });
+    }
+
+    if session_id.starts_with("external:") {
+        let sid = session_id.clone();
+        let fetch_limit = limit.saturating_add(1);
+        let mut events = tokio::task::spawn_blocking(move || {
+            external_sessions::events_page_for_session(&sid, offset, fetch_limit)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "external session not found".to_string())?;
+        let has_more = events.len() > limit;
+        if has_more {
+            events.truncate(limit);
+        }
+        return Ok(SessionEventsPage {
+            next_offset: offset.saturating_add(events.len()),
+            events,
+            has_more,
+        });
+    }
+
+    let fetch_limit = limit.saturating_add(1);
+    let mut events = store
+        .session_events_recent_page(&session_id, offset, fetch_limit)
+        .await
+        .map_err(|e| e.to_string())?;
+    let has_more = events.len() > limit;
+    if has_more {
+        events.truncate(limit);
+    }
+    Ok(SessionEventsPage {
+        next_offset: offset.saturating_add(events.len()),
+        events,
+        has_more,
+    })
 }
 
 /// Resolve a session's worktree path (validated), erroring via ReviewError.
@@ -896,4 +1170,35 @@ pub async fn commit_session(session_id: String, message: String) -> Result<Commi
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_title;
+
+    #[test]
+    fn normalize_title_trims_surrounding_whitespace() {
+        assert_eq!(normalize_title("  hello  ").unwrap(), "hello");
+    }
+
+    #[test]
+    fn normalize_title_rejects_blank_input() {
+        assert!(normalize_title("   ").is_err());
+        assert!(normalize_title("").is_err());
+    }
+
+    #[test]
+    fn normalize_title_caps_at_60_chars() {
+        let long = "a".repeat(75);
+        let out = normalize_title(&long).unwrap();
+        assert_eq!(out.chars().count(), 60);
+    }
+
+    #[test]
+    fn normalize_title_caps_by_chars_not_bytes() {
+        // Multi-byte chars must be counted as one each, not by UTF-8 byte length.
+        let long = "é".repeat(70);
+        let out = normalize_title(&long).unwrap();
+        assert_eq!(out.chars().count(), 60);
+    }
 }

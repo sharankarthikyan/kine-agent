@@ -1,5 +1,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { startSession, cleanupSession, listTrustedRepos, pickRepository, sendMessage, type AgentEvent } from "../agent";
+import {
+  startSession,
+  cleanupSession,
+  continueExternalSession,
+  listTrustedRepos,
+  pickRepository,
+  sendMessage,
+  type AgentEvent,
+} from "../agent";
 
 describe("desktop guard", () => {
   const internals = (globalThis as Record<string, unknown>).__TAURI_INTERNALS__;
@@ -162,6 +170,63 @@ describe("sendMessage", () => {
     await sendMessage({ sessionId: "s1", prompt: "x", onEvent: (e) => got.push(e) });
     const args = vi.mocked(invoke).mock.calls[0][1] as unknown as { onEvent: CapturedChannel };
     const event: AgentEvent = { kind: "token", data: { text: "more" } };
+    args.onEvent.onmessage?.(event);
+    expect(got).toEqual([event]);
+  });
+});
+
+describe("continueExternalSession", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("invokes continue_external_session with the imported id, new sessionId, prompt, and a Channel", async () => {
+    const { invoke, Channel } = await import("@tauri-apps/api/core");
+    await continueExternalSession({
+      externalSessionId: "external:codex:abc",
+      sessionId: "s2",
+      prompt: "continue this",
+      agent: "codex",
+      onEvent: () => {},
+    });
+    expect(invoke).toHaveBeenCalledWith(
+      "continue_external_session",
+      expect.objectContaining({
+        externalSessionId: "external:codex:abc",
+        sessionId: "s2",
+        prompt: "continue this",
+        agent: "codex",
+        onEvent: expect.any(Channel),
+      }),
+    );
+  });
+
+  it("forwards model and permissionMode when provided", async () => {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await continueExternalSession({
+      externalSessionId: "external:claude:abc",
+      sessionId: "s2",
+      prompt: "x",
+      agent: "claude",
+      model: "opus",
+      permissionMode: "acceptEdits",
+      onEvent: () => {},
+    });
+    expect(invoke).toHaveBeenCalledWith(
+      "continue_external_session",
+      expect.objectContaining({ agent: "claude", model: "opus", permissionMode: "acceptEdits" }),
+    );
+  });
+
+  it("delivers streamed events to onEvent", async () => {
+    const { invoke } = await import("@tauri-apps/api/core");
+    const got: AgentEvent[] = [];
+    await continueExternalSession({
+      externalSessionId: "external:claude:abc",
+      sessionId: "s2",
+      prompt: "x",
+      onEvent: (e) => got.push(e),
+    });
+    const args = vi.mocked(invoke).mock.calls[0][1] as unknown as { onEvent: CapturedChannel };
+    const event: AgentEvent = { kind: "token", data: { text: "continued" } };
     args.onEvent.onmessage?.(event);
     expect(got).toEqual([event]);
   });

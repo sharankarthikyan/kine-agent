@@ -75,6 +75,19 @@ export interface SendMessageArgs {
   onEvent: (event: AgentEvent) => void;
 }
 
+export interface ContinueExternalSessionArgs {
+  externalSessionId: string;
+  prompt: string;
+  sessionId: string;
+  /** Supported Kineloop agent used for the writable continuation. */
+  agent?: string;
+  /** Model id/alias forwarded to the adopted session's agent CLI. */
+  model?: string;
+  /** Permission mode forwarded to the adopted session's agent CLI. */
+  permissionMode?: string;
+  onEvent: (event: AgentEvent) => void;
+}
+
 /** Open the native folder picker and return a backend-trusted git repository root. */
 export async function pickRepository(): Promise<string | null> {
   assertDesktop();
@@ -93,4 +106,28 @@ export async function sendMessage({ sessionId, prompt, model, permissionMode, on
   const channel = new Channel<AgentEvent>();
   channel.onmessage = onEvent;
   await invoke("send_message", { sessionId, prompt, model, permissionMode, onEvent: channel });
+}
+
+/** Adopt an imported CLI history session into a new writable Kineloop continuation. */
+export async function continueExternalSession({
+  externalSessionId,
+  prompt,
+  sessionId,
+  agent,
+  model,
+  permissionMode,
+  onEvent,
+}: ContinueExternalSessionArgs): Promise<void> {
+  assertDesktop();
+  const channel = new Channel<AgentEvent>();
+  channel.onmessage = onEvent;
+  await invoke("continue_external_session", {
+    externalSessionId,
+    prompt,
+    sessionId,
+    agent,
+    model,
+    permissionMode,
+    onEvent: channel,
+  });
 }
