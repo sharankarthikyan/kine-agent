@@ -33,7 +33,6 @@ test("renders window usage with total tokens, progress, and cost", () => {
         label: "Claude Opus",
         agent: "claude",
         description: null,
-        source: "fallback",
         disabled: false,
         contextWindow: 200000,
       }}

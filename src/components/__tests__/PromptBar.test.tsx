@@ -12,7 +12,6 @@ const opus: ModelInfo = {
   label: "Claude Opus 4.8",
   agent: "claude",
   description: null,
-  source: "fallback",
   disabled: false,
   contextWindow: null,
 };
@@ -22,7 +21,6 @@ const sonnet: ModelInfo = {
   label: "Claude Sonnet 4.6",
   agent: "claude",
   description: null,
-  source: "fallback",
   disabled: false,
   contextWindow: null,
 };
@@ -32,7 +30,6 @@ const disabledCodex: ModelInfo = {
   label: "OpenAI Codex (GPT-5)",
   agent: "codex",
   description: null,
-  source: "fallback",
   disabled: true,
   contextWindow: null,
 };
@@ -128,15 +125,9 @@ test("trigger shows 'No models' when models list is empty and model is null", ()
   expect(screen.getByText("No models")).toBeInTheDocument();
 });
 
-test("trigger shows the fallback badge when model source is fallback", () => {
-  setup({ model: { ...opus, source: "fallback" } });
-  expect(screen.getByText("fallback")).toBeInTheDocument();
-});
-
-test("trigger does not show any badge when model source is api", () => {
-  setup({ model: { ...opus, source: "api" } });
-  expect(screen.queryByText("fallback")).not.toBeInTheDocument();
-  expect(screen.queryByText("api")).not.toBeInTheDocument();
+test("trigger shows the versioned model label", () => {
+  setup({ model: opus });
+  expect(screen.getByText("Claude Opus 4.8")).toBeInTheDocument();
 });
 
 // ── Dropdown menu interaction ──────────────────────────────────────────────────

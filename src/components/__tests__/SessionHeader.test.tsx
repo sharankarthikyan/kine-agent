@@ -11,6 +11,7 @@ function setup(overrides: Partial<React.ComponentProps<typeof SessionHeader>> = 
   render(
     <SessionHeader
       title="Fix the login bug"
+      agent="claude"
       repo="my-repo"
       status="idle"
       source="kineloop"
@@ -80,14 +81,11 @@ test("cleanup button calls onCleanup", () => {
   expect(onCleanup).toHaveBeenCalledTimes(1);
 });
 
-test("external CLI sessions disable cleanup and show read-only source", () => {
+test("external CLI sessions keep context available but hide cleanup", () => {
   const { onCleanup } = setup({ source: "external" });
-  const button = screen.getByRole("button", { name: "Clean up worktree" });
-  const panelButton = screen.getByRole("button", { name: "Toggle panel" });
   expect(screen.getByText("CLI history")).toBeInTheDocument();
-  expect(button).toBeDisabled();
-  expect(panelButton).toBeDisabled();
-  fireEvent.click(button);
+  expect(screen.queryByRole("button", { name: "Clean up worktree" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Toggle context panel" })).toBeInTheDocument();
   expect(onCleanup).not.toHaveBeenCalled();
 });
 
@@ -95,13 +93,13 @@ test("external CLI sessions disable cleanup and show read-only source", () => {
 
 test("panel toggle calls onTogglePanel", () => {
   const { onTogglePanel } = setup();
-  fireEvent.click(screen.getByRole("button", { name: "Toggle panel" }));
+  fireEvent.click(screen.getByRole("button", { name: "Toggle context panel" }));
   expect(onTogglePanel).toHaveBeenCalledTimes(1);
 });
 
 test("panel toggle reflects panelOpen via aria-pressed", () => {
   setup({ panelOpen: true });
-  expect(screen.getByRole("button", { name: "Toggle panel" })).toHaveAttribute(
+  expect(screen.getByRole("button", { name: "Toggle context panel" })).toHaveAttribute(
     "aria-pressed",
     "true",
   );

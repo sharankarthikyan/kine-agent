@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
   ArrowUp,
-  Bot,
   Check,
   ChevronDown,
   FolderOpen,
@@ -12,7 +11,6 @@ import {
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
 import {
   DropdownMenu,
@@ -24,6 +22,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { type AgentInfo, type ModelInfo } from "@/lib/models";
+import { AgentLogo } from "./AgentLogo";
 
 interface NewSessionProps {
   repo: string | null;
@@ -83,14 +82,14 @@ export function NewSession({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const canSend = !running && repo !== null && text.trim().length > 0;
 
-  // Auto-grow the textarea up to 240px, then scroll.
+  // Auto-grow the textarea up to a compact height, then scroll.
   useEffect(() => {
     const el = textareaRef.current;
     if (!el) return;
     el.style.height = "auto";
     const next = el.scrollHeight;
-    if (next > 240) {
-      el.style.height = "240px";
+    if (next > 120) {
+      el.style.height = "120px";
       el.style.overflowY = "auto";
     } else {
       el.style.height = `${next}px`;
@@ -117,8 +116,8 @@ export function NewSession({
   const hasModels = models.length > 0;
 
   return (
-    <div className="flex flex-1 items-center justify-center p-4 min-[900px]:p-8">
-      <div className="w-full max-w-2xl space-y-4">
+    <div className="flex min-h-full items-center justify-center p-4 min-[900px]:p-6">
+      <div className="w-full max-w-2xl space-y-3">
         {/* Header line: New session in [repo] with [agent] */}
         <div className="flex flex-wrap items-center gap-1 text-sm text-muted-foreground">
           <span>New session in</span>
@@ -171,7 +170,7 @@ export function NewSession({
                 className="gap-1 px-2 text-foreground hover:text-foreground"
                 aria-label={`Agent: ${agent?.label ?? "No agents"}`}
               >
-                <Bot data-icon="inline-start" />
+                <AgentLogo agent={agent?.id ?? "claude"} className="size-4" />
                 <span>{agent?.label ?? "No agents"}</span>
                 <ChevronDown data-icon="inline-end" className="opacity-50" />
               </Button>
@@ -215,8 +214,8 @@ export function NewSession({
 	            placeholder="Describe the task…"
             aria-label="Describe your feature"
             disabled={running}
-            rows={4}
-	            className="min-h-[120px] resize-none rounded-none border-0 bg-transparent p-0 shadow-none outline-none focus:outline-none focus-visible:ring-0 focus-visible:ring-offset-0"
+            rows={2}
+	            className="min-h-[64px] resize-none rounded-none border-0 bg-transparent p-0 shadow-none outline-none focus:outline-none focus-visible:ring-0 focus-visible:ring-offset-0"
           />
 
           {/* Bottom action row */}
@@ -230,16 +229,8 @@ export function NewSession({
                   className="gap-1.5 px-2 text-muted-foreground hover:text-foreground"
                   aria-label={`Model: ${model?.label ?? "No models"}`}
                 >
-                  <Bot data-icon="inline-start" />
+                  <AgentLogo agent={model?.agent ?? "claude"} className="size-4" />
                   <span className="text-sm">{model?.label ?? "No models"}</span>
-                  {model?.source === "fallback" && (
-                    <Badge
-                      variant="outline"
-                      className="text-xs px-1.5 py-0 text-muted-foreground"
-                    >
-                      {model.source}
-                    </Badge>
-                  )}
                   <ChevronDown data-icon="inline-end" className="opacity-50" />
                 </Button>
               </DropdownMenuTrigger>

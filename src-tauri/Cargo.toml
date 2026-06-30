@@ -27,4 +27,3 @@ thiserror = "2"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
 which = "6"
 dirs = "6"
-ureq = { version = "2", features = ["json"] }

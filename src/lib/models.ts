@@ -10,15 +10,17 @@ export interface AgentInfo {
 
 /**
  * Mirrors the Rust `ModelInfo` struct (serde camelCase).
- * `value` is what gets forwarded to the CLI `--model` flag.
- * `source` is "api" when pulled from the live Anthropic catalog, "fallback" when hardcoded defaults.
+ * `value` is what gets forwarded to the CLI `--model` flag — a family alias
+ * (`opus`/`sonnet`/`haiku`) that the CLI resolves to the latest version.
+ * `label` upgrades from the bare family name ("Claude Opus") to the resolved
+ * versioned name ("Claude Opus 4.8") once `refreshModels` resolves it.
+ * `description` carries the resolved full model id (`claude-opus-4-8`) when known.
  */
 export interface ModelInfo {
   value: string;
   label: string;
   agent: string;
   description: string | null;
-  source: "api" | "fallback";
   disabled: boolean;
   contextWindow: number | null;
 }
@@ -33,4 +35,15 @@ export async function detectAgents(): Promise<AgentInfo[]> {
 export async function listModels(agent: string): Promise<ModelInfo[]> {
   assertDesktop();
   return invoke<ModelInfo[]>("list_models", { agent });
+}
+
+/**
+ * Re-resolve a model list against the CLI under the user's subscription auth,
+ * upgrading alias labels to versioned names (e.g. "Claude Opus 4.8"). May spawn
+ * CLI subprocesses, so it can take a few seconds on a cold cache — call it in
+ * the background after `listModels` rather than blocking initial render.
+ */
+export async function refreshModels(agent: string): Promise<ModelInfo[]> {
+  assertDesktop();
+  return invoke<ModelInfo[]>("refresh_models", { agent });
 }

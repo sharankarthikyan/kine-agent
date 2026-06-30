@@ -19,7 +19,7 @@ import { TitleBar } from "./components/TitleBar";
 import { SessionList } from "./components/SessionList";
 import type { CustomizationSection } from "./components/CustomizationsDialog";
 import { SessionHeader } from "./components/SessionHeader";
-import { ContextPanel } from "./components/ContextPanel";
+import { ContextPanel, FilesThisSession } from "./components/ContextPanel";
 import { ChangesPanel } from "./components/ChangesPanel";
 import { FilesTree } from "./components/FilesTree";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
@@ -42,6 +42,7 @@ import {
 import {
   detectAgents,
   listModels,
+  refreshModels,
   type AgentInfo,
   type ModelInfo,
 } from "./lib/models";
@@ -95,6 +96,12 @@ const RIGHT_PANE_MIN_WIDTH = 360;
 const RIGHT_PANE_MAX_WIDTH = 820;
 const RIGHT_PANE_DEFAULT_WIDTH = 560;
 const CENTER_MIN_WIDTH = 360;
+const MAX_SESSION_PANES = 4;
+const MIN_SPLIT_PANE_WIDTH = 520;
+const MIN_SPLIT_PANE_HEIGHT = 340;
+
+type SplitDirection = "vertical" | "horizontal";
+type SessionPane = { id: string; sessionId: string | null };
 
 function clampNumber(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -132,9 +139,16 @@ function safeErrorMessage(err: unknown): string {
 
 export default function App() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
-  const [turns, setTurns] = useState<Turn[]>([]);
+  const [turnsBySession, setTurnsBySession] = useState<Record<string, Turn[]>>({});
+  const [panes, setPanes] = useState<SessionPane[]>([
+    { id: "pane-primary", sessionId: null },
+  ]);
+  const [focusedPaneId, setFocusedPaneId] = useState("pane-primary");
+  const [splitDirection, setSplitDirection] = useState<SplitDirection>("vertical");
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
-  const [loadingSessionId, setLoadingSessionId] = useState<string | null>(null);
+  const [loadingSessionIds, setLoadingSessionIds] = useState<Set<string>>(
+    () => new Set(),
+  );
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(
     () => new Set(),
   );
@@ -220,6 +234,64 @@ export default function App() {
     setActiveSessionId(id);
   };
 
+  function updateFocusedPaneSession(sessionId: string | null) {
+    setPanes((prev) =>
+      prev.map((pane) =>
+        pane.id === focusedPaneId ? { ...pane, sessionId } : pane,
+      ),
+    );
+  }
+
+  function resetFocusedSessionState() {
+    setStoredEvents([]);
+    setDiff(null);
+    setRules([]);
+    setCapabilities(null);
+    setRuleView(null);
+    setBranchChanges(null);
+    setBranchChangesStatus("idle");
+    setTreeNodes([]);
+    setDiffSheet(null);
+    setHooks([]);
+    setMcpServers([]);
+    setPlugins([]);
+  }
+
+  function setSessionLoading(sessionId: string, loading: boolean) {
+    setLoadingSessionIds((prev) => {
+      const next = new Set(prev);
+      if (loading) next.add(sessionId);
+      else next.delete(sessionId);
+      return next;
+    });
+  }
+
+  function setSessionTurns(
+    sessionId: string,
+    nextTurns: Turn[] | ((prev: Turn[]) => Turn[]),
+  ) {
+    setTurnsBySession((prev) => {
+      const current = prev[sessionId] ?? [];
+      const next =
+        typeof nextTurns === "function" ? nextTurns(current) : nextTurns;
+      return { ...prev, [sessionId]: next };
+    });
+  }
+
+  async function loadSessionEvents(sessionId: string) {
+    setSessionLoading(sessionId, true);
+    try {
+      const ev = await sessionEvents(sessionId);
+      setSessionTurns(sessionId, turnsFromEvents(ev));
+      if (activeSessionIdRef.current === sessionId) setStoredEvents(ev);
+    } catch {
+      setSessionTurns(sessionId, []);
+      if (activeSessionIdRef.current === sessionId) setStoredEvents([]);
+    } finally {
+      setSessionLoading(sessionId, false);
+    }
+  }
+
   // Ref that tracks sidebarCollapsed for reading inside async callbacks without
   // stale-closure issues (same pattern as activeSessionIdRef above).
   const sidebarCollapsedRef = useRef(sidebarCollapsed);
@@ -273,7 +345,9 @@ export default function App() {
   const loadModels = useCallback(async () => {
     try {
       const discovered = await detectAgents();
-      const supported = discovered.filter((a) => a.id === "claude");
+      const supported = discovered.filter(
+        (a) => a.id === "claude" || a.id === "codex",
+      );
       const installed = supported.filter((a) => a.installed);
       const results = await Promise.allSettled(
         installed.map((a) => listModels(a.id)),
@@ -285,8 +359,36 @@ export default function App() {
       setSelectedAgent((prev) => prev ?? installed[0] ?? null);
       setModels(all);
       setSelectedModel((prev) => prev ?? all[0] ?? null);
+
+      // Background pass: re-resolve aliases against the CLI so labels upgrade
+      // from "Claude Opus" to the versioned "Claude Opus 4.8". This may spawn
+      // CLI subprocesses, so it must not block the initial selector render.
+      void upgradeModelLabels(installed);
     } catch (err) {
       console.error("failed to load models", err);
+    }
+  }, []);
+
+  // Resolve versioned labels in the background and merge them in, keeping the
+  // current selection (matched by alias `value`). A failed/empty refresh leaves
+  // the alias list untouched.
+  const upgradeModelLabels = useCallback(async (installed: AgentInfo[]) => {
+    try {
+      const results = await Promise.allSettled(
+        installed.map((a) => refreshModels(a.id)),
+      );
+      const upgraded = results
+        .flatMap((r) => (r.status === "fulfilled" ? r.value : []))
+        .filter((m) => !m.disabled);
+      if (upgraded.length === 0) return;
+      setModels(upgraded);
+      setSelectedModel((prev) =>
+        prev
+          ? (upgraded.find((m) => m.value === prev.value) ?? prev)
+          : (upgraded[0] ?? null),
+      );
+    } catch (err) {
+      console.error("failed to refresh model labels", err);
     }
   }, []);
 
@@ -405,6 +507,79 @@ export default function App() {
     persistPanelWidth("kineloop.rightPaneWidth", next);
   }
 
+  function centerWorkspaceSize() {
+    const sidebarSpace = sidebarCollapsed ? 0 : sidebarWidth;
+    return {
+      width: Math.max(0, window.innerWidth - sidebarSpace - 48),
+      height: Math.max(0, window.innerHeight - 72),
+    };
+  }
+
+  function maxPanesForViewport() {
+    if (window.innerWidth < 900) return 1;
+    const { width, height } = centerWorkspaceSize();
+    const canTwoColumns = width >= MIN_SPLIT_PANE_WIDTH * 2;
+    const canTwoRows = height >= MIN_SPLIT_PANE_HEIGHT * 2;
+    if (canTwoColumns && canTwoRows) return MAX_SESSION_PANES;
+    if (splitDirection === "horizontal") return canTwoRows ? 2 : 1;
+    return canTwoColumns ? 2 : 1;
+  }
+
+  function focusPane(pane: SessionPane) {
+    setFocusedPaneId(pane.id);
+    setActive(pane.sessionId);
+    resetFocusedSessionState();
+    closeRight();
+    if (pane.sessionId !== null) {
+      void loadSessionEvents(pane.sessionId);
+      const session = sessions.find((s) => s.id === pane.sessionId);
+      if (session?.source !== "external") void refreshDiff(pane.sessionId);
+    }
+  }
+
+  function addSplit(direction: SplitDirection) {
+    if (panes.length >= MAX_SESSION_PANES) return;
+    if (panes.length >= maxPanesForViewport()) {
+      toast.error("Not enough space for another split.");
+      return;
+    }
+    setSplitDirection(direction);
+    const pane: SessionPane = { id: crypto.randomUUID(), sessionId: null };
+    setPanes((prev) => [...prev, pane]);
+    setFocusedPaneId(pane.id);
+    setActive(null);
+    resetFocusedSessionState();
+    closeRight();
+  }
+
+  function closePane(paneId: string) {
+    setPanes((prev) => {
+      const closing = prev.find((pane) => pane.id === paneId);
+      if (prev.length === 1) {
+        setActive(null);
+        resetFocusedSessionState();
+        closeRight();
+        return [{ ...prev[0], sessionId: null }];
+      }
+      const next = prev.filter((pane) => pane.id !== paneId);
+      if (focusedPaneId === paneId) {
+        const replacement = next[0];
+        setFocusedPaneId(replacement.id);
+        setActive(replacement.sessionId);
+        resetFocusedSessionState();
+        closeRight();
+        if (replacement.sessionId !== null) void loadSessionEvents(replacement.sessionId);
+      }
+      if (closing?.sessionId && !next.some((pane) => pane.sessionId === closing.sessionId)) {
+        setTurnsBySession((cache) => {
+          const { [closing.sessionId!]: _removed, ...rest } = cache;
+          return rest;
+        });
+      }
+      return next;
+    });
+  }
+
   // Guard: only apply the fetched diff if the session is still the active one.
   // A late fetch from a prior session must not clobber the now-active session's diff.
   const refreshDiff = useCallback(async (sessionId: string) => {
@@ -456,6 +631,35 @@ export default function App() {
   useEffect(() => {
     void loadModels();
   }, [loadModels]);
+
+  useEffect(() => {
+    const clampPanes = () => {
+      const max = maxPanesForViewport();
+      if (panes.length <= max) return;
+      const focused = panes.find((pane) => pane.id === focusedPaneId) ?? panes[0];
+      const next = [
+        focused,
+        ...panes.filter((pane) => pane.id !== focused.id),
+      ].slice(0, max);
+      const sessionChanged = activeSessionIdRef.current !== next[0].sessionId;
+      setPanes(next);
+      setFocusedPaneId(next[0].id);
+      setActive(next[0].sessionId);
+      if (sessionChanged) resetFocusedSessionState();
+    };
+    clampPanes();
+    window.addEventListener("resize", clampPanes);
+    return () => window.removeEventListener("resize", clampPanes);
+  }, [
+    panes,
+    focusedPaneId,
+    sidebarCollapsed,
+    sidebarWidth,
+    rightPaneWidth,
+    rightTab,
+    rightExpanded,
+    splitDirection,
+  ]);
 
   useEffect(() => {
     try {
@@ -588,13 +792,17 @@ export default function App() {
   // Fetch branch-level changes when the Changes tab becomes active.
   useEffect(() => {
     if (rightTab !== "changes" || !activeSessionId) return;
+    const session = sessions.find((s) => s.id === activeSessionId);
+    if (session?.source === "external") return;
     const sessionId = activeSessionId;
     void refreshBranchChanges(sessionId);
-  }, [rightTab, activeSessionId, refreshBranchChanges]);
+  }, [rightTab, activeSessionId, refreshBranchChanges, sessions]);
 
   // Fetch the flat worktree file list and build the nested tree when Files tab opens.
   useEffect(() => {
     if (rightTab !== "files" || !activeSessionId) return;
+    const session = sessions.find((s) => s.id === activeSessionId);
+    if (session?.source === "external") return;
     const sessionId = activeSessionId;
     (async () => {
       try {
@@ -605,10 +813,10 @@ export default function App() {
         if (activeSessionIdRef.current === sessionId) setTreeNodes([]);
       }
     })();
-  }, [rightTab, activeSessionId]);
+  }, [rightTab, activeSessionId, sessions]);
 
-  function appendToLastTurn(event: AgentEvent) {
-    setTurns((prev) => {
+  function appendToLastTurn(sessionId: string, event: AgentEvent) {
+    setSessionTurns(sessionId, (prev) => {
       if (prev.length === 0) return prev;
       const next = prev.slice();
       const last = next[next.length - 1];
@@ -652,8 +860,8 @@ export default function App() {
   // (full patch, acceptable per spec — DiffViewer has no per-file filter prop).
   // If diff hasn't loaded yet, attempt a best-effort fetch first.
   async function handleOpenFile(path: string) {
-    if (!activeSessionId) return;
-    const sessionId = activeSessionId;
+    const sessionId = activeSessionIdRef.current;
+    if (!sessionId) return;
     let sessionDiff = diff;
     if (!sessionDiff) {
       try {
@@ -677,13 +885,14 @@ export default function App() {
       toast.error("External CLI sessions are read-only in Kineloop.");
       return;
     }
-    const isNew = activeSessionId === null;
-    const sessionId = activeSessionId ?? crypto.randomUUID();
+    const currentSessionId = activeSessionIdRef.current;
+    const isNew = currentSessionId === null;
+    const sessionId = currentSessionId ?? crypto.randomUUID();
     const repo = opts?.repo ?? ".";
     // Set the ref synchronously before the first await so the cross-session guard
     // is exact for new sessions (id now known up front, not after startSession resolves).
     setActive(sessionId);
-    setLoadingSessionId(null);
+    updateFocusedPaneSession(sessionId);
     // Optimistically upsert a "running" row at the top of the list immediately —
     // refreshSessions() in finally reconciles the real title/status from the backend.
     setSessions((prev) => {
@@ -709,13 +918,11 @@ export default function App() {
     });
     closeRight();
     setRunningSessionIds((prev) => new Set(prev).add(sessionId));
-    setTurns((prev) => [...prev, { prompt: text, events: [] }]);
-    // Guard: if the user switches sessions while this send is streaming, drop the late
-    // events from the UI — the backend persists all events regardless, so re-selecting
-    // the session rehydrates anything dropped here.
+    setSessionTurns(sessionId, (prev) => [...prev, { prompt: text, events: [] }]);
+    // Streaming output is scoped to the session cache so panes can update in parallel
+    // even when focus moves to another visible session.
     const onEvent = (event: AgentEvent) => {
-      if (activeSessionIdRef.current !== sessionId) return;
-      appendToLastTurn(event);
+      appendToLastTurn(sessionId, event);
     };
     // Forward the model value for Claude; null model → omit → CLI default.
     const modelArg =
@@ -755,6 +962,7 @@ export default function App() {
         await refreshDiff(sessionId);
         try {
           const ev = await sessionEvents(sessionId);
+          setSessionTurns(sessionId, turnsFromEvents(ev));
           if (activeSessionIdRef.current === sessionId) setStoredEvents(ev);
         } catch {
           /* ignore */
@@ -774,34 +982,27 @@ export default function App() {
 
   async function handleSelectSession(id: string) {
     const selected = sessions.find((s) => s.id === id) ?? null;
+    const existingPane = panes.find((pane) => pane.sessionId === id);
+    if (existingPane) {
+      setFocusedPaneId(existingPane.id);
+    } else {
+      updateFocusedPaneSession(id);
+    }
     setActive(id);
-    setLoadingSessionId(id);
+    setSessionLoading(id, true);
     closeRight();
-    setTurns([]);
-    setStoredEvents([]);
-    setDiff(null);
-    setRules([]);
-    setCapabilities(null);
-    setRuleView(null);
-    setBranchChanges(null);
-    setBranchChangesStatus("idle");
-    setTreeNodes([]);
-    setDiffSheet(null);
-    setHooks([]);
-    setMcpServers([]);
-    setPlugins([]);
+    resetFocusedSessionState();
     try {
       const ev = await sessionEvents(id);
       if (activeSessionIdRef.current !== id) return;
       setStoredEvents(ev);
-      setTurns(turnsFromEvents(ev));
+      setSessionTurns(id, turnsFromEvents(ev));
     } catch {
       if (activeSessionIdRef.current !== id) return;
       setStoredEvents([]);
-      setTurns([]);
-    }
-    if (activeSessionIdRef.current === id) {
-      setLoadingSessionId(null);
+      setSessionTurns(id, []);
+    } finally {
+      setSessionLoading(id, false);
     }
     if (selected?.source !== "external") {
       await refreshDiff(id);
@@ -809,21 +1010,9 @@ export default function App() {
   }
 
   function handleNewSession() {
+    updateFocusedPaneSession(null);
     setActive(null);
-    setLoadingSessionId(null);
-    setTurns([]);
-    setDiff(null);
-    setStoredEvents([]);
-    setRules([]);
-    setCapabilities(null);
-    setRuleView(null);
-    setBranchChanges(null);
-    setBranchChangesStatus("idle");
-    setTreeNodes([]);
-    setDiffSheet(null);
-    setHooks([]);
-    setMcpServers([]);
-    setPlugins([]);
+    resetFocusedSessionState();
     closeRight();
   }
 
@@ -870,16 +1059,11 @@ export default function App() {
 
   // Derived: active session object and its display values for TitleBar + SessionHeader.
   const activeSession = sessions.find((s) => s.id === activeSessionId) ?? null;
-  const activeRunning =
-    activeSessionId !== null &&
-    (runningSessionIds.has(activeSessionId) ||
-      activeSession?.status === "running");
-  const activeLoading =
-    activeSessionId !== null && loadingSessionId === activeSessionId;
   const titleBarTitle = activeSession?.title ?? null;
   const titleBarRepo = activeSession?.repo
     ? (activeSession.repo.split("/").pop() ?? null)
     : null;
+  const activeIsExternal = activeSession?.source === "external";
 
   // Search filter applied before grouping — case-insensitive substring match on title.
   const filteredSessions = sessionSearch
@@ -908,6 +1092,19 @@ export default function App() {
     }
   }
 
+  const paneGridClass =
+    panes.length <= 1
+      ? "grid-cols-1 grid-rows-1"
+      : panes.length === 2
+        ? splitDirection === "horizontal"
+          ? "grid-cols-1 grid-rows-2"
+          : "grid-cols-2 grid-rows-1"
+        : "grid-cols-2 grid-rows-2";
+  const canSplitWorkspace =
+    !rightExpanded &&
+    panes.length < MAX_SESSION_PANES &&
+    panes.length < maxPanesForViewport();
+
   return (
     <div className="flex flex-col h-screen bg-background text-foreground">
       <TitleBar
@@ -917,6 +1114,9 @@ export default function App() {
         onToggleSidebar={toggleSidebar}
         onOpenEditor={() => void handleOpenEditor()}
         onOpenTerminal={() => void handleOpenTerminal()}
+        canSplit={canSplitWorkspace}
+        onSplitVertical={() => addSplit("vertical")}
+        onSplitHorizontal={() => addSplit("horizontal")}
       />
       <div className="flex flex-1 min-h-0 min-w-0 overflow-hidden gap-2 px-2 pb-2">
         {!sidebarCollapsed && (
@@ -942,12 +1142,13 @@ export default function App() {
             </div>
           </>
         )}
-        <main className="flex flex-1 min-h-0 min-w-0 gap-2">
-          {/* Chat column — hidden only while the right pane is expanded to fullscreen. */}
+        <main className="relative flex flex-1 min-h-0 min-w-0 gap-2 overflow-hidden">
+          {/* Session workspace — hidden only while the right pane is expanded to fullscreen. */}
           {!rightExpanded && (
-            <section
+            <div
               className={cn(
-                "relative flex flex-1 flex-col min-w-0 min-h-0 rounded-xl border border-border bg-card overflow-hidden",
+                "relative grid flex-1 min-w-0 min-h-0 gap-2",
+                paneGridClass,
                 rightTab && "max-[900px]:hidden",
               )}
             >
@@ -972,95 +1173,172 @@ export default function App() {
                   className="absolute inset-y-0 left-0 z-10 w-2 cursor-col-resize outline-none max-[900px]:hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
                 />
               )}
-              {activeSessionId === null ? (
-                /* No active session — show the new-session composer. */
-                <NewSession
-                  repo={selectedRepo}
-                  recents={recents}
-                  agents={agents}
-                  agent={selectedAgent}
-                  models={models}
-                  model={selectedModel}
-                  autoEdit={autoEdit}
-                  running={false}
-                  onPickRepo={pickRepo}
-                  onPickRecent={(p) => {
-                    setSelectedRepo(p);
-                  }}
-                  onAgentChange={setSelectedAgent}
-                  onModelChange={setSelectedModel}
-                  onAutoEditChange={setAutoEdit}
-                  onStart={handleStartNewSession}
-                />
-              ) : (
-                /* Active session — header + toolbar + conversation + prompt bar. */
-                <>
-                  {/* Session-detail header — title, status, repo, diffstat, close + inert stubs. */}
-                  <SessionHeader
-                    title={activeSession?.title ?? ""}
-                    repo={titleBarRepo}
-                    status={activeSession?.status ?? "idle"}
-                    source={activeSession?.source ?? "kineloop"}
-                    diffstat={diffstats[activeSessionId] ?? null}
-                    onClose={handleNewSession}
-                    onCleanup={() => void handleCleanupSession()}
-                    panelOpen={rightTab !== null}
-                    onTogglePanel={() =>
-                      rightTab ? closeRight() : setRightTab("context")
-                    }
-                  />
-                  <div className="flex flex-1 flex-col overflow-auto min-h-0">
-                    <div className="mt-auto w-full max-w-3xl mx-auto px-4">
-                      {activeLoading ? (
-                        <div
-                          role="status"
-                          className="flex items-center gap-2 p-4 text-sm text-muted-foreground"
-                        >
-                          <Loader2
-                            aria-hidden="true"
-                            className="size-4 animate-spin motion-reduce:animate-none shrink-0"
-                          />
-                          Loading session…
+              {panes.map((pane) => {
+                const paneSession =
+                  sessions.find((session) => session.id === pane.sessionId) ??
+                  null;
+                const paneFocused = pane.id === focusedPaneId;
+                const paneRepo = paneSession?.repo
+                  ? (paneSession.repo.split("/").pop() ?? null)
+                  : null;
+                const paneRunning =
+                  pane.sessionId !== null &&
+                  (runningSessionIds.has(pane.sessionId) ||
+                    paneSession?.status === "running");
+                const paneLoading =
+                  pane.sessionId !== null &&
+                  loadingSessionIds.has(pane.sessionId);
+                const paneTurns =
+                  pane.sessionId !== null
+                    ? (turnsBySession[pane.sessionId] ?? [])
+                    : [];
+                return (
+                  <section
+                    key={pane.id}
+                    className={cn(
+                      "flex min-w-0 min-h-0 flex-col overflow-hidden rounded-xl border bg-card",
+                      paneFocused
+                        ? "border-ring shadow-sm"
+                        : "border-border",
+                    )}
+                    onPointerDown={() => {
+                      if (!paneFocused) focusPane(pane);
+                    }}
+                  >
+                    {pane.sessionId === null ? (
+                      <>
+                        <div className="flex items-center gap-3 border-b border-border px-4 py-2 shrink-0">
+                          <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                            <span className="truncate text-sm font-medium">
+                              New session
+                            </span>
+                            <span className="truncate text-xs text-muted-foreground">
+                              Choose a repo and start an agent
+                            </span>
+                          </div>
+                          <div className="flex shrink-0 items-center gap-1">
+                            {panes.length > 1 && (
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                aria-label="Close pane"
+                                className="size-9"
+                                onClick={() => closePane(pane.id)}
+                              >
+                                <X data-icon />
+                              </Button>
+                            )}
+                          </div>
                         </div>
-                      ) : (
-                        <Conversation
-                          turns={turns}
-                          running={activeRunning}
-                          onOpenFile={(path) => void handleOpenFile(path)}
+                        <div className="min-h-0 flex-1 overflow-auto">
+                          <NewSession
+                            repo={selectedRepo}
+                            recents={recents}
+                            agents={agents}
+                            agent={selectedAgent}
+                            models={models}
+                            model={selectedModel}
+                            autoEdit={autoEdit}
+                            running={false}
+                            onPickRepo={pickRepo}
+                            onPickRecent={(p) => {
+                              setSelectedRepo(p);
+                            }}
+                            onAgentChange={setSelectedAgent}
+                            onModelChange={setSelectedModel}
+                            onAutoEditChange={setAutoEdit}
+                            onStart={handleStartNewSession}
+                          />
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <SessionHeader
+                          title={paneSession?.title ?? ""}
+                          agent={paneSession?.agent ?? "claude"}
+                          repo={paneRepo}
+                          status={paneSession?.status ?? "idle"}
+                          source={paneSession?.source ?? "kineloop"}
+                          diffstat={diffstats[pane.sessionId] ?? null}
+                          onClose={() => closePane(pane.id)}
+                          onCleanup={() => void handleCleanupSession()}
+                          panelOpen={paneFocused && rightTab !== null}
+                          onTogglePanel={() => {
+                            if (!paneFocused) {
+                              focusPane(pane);
+                              setRightTab("context");
+                            } else if (rightTab) closeRight();
+                            else setRightTab("context");
+                          }}
                         />
-                      )}
-                    </div>
-                  </div>
-                  {activeSession?.source === "external" ? (
-                    <div className="border-t border-border px-4 py-3 text-sm text-muted-foreground">
-                      External CLI history is read-only in Kineloop.
-                    </div>
-                  ) : (
-                    <PromptBar
-                      onStart={handleSend}
-                      running={activeRunning}
-                      models={models}
-                      model={selectedModel}
-                      onModelChange={setSelectedModel}
-                      autoEdit={autoEdit}
-                      onAutoEditChange={setAutoEdit}
-                    />
-                  )}
-                </>
-              )}
-            </section>
+                        <div className="flex min-h-0 flex-1 flex-col overflow-auto">
+                          <div className="mt-auto w-full max-w-3xl mx-auto px-4">
+                            {paneLoading ? (
+                              <div
+                                role="status"
+                                className="flex items-center gap-2 p-4 text-sm text-muted-foreground"
+                              >
+                                <Loader2
+                                  aria-hidden="true"
+                                  className="size-4 animate-spin motion-reduce:animate-none shrink-0"
+                                />
+                                Loading session…
+                              </div>
+                            ) : (
+                              <Conversation
+                                turns={paneTurns}
+                                running={paneRunning}
+                                onOpenFile={(path) => {
+                                  if (!paneFocused) focusPane(pane);
+                                  void handleOpenFile(path);
+                                }}
+                              />
+                            )}
+                          </div>
+                        </div>
+                        {paneSession?.source === "external" ? (
+                          <div className="border-t border-border px-4 py-3 text-sm text-muted-foreground">
+                            External CLI history is read-only in Kineloop.
+                          </div>
+                        ) : (
+                          <PromptBar
+                            onStart={handleSend}
+                            running={paneRunning}
+                            models={models}
+                            model={selectedModel}
+                            onModelChange={setSelectedModel}
+                            autoEdit={autoEdit}
+                            onAutoEditChange={setAutoEdit}
+                          />
+                        )}
+                      </>
+                    )}
+                  </section>
+                );
+              })}
+            </div>
           )}
 
           {/* Right side-pane — tabbed Context | Changes | Files, collapsible + expandable. */}
           {rightTab && (
             <aside
               className={cn(
-                "relative flex flex-col min-w-0 min-h-0 rounded-xl border border-border bg-card overflow-hidden",
+                "absolute z-30 flex flex-col min-w-0 min-h-0 bg-background overflow-hidden",
                 rightExpanded
-                  ? "w-full"
-                  : "max-[900px]:w-full",
+                  ? // Fullscreen: fill the workspace as a framed card, matching the
+                    // session panes (rounded + bordered) instead of a flat plane.
+                    "inset-0 rounded-xl border border-border"
+                  : // Docked: a floating, clearly-elevated sheet — inset off every
+                    // edge, fully rounded, ringed, with a deep shadow so it reads as
+                    // hovering above the conversation rather than a flush column.
+                    "top-2 bottom-2 right-2 rounded-xl border border-border ring-1 ring-black/5 shadow-2xl dark:ring-white/10 " +
+                      "max-[900px]:inset-y-0 max-[900px]:left-0 max-[900px]:right-0 max-[900px]:rounded-none max-[900px]:ring-0",
               )}
-              style={rightExpanded ? undefined : { width: rightPaneWidth }}
+              style={
+                rightExpanded
+                  ? undefined
+                  : { width: `min(${Math.round(rightPaneWidth)}px, 100%)` }
+              }
             >
               {!rightExpanded && (
                 <div
@@ -1135,22 +1413,55 @@ export default function App() {
                   value="changes"
                   className="flex-1 min-h-0 overflow-hidden"
                 >
-                  <ChangesPanel
-                    branch={branchChanges}
-                    status={branchChangesStatus}
-                    onCommit={handleCommit}
-                    onOpenFile={(path) => void handleOpenFile(path)}
-                    committing={committing}
-                  />
+                  {activeIsExternal ? (
+                    <div className="flex h-full flex-col justify-center p-6 text-sm text-muted-foreground">
+                      <p className="font-medium text-foreground">No Kineloop worktree</p>
+                      <p className="mt-1">
+                        This CLI history is read-only, so Kineloop cannot compute a live
+                        branch diff. Use Files to review files mentioned by the session.
+                      </p>
+                    </div>
+                  ) : (
+                    <ChangesPanel
+                      branch={branchChanges}
+                      status={branchChangesStatus}
+                      onCommit={handleCommit}
+                      onOpenFile={(path) => void handleOpenFile(path)}
+                      committing={committing}
+                    />
+                  )}
                 </TabsContent>
                 <TabsContent
                   value="files"
                   className="flex-1 min-h-0 overflow-hidden"
                 >
-                  <FilesTree
-                    nodes={treeNodes}
-                    onOpenFile={(path) => void handleOpenFile(path)}
-                  />
+                  {activeIsExternal ? (
+                    <div className="flex h-full min-w-0 flex-col">
+                      <div className="border-b border-border/60 px-4 py-3">
+                        <p className="text-sm font-medium">Files from CLI history</p>
+                        <p className="text-xs text-muted-foreground">
+                          Read-only file activity recovered from the external session.
+                        </p>
+                      </div>
+                      <ScrollArea className="min-h-0 flex-1">
+                        {files.length === 0 ? (
+                          <p className="p-4 text-sm text-muted-foreground">
+                            No files were found in this session history.
+                          </p>
+                        ) : (
+                          <FilesThisSession
+                            files={files}
+                            onOpenFile={(path) => void handleOpenFile(path)}
+                          />
+                        )}
+                      </ScrollArea>
+                    </div>
+                  ) : (
+                    <FilesTree
+                      nodes={treeNodes}
+                      onOpenFile={(path) => void handleOpenFile(path)}
+                    />
+                  )}
                 </TabsContent>
               </Tabs>
             </aside>

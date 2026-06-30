@@ -1,9 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowUp, Bot, ChevronDown, Check, Lock, LockOpen, Paperclip } from "lucide-react";
+import { ArrowUp, ChevronDown, Check, Lock, LockOpen, Paperclip } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
 import {
   DropdownMenu,
@@ -15,6 +14,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { type ModelInfo } from "@/lib/models";
+import { AgentLogo } from "./AgentLogo";
 
 interface PromptBarProps {
   onStart: (text: string, model: ModelInfo | null) => void;
@@ -132,14 +132,8 @@ export function PromptBar({
                 className="gap-1.5 px-2 text-muted-foreground hover:text-foreground"
                 aria-label={`Model: ${model?.label ?? "No models"}`}
               >
-                <Bot data-icon="inline-start" />
+                <AgentLogo agent={model?.agent ?? "claude"} className="size-4" />
                 <span className="text-sm">{model?.label ?? "No models"}</span>
-                {/* Show "fallback" badge when the model list came from hardcoded defaults */}
-                {model?.source === "fallback" && (
-                  <Badge variant="outline" className="text-xs px-1.5 py-0 text-muted-foreground">
-                    {model.source}
-                  </Badge>
-                )}
                 <ChevronDown data-icon="inline-end" className="opacity-50" />
               </Button>
             </DropdownMenuTrigger>

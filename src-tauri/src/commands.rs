@@ -168,6 +168,13 @@ fn worktrees_root() -> PathBuf {
 /// `ensure_scope_dir`.
 fn inspect_scope(root: &Path, session_id: Option<String>) -> Result<PathBuf, String> {
     match session_id.filter(|s| !s.is_empty()) {
+        // External (read-only CLI history) sessions have no Kineloop worktree — their
+        // `external:` ids aren't valid worktree ids. Resolve to the session's real repo
+        // so its `.claude` customizations surface; fall back to global scope when the
+        // transcript recorded no usable repo path.
+        Some(id) if id.starts_with("external:") => Ok(external_sessions::repo_for_session(&id)
+            .filter(|p| p.is_dir())
+            .unwrap_or_else(|| root.join(".global-scope"))),
         Some(id) => Ok(worktree::worktree_for(root, &id)
             .map_err(|e| e.to_string())?
             .path),
@@ -513,15 +520,32 @@ pub async fn detect_agents() -> Result<Vec<crate::models::AgentInfo>, String> {
         .map_err(|e| e.to_string())
 }
 
-/// Return the model list for `agent`. For "claude": tries the Anthropic REST
-/// API when `ANTHROPIC_API_KEY` is set, falls back to hardcoded aliases on any
-/// error. Other agents return an empty list. Blocking I/O is offloaded from the
-/// async runtime via `spawn_blocking`.
+/// Return the model list for `agent`. For "claude" this is the CLI's family
+/// aliases (`opus`/`sonnet`/`haiku`) with versioned labels filled in from the
+/// on-disk cache when present — fast and non-blocking. Other agents return an
+/// empty list. Call `refresh_models` to (re-)resolve the versioned labels.
 #[tauri::command]
 pub async fn list_models(agent: String) -> Result<Vec<crate::models::ModelInfo>, String> {
     tokio::task::spawn_blocking(move || crate::models::list_models(&agent))
         .await
         .map_err(|e| e.to_string())
+}
+
+/// Re-resolve a model list against the CLI under the user's subscription auth,
+/// upgrading alias labels to versioned names (e.g. "Claude Opus 4.8"). For
+/// "claude" this probes the CLI once per family (skipped when the cache is
+/// fresh); "codex" reads the CLI's catalog via `codex debug models`; other
+/// agents fall through to the plain list. These spawn subprocesses, so the work
+/// is offloaded via `spawn_blocking`.
+#[tauri::command]
+pub async fn refresh_models(agent: String) -> Result<Vec<crate::models::ModelInfo>, String> {
+    tokio::task::spawn_blocking(move || match agent.as_str() {
+        "claude" => crate::models::refresh_claude_models(),
+        "codex" => crate::models::refresh_codex_models(),
+        other => crate::models::list_models(other),
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// List candidate rule/config files for a session's worktree + global config dirs.

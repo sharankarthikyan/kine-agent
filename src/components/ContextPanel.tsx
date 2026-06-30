@@ -189,7 +189,7 @@ function FileRow({ file, onOpenFile }: { file: SessionFile; onOpenFile?: (path: 
   );
 }
 
-function FilesThisSession({ files, onOpenFile }: FilesThisSessionProps) {
+export function FilesThisSession({ files, onOpenFile }: FilesThisSessionProps) {
   const [showReads, setShowReads] = useState(false);
   const changed = files.filter((f) => f.action !== "read");
   const reads = files.filter((f) => f.action === "read");

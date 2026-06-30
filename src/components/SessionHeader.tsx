@@ -3,6 +3,7 @@ import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import type { Diffstat } from "@/lib/conductor";
 import type { SessionStatus } from "@/lib/sessions";
+import { AgentLogo } from "./AgentLogo";
 
 type StatusConfig = { label: string; color: string };
 
@@ -19,6 +20,7 @@ const FALLBACK_CONFIG: StatusConfig = {
 
 export interface SessionHeaderProps {
   title: string;
+  agent: string;
   repo: string | null;
   status: string;
   source: "kineloop" | "external";
@@ -31,6 +33,7 @@ export interface SessionHeaderProps {
 
 export function SessionHeader({
   title,
+  agent,
   repo,
   status,
   source,
@@ -46,8 +49,9 @@ export function SessionHeader({
     <div className="flex items-center gap-3 px-4 py-2 border-b border-border shrink-0">
       {/* Left: two-line info block — status dot, title, status label, repo/diffstat */}
       <div className="flex flex-col min-w-0 flex-1 gap-0.5">
-        {/* Top row: status dot + title — color-coded dot carries status, no duplicate label */}
+        {/* Top row: agent logo + status dot + title — color-coded dot carries status */}
         <span className="flex items-center gap-2 min-w-0">
+          <AgentLogo agent={agent} className="size-4" />
           <span
             role="img"
             aria-label={`Status: ${config.label}`}
@@ -77,28 +81,29 @@ export function SessionHeader({
 
       {/* Right: action buttons */}
       <div className="flex items-center gap-1 shrink-0">
-        {/* Panel toggle — opens/closes the right pane */}
+        {/* Panel toggle — opens/closes the right pane for the focused session. */}
         <Button
           variant={panelOpen ? "secondary" : "ghost"}
-          size="icon"
-          aria-label="Toggle panel"
+          size="sm"
+          aria-label="Toggle context panel"
           aria-pressed={panelOpen}
-          className="size-9"
+          className="h-9 gap-1.5 px-2"
           onClick={onTogglePanel}
-          disabled={source === "external"}
         >
-          <PanelRight data-icon />
+          <PanelRight data-icon="inline-start" />
+          <span className="max-[1300px]:sr-only">Context</span>
         </Button>
-        <Button
-          variant="ghost"
-          size="icon"
-          aria-label="Clean up worktree"
-          className={cn("size-9 text-muted-foreground hover:text-destructive")}
-          onClick={onCleanup}
-          disabled={source === "external"}
-        >
-          <Trash2 data-icon />
-        </Button>
+        {source !== "external" && (
+          <Button
+            variant="ghost"
+            size="icon"
+            aria-label="Clean up worktree"
+            className={cn("size-9 text-muted-foreground hover:text-destructive")}
+            onClick={onCleanup}
+          >
+            <Trash2 data-icon />
+          </Button>
+        )}
         {/* Close — deselects the session */}
         <Button
           variant="ghost"

@@ -48,6 +48,28 @@ test("calls onOpenTerminal when the open-terminal button is clicked", () => {
   expect(onOpenTerminal).toHaveBeenCalledTimes(1);
 });
 
+test("split buttons call their handlers when workspace splitting is available", () => {
+  const onSplitVertical = vi.fn();
+  const onSplitHorizontal = vi.fn();
+  render(
+    <TitleBar
+      canSplit
+      onSplitVertical={onSplitVertical}
+      onSplitHorizontal={onSplitHorizontal}
+    />,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Split right" }));
+  fireEvent.click(screen.getByRole("button", { name: "Split down" }));
+  expect(onSplitVertical).toHaveBeenCalledTimes(1);
+  expect(onSplitHorizontal).toHaveBeenCalledTimes(1);
+});
+
+test("hides split buttons when workspace splitting is unavailable", () => {
+  render(<TitleBar canSplit={false} />);
+  expect(screen.queryByRole("button", { name: "Split right" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Split down" })).not.toBeInTheDocument();
+});
+
 // ── Unimplemented actions ─────────────────────────────────────────────────────
 
 test("does not expose placeholder actions as controls", () => {

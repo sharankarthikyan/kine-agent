@@ -1,4 +1,4 @@
-import { Asterisk, PanelLeft, SquareCode, SquareTerminal } from "lucide-react";
+import { Asterisk, Columns2, PanelLeft, Rows2, SquareCode, SquareTerminal } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ThemeToggle } from "./ThemeToggle";
 import { cn } from "@/lib/utils";
@@ -19,6 +19,9 @@ export interface TitleBarProps {
   onToggleSidebar?: () => void;
   onOpenEditor?: () => void;
   onOpenTerminal?: () => void;
+  canSplit?: boolean;
+  onSplitVertical?: () => void;
+  onSplitHorizontal?: () => void;
 }
 
 export function TitleBar({
@@ -28,6 +31,9 @@ export function TitleBar({
   onToggleSidebar = () => {},
   onOpenEditor = () => {},
   onOpenTerminal = () => {},
+  canSplit = false,
+  onSplitVertical = () => {},
+  onSplitHorizontal = () => {},
 }: TitleBarProps) {
   const sidebarLabel = sidebarCollapsed ? "Show sidebar" : "Hide sidebar";
 
@@ -69,6 +75,26 @@ export function TitleBar({
       {/* RIGHT zone: editor, terminal, theme toggle, inert stubs */}
       <div className="flex items-center pr-2 shrink-0">
         <span className="[-webkit-app-region:no-drag] flex items-center">
+          {canSplit && (
+            <>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                onClick={onSplitVertical}
+                aria-label="Split right"
+              >
+                <Columns2 data-icon />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                onClick={onSplitHorizontal}
+                aria-label="Split down"
+              >
+                <Rows2 data-icon />
+              </Button>
+            </>
+          )}
           <Button
             variant="ghost"
             size="icon-sm"

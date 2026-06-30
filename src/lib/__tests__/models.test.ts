@@ -39,9 +39,9 @@ describe("listModels", () => {
   it("invokes list_models with the given agent id", async () => {
     const { invoke } = await import("@tauri-apps/api/core");
     const models: ModelInfo[] = [
-      { value: "opus",   label: "Claude Opus 4.8",   agent: "claude", description: null, source: "fallback", disabled: false, contextWindow: null },
-      { value: "sonnet", label: "Claude Sonnet 4.6", agent: "claude", description: null, source: "fallback", disabled: false, contextWindow: null },
-      { value: "haiku",  label: "Claude Haiku 4.5",  agent: "claude", description: null, source: "fallback", disabled: false, contextWindow: null },
+      { value: "opus",   label: "Claude Opus 4.8",   agent: "claude", description: null, disabled: false, contextWindow: null },
+      { value: "sonnet", label: "Claude Sonnet 4.6", agent: "claude", description: null, disabled: false, contextWindow: null },
+      { value: "haiku",  label: "Claude Haiku 4.5",  agent: "claude", description: null, disabled: false, contextWindow: null },
     ];
     vi.mocked(invoke).mockResolvedValueOnce(models);
 

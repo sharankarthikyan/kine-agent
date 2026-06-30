@@ -16,7 +16,6 @@ const opus: ModelInfo = {
   label: "Claude Opus 4.8",
   agent: "claude",
   description: null,
-  source: "fallback",
   disabled: false,
   contextWindow: null,
 };
@@ -26,7 +25,6 @@ const sonnet: ModelInfo = {
   label: "Claude Sonnet 4.6",
   agent: "claude",
   description: null,
-  source: "fallback",
   disabled: false,
   contextWindow: null,
 };
@@ -172,15 +170,9 @@ test("selecting a model calls onModelChange", async () => {
   expect(onModelChange).toHaveBeenCalledWith(expect.objectContaining({ value: "sonnet" }));
 });
 
-test("model trigger shows fallback badge when model source is fallback", () => {
-  setup({ model: { ...opus, source: "fallback" } });
-  expect(screen.getByText("fallback")).toBeInTheDocument();
-});
-
-test("model trigger does not show any badge when model source is api", () => {
-  setup({ model: { ...opus, source: "api" } });
-  expect(screen.queryByText("fallback")).not.toBeInTheDocument();
-  expect(screen.queryByText("api")).not.toBeInTheDocument();
+test("model trigger shows the versioned model label", () => {
+  setup({ model: opus });
+  expect(screen.getByText(opus.label)).toBeInTheDocument();
 });
 
 // ── Autonomy switch ────────────────────────────────────────────────────────────

@@ -51,6 +51,7 @@ pub fn run() {
             commands::session_events,
             commands::detect_agents,
             commands::list_models,
+            commands::refresh_models,
             commands::inspect_rules,
             commands::read_text_file,
             commands::write_text_file,

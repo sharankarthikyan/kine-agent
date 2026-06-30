@@ -17,6 +17,7 @@ import type { SessionSummary, SessionStatus } from "../lib/sessions";
 import type { CustomizationCounts, Diffstat } from "../lib/conductor";
 import type { CustomizationSection } from "./CustomizationsDialog";
 import { relativeTime } from "../lib/relativeTime";
+import { AgentLogo } from "./AgentLogo";
 
 interface SessionListProps {
   groups: { workspace: string; sessions: SessionSummary[] }[];
@@ -235,8 +236,9 @@ export function SessionList({
                           aria-current={active ? "true" : undefined}
                           onClick={() => onSelect(session.id)}
                         >
-                          {/* Top row: status dot + title + status label */}
+                          {/* Top row: agent logo + status dot + title + status label */}
                           <span className="flex items-center gap-2 w-full min-w-0">
+                            <AgentLogo agent={session.agent} className="size-4" />
                             <span
                               role="img"
                               aria-label={`Status: ${config.label}`}
