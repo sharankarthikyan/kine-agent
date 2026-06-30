@@ -9,22 +9,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
-name = "agent-editor"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "sqlx",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "thiserror 2.0.18",
- "tokio",
- "ureq",
- "which",
-]
-
-[[package]]
 name = "aho-corasick"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1745,6 +1729,23 @@ dependencies = [
  "bitflags 2.13.0",
  "serde",
  "unicode-segmentation",
+]
+
+[[package]]
+name = "kineloop"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "thiserror 2.0.18",
+ "tokio",
+ "ureq",
+ "which",
 ]
 
 [[package]]

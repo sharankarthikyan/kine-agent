@@ -283,13 +283,11 @@ impl SessionStore {
     }
 }
 
-/// Default on-disk DB location: `$HOME/.agent-editor/agent-editor.db` (mirrors the
-/// worktrees root). Falls back to the temp dir only if HOME is unset.
+/// Default on-disk DB location: `<home>/.kineloop/kineloop.db` (mirrors the worktrees
+/// root). Falls back to the temp dir only if the home dir is unavailable. The legacy
+/// `~/.agent-editor/agent-editor.db` is migrated to this path at startup.
 pub fn default_db_path() -> PathBuf {
-    let base = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    base.join(".agent-editor").join("agent-editor.db")
+    crate::agent_paths::data_dir().join("kineloop.db")
 }
 
 /// Split an AgentEvent into its persisted (kind, payload_json) — payload is the `data`

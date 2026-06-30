@@ -1,5 +1,5 @@
-use agent_editor_lib::adapters::claude::parse_line;
-use agent_editor_lib::events::AgentEvent;
+use kineloop_lib::adapters::claude::parse_line;
+use kineloop_lib::events::AgentEvent;
 
 fn fixture() -> Vec<String> {
     let raw = include_str!("fixtures/claude_stream.jsonl");

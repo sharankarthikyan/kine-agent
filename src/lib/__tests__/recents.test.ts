@@ -38,18 +38,18 @@ describe("getRecentRepos", () => {
   });
 
   it("returns [] on a parse error (corrupted value)", () => {
-    localStorage.setItem("agent-editor.recentRepos", "not-json{{{");
+    localStorage.setItem("kineloop.recentRepos", "not-json{{{");
     expect(getRecentRepos()).toEqual([]);
   });
 
   it("returns [] when the parsed value is not an array", () => {
-    localStorage.setItem("agent-editor.recentRepos", JSON.stringify({ path: "/foo" }));
+    localStorage.setItem("kineloop.recentRepos", JSON.stringify({ path: "/foo" }));
     expect(getRecentRepos()).toEqual([]);
   });
 
   it("returns the stored list when the value is valid", () => {
     const repos = ["/a/b", "/c/d"];
-    localStorage.setItem("agent-editor.recentRepos", JSON.stringify(repos));
+    localStorage.setItem("kineloop.recentRepos", JSON.stringify(repos));
     expect(getRecentRepos()).toEqual(repos);
   });
 });

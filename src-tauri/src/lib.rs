@@ -1,5 +1,6 @@
 pub mod adapter;
 pub mod adapters;
+pub mod agent_paths;
 mod commands;
 pub mod events;
 pub mod external_sessions;
@@ -14,6 +15,10 @@ use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Migrate the pre-rename data dir (~/.agent-editor → ~/.kineloop) before anything
+    // touches the store, so existing sessions and worktrees carry over.
+    agent_paths::migrate_legacy_data_dir();
+
     // Open the session store before building (block on the async connect once).
     let store = tauri::async_runtime::block_on(async {
         store::SessionStore::connect(&store::default_db_path())

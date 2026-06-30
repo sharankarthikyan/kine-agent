@@ -9,7 +9,7 @@ import { invoke, Channel } from "@tauri-apps/api/core";
 export function assertDesktop(): void {
   if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) {
     throw new Error(
-      "Agents run only in the agent-editor desktop app. Launch it with `npm run tauri dev` — the browser preview can't reach the backend.",
+      "Agents run only in the Kineloop desktop app. Launch it with `npm run tauri dev` — the browser preview can't reach the backend.",
     );
   }
 }

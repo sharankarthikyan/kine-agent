@@ -17,27 +17,39 @@ struct ExternalFile {
     path: PathBuf,
 }
 
+/// Transcript discovery roots, honoring the CLIs' own relocation env vars
+/// (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`) and resolving the home dir cross-platform.
+fn discovery_roots() -> (Option<PathBuf>, Option<PathBuf>) {
+    let claude_projects = crate::agent_paths::claude_config_dir().map(|c| c.join("projects"));
+    let codex_sessions = crate::agent_paths::codex_home_dir().map(|c| c.join("sessions"));
+    (claude_projects, codex_sessions)
+}
+
 pub fn list_sessions() -> Vec<SessionSummary> {
-    let home = match home_dir() {
-        Some(home) => home,
-        None => return Vec::new(),
-    };
-    list_sessions_in(&home)
+    let (claude, codex) = discovery_roots();
+    list_sessions_from(claude.as_deref(), codex.as_deref())
 }
 
 pub fn events_for_session(session_id: &str) -> Option<Vec<StoredEvent>> {
-    let home = home_dir()?;
-    events_for_session_in(&home, session_id)
+    let (claude, codex) = discovery_roots();
+    events_for_session_from(claude.as_deref(), codex.as_deref(), session_id)
 }
 
-fn list_sessions_in(home: &Path) -> Vec<SessionSummary> {
-    let mut sessions = scan_external_sessions(home);
+fn list_sessions_from(
+    claude_projects: Option<&Path>,
+    codex_sessions: Option<&Path>,
+) -> Vec<SessionSummary> {
+    let mut sessions = scan_external_sessions(claude_projects, codex_sessions);
     sessions.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
     sessions
 }
 
-fn events_for_session_in(home: &Path, session_id: &str) -> Option<Vec<StoredEvent>> {
-    let file = discover_files(home)
+fn events_for_session_from(
+    claude_projects: Option<&Path>,
+    codex_sessions: Option<&Path>,
+    session_id: &str,
+) -> Option<Vec<StoredEvent>> {
+    let file = discover_files(claude_projects, codex_sessions)
         .into_iter()
         .find(|f| external_id(f.agent, &f.path) == session_id)?;
     match file.agent {
@@ -47,9 +59,12 @@ fn events_for_session_in(home: &Path, session_id: &str) -> Option<Vec<StoredEven
     }
 }
 
-fn scan_external_sessions(home: &Path) -> Vec<SessionSummary> {
+fn scan_external_sessions(
+    claude_projects: Option<&Path>,
+    codex_sessions: Option<&Path>,
+) -> Vec<SessionSummary> {
     let mut sessions = Vec::new();
-    for file in discover_files(home) {
+    for file in discover_files(claude_projects, codex_sessions) {
         let parsed = match file.agent {
             "claude" => summarize_claude(&file.path),
             "codex" => summarize_codex(&file.path),
@@ -62,10 +77,17 @@ fn scan_external_sessions(home: &Path) -> Vec<SessionSummary> {
     sessions
 }
 
-fn discover_files(home: &Path) -> Vec<ExternalFile> {
+fn discover_files(
+    claude_projects: Option<&Path>,
+    codex_sessions: Option<&Path>,
+) -> Vec<ExternalFile> {
     let mut files = Vec::new();
-    collect_jsonl("claude", &home.join(".claude/projects"), 6, &mut files);
-    collect_jsonl("codex", &home.join(".codex/sessions"), 6, &mut files);
+    if let Some(root) = claude_projects {
+        collect_jsonl("claude", root, 6, &mut files);
+    }
+    if let Some(root) = codex_sessions {
+        collect_jsonl("codex", root, 6, &mut files);
+    }
     files
 }
 
@@ -551,17 +573,42 @@ fn modified_ms(path: &Path) -> i64 {
         .unwrap_or(0)
 }
 
-fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
-}
-
+/// True when `path` is one of Kineloop's own per-session worktrees, so the app doesn't
+/// list a duplicate of a session it created. Handles both the raw cwd form (with the
+/// OS-native separator — `/` on Unix, `\` on Windows) and Claude's dash-encoded project
+/// directory form. Matches both the current `.kineloop` directory and the legacy
+/// `.agent-editor` one so transcripts recorded before the rename are still recognized.
 fn is_kineloop_worktree(path: &str) -> bool {
-    path.contains("/.agent-editor/worktrees/") || path.contains("--agent-editor-worktrees-")
+    let normalized = path.replace('\\', "/");
+    normalized.contains("/.kineloop/worktrees/")
+        || normalized.contains("/.agent-editor/worktrees/")
+        || path.contains("-kineloop-worktrees-")
+        || path.contains("-agent-editor-worktrees-")
 }
 
 fn is_claude_subagent_path(path: &Path) -> bool {
     path.components()
         .any(|component| component.as_os_str() == "subagents")
+}
+
+/// Test seam: discover under an explicit home (`<home>/.claude/projects`,
+/// `<home>/.codex/sessions`) so tests are hermetic and never read the real profile or
+/// env overrides.
+#[cfg(test)]
+fn list_sessions_in(home: &Path) -> Vec<SessionSummary> {
+    list_sessions_from(
+        Some(&home.join(".claude").join("projects")),
+        Some(&home.join(".codex").join("sessions")),
+    )
+}
+
+#[cfg(test)]
+fn events_for_session_in(home: &Path, session_id: &str) -> Option<Vec<StoredEvent>> {
+    events_for_session_from(
+        Some(&home.join(".claude").join("projects")),
+        Some(&home.join(".codex").join("sessions")),
+        session_id,
+    )
 }
 
 #[cfg(test)]
@@ -645,6 +692,26 @@ mod tests {
         assert!(events.iter().any(|e| e.kind == "toolCall"));
 
         let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn is_kineloop_worktree_matches_unix_and_windows_paths() {
+        // Current `.kineloop` worktree (Unix + Windows).
+        assert!(is_kineloop_worktree("/Users/me/.kineloop/worktrees/abc"));
+        assert!(is_kineloop_worktree(r"C:\Users\me\.kineloop\worktrees\abc"));
+        // Legacy `.agent-editor` worktree (pre-rename transcripts) still recognized.
+        assert!(is_kineloop_worktree(
+            "/Users/me/.agent-editor/worktrees/abc"
+        ));
+        assert!(is_kineloop_worktree(
+            r"C:\Users\me\.agent-editor\worktrees\abc"
+        ));
+        // Claude's dash-encoded project-dir form (current + legacy).
+        assert!(is_kineloop_worktree("-Users-me--kineloop-worktrees-id"));
+        assert!(is_kineloop_worktree("-Users-me--agent-editor-worktrees-id"));
+        // A normal repo must NOT be treated as a Kineloop worktree.
+        assert!(!is_kineloop_worktree("/Users/me/projects/my-app"));
+        assert!(!is_kineloop_worktree(r"C:\Users\me\projects\my-app"));
     }
 
     #[test]

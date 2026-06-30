@@ -42,14 +42,24 @@ pub fn rule_candidates(worktree: &Path) -> Vec<RuleFile> {
             scope: "project".into(),
         });
     }
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-        let global = [
-            (".claude/CLAUDE.md", "~/.claude/CLAUDE.md"),
-            (".codex/config.toml", "~/.codex/config.toml"),
-            (".gemini/GEMINI.md", "~/.gemini/GEMINI.md"),
-        ];
-        for (rel, label) in global {
-            let p = home.join(rel);
+    // Global config — resolved cross-platform and honoring each CLI's relocation env var
+    // (CLAUDE_CONFIG_DIR / CODEX_HOME).
+    let global = [
+        (
+            crate::agent_paths::claude_config_dir().map(|c| c.join("CLAUDE.md")),
+            "~/.claude/CLAUDE.md",
+        ),
+        (
+            crate::agent_paths::codex_home_dir().map(|c| c.join("config.toml")),
+            "~/.codex/config.toml",
+        ),
+        (
+            crate::agent_paths::gemini_config_dir().map(|c| c.join("GEMINI.md")),
+            "~/.gemini/GEMINI.md",
+        ),
+    ];
+    for (path, label) in global {
+        if let Some(p) = path {
             out.push(RuleFile {
                 exists: p.is_file(),
                 path: p.display().to_string(),
@@ -96,14 +106,17 @@ fn allowed_read_write_paths(worktree: &Path, canonical_worktree: &Path) -> Vec<P
     // resolves outside every root and is rejected. Defence in depth against a
     // compromised WebView, without breaking the common symlinked-config setup.
     let mut cap_roots: Vec<PathBuf> = Vec::new();
-    for sub in [".claude/agents", ".claude/skills", ".claude/commands"] {
-        if let Ok(c) = std::fs::canonicalize(worktree.join(sub)) {
+    let worktree_claude = worktree.join(".claude");
+    for sub in ["agents", "skills", "commands"] {
+        if let Ok(c) = std::fs::canonicalize(worktree_claude.join(sub)) {
             cap_roots.push(c);
         }
     }
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-        for sub in [".claude/agents", ".claude/skills", ".claude/commands"] {
-            if let Ok(c) = std::fs::canonicalize(home.join(sub)) {
+    // Must mirror the user-scope roots scanned by `list_capabilities` (honors
+    // CLAUDE_CONFIG_DIR, cross-platform home).
+    if let Some(claude) = crate::agent_paths::claude_config_dir() {
+        for sub in ["agents", "skills", "commands"] {
+            if let Ok(c) = std::fs::canonicalize(claude.join(sub)) {
                 cap_roots.push(c);
             }
         }
@@ -177,17 +190,15 @@ pub fn write_project_text_file(
 /// also canonicalized so that a `~/.claude` directory that is itself a symlink
 /// does not produce a false-negative.
 fn is_expected_global(path: &Path) -> bool {
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
-        return false;
-    };
     [
-        ".claude/CLAUDE.md",
-        ".codex/config.toml",
-        ".gemini/GEMINI.md",
+        crate::agent_paths::claude_config_dir().map(|c| c.join("CLAUDE.md")),
+        crate::agent_paths::codex_home_dir().map(|c| c.join("config.toml")),
+        crate::agent_paths::gemini_config_dir().map(|c| c.join("GEMINI.md")),
     ]
-    .iter()
-    .any(|rel| {
-        std::fs::canonicalize(home.join(rel))
+    .into_iter()
+    .flatten()
+    .any(|expected| {
+        std::fs::canonicalize(&expected)
             .map(|c| c == path)
             .unwrap_or(false)
     })
@@ -229,22 +240,23 @@ pub fn list_capabilities(agent: &str, worktree: &Path) -> Capabilities {
             commands: vec![],
         };
     }
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let user_claude = crate::agent_paths::claude_config_dir();
+    let worktree_claude = worktree.join(".claude");
     let mut subagents = Vec::new();
     let mut skills = Vec::new();
     let mut commands = Vec::new();
 
-    collect_md(&worktree.join(".claude/agents"), "project", &mut subagents);
-    if let Some(h) = &home {
-        collect_md(&h.join(".claude/agents"), "user", &mut subagents);
+    collect_md(&worktree_claude.join("agents"), "project", &mut subagents);
+    if let Some(c) = &user_claude {
+        collect_md(&c.join("agents"), "user", &mut subagents);
     }
-    collect_skill_dirs(&worktree.join(".claude/skills"), "project", &mut skills);
-    if let Some(h) = &home {
-        collect_skill_dirs(&h.join(".claude/skills"), "user", &mut skills);
+    collect_skill_dirs(&worktree_claude.join("skills"), "project", &mut skills);
+    if let Some(c) = &user_claude {
+        collect_skill_dirs(&c.join("skills"), "user", &mut skills);
     }
-    collect_md(&worktree.join(".claude/commands"), "project", &mut commands);
-    if let Some(h) = &home {
-        collect_md(&h.join(".claude/commands"), "user", &mut commands);
+    collect_md(&worktree_claude.join("commands"), "project", &mut commands);
+    if let Some(c) = &user_claude {
+        collect_md(&c.join("commands"), "user", &mut commands);
     }
 
     subagents.sort_by(|a, b| a.name.cmp(&b.name));
@@ -412,7 +424,7 @@ pub struct PluginEntry {
 /// `~/.claude/settings.json`. Each leaf command becomes one `HookEntry`. Best-effort:
 /// missing or unparseable files contribute nothing.
 pub fn list_hooks(worktree: &Path) -> Vec<HookEntry> {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = crate::agent_paths::home_dir();
     list_hooks_with_home(worktree, home.as_deref())
 }
 
@@ -481,7 +493,7 @@ fn parse_hooks_from_settings(path: &Path, source: &str, out: &mut Vec<HookEntry>
 /// Return all MCP servers declared in `<worktree>/.mcp.json` and `~/.claude.json`.
 /// Best-effort: missing or unparseable files contribute nothing.
 pub fn list_mcp_servers(worktree: &Path) -> Vec<McpServerEntry> {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = crate::agent_paths::home_dir();
     list_mcp_servers_with_home(worktree, home.as_deref())
 }
 
@@ -531,7 +543,7 @@ fn parse_mcp_from_file(path: &Path, source: &str, out: &mut Vec<McpServerEntry>)
 /// parameter is reserved for future per-project plugin support.
 pub fn list_plugins(worktree: &Path) -> Vec<PluginEntry> {
     let _ = worktree;
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = crate::agent_paths::home_dir();
     list_plugins_with_home(home.as_deref())
 }
 
@@ -601,7 +613,7 @@ pub struct CustomizationCounts {
 /// Count customizations for a worktree + the user's ~/.claude home. Best-effort:
 /// any parse failure silently contributes 0 to the relevant field.
 pub fn customizations_counts(worktree: &Path) -> CustomizationCounts {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = crate::agent_paths::home_dir();
     customizations_counts_with_home(worktree, home.as_deref())
 }
 
