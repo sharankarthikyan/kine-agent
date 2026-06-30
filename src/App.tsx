@@ -3,6 +3,7 @@ import {
   Suspense,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -16,7 +17,11 @@ import { NewSession } from "./components/NewSession";
 import { Conversation, type Turn } from "./components/Conversation";
 import { DiffViewer } from "./components/DiffViewer";
 import { TitleBar } from "./components/TitleBar";
-import { SessionList } from "./components/SessionList";
+import {
+  SessionList,
+  type SourceFilter,
+  type StatusFilter,
+} from "./components/SessionList";
 import type { CustomizationSection } from "./components/CustomizationsDialog";
 import { SessionHeader } from "./components/SessionHeader";
 import { ContextPanel, FilesThisSession } from "./components/ContextPanel";
@@ -41,6 +46,7 @@ import {
 } from "./lib/agent";
 import {
   detectAgents,
+  isAgentSpawnable,
   listModels,
   refreshModels,
   type AgentInfo,
@@ -172,6 +178,8 @@ export default function App() {
   const [autoEdit, setAutoEdit] = useState(false);
   const [recents, setRecents] = useState<string[]>([]);
   const [sessionSearch, setSessionSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
   const [sidebarWidth, setSidebarWidth] = useState(() =>
     storedNumber(
       "kineloop.sidebarWidth",
@@ -355,10 +363,16 @@ export default function App() {
       const all = results
         .flatMap((r) => (r.status === "fulfilled" ? r.value : []))
         .filter((m) => !m.disabled);
+      // Default to a spawnable agent (Claude today); fall back to any installed
+      // one so the picker is never empty even before adapters land.
+      const defaultAgent =
+        installed.find((a) => isAgentSpawnable(a.id)) ?? installed[0] ?? null;
+      const defaultModel =
+        all.find((m) => m.agent === defaultAgent?.id) ?? all[0] ?? null;
       setAgents(supported);
-      setSelectedAgent((prev) => prev ?? installed[0] ?? null);
+      setSelectedAgent((prev) => prev ?? defaultAgent);
       setModels(all);
-      setSelectedModel((prev) => prev ?? all[0] ?? null);
+      setSelectedModel((prev) => prev ?? defaultModel);
 
       // Background pass: re-resolve aliases against the CLI so labels upgrade
       // from "Claude Opus" to the versioned "Claude Opus 4.8". This may spawn
@@ -391,6 +405,40 @@ export default function App() {
       console.error("failed to refresh model labels", err);
     }
   }, []);
+
+  // The agent picker is the source of truth: changing the agent narrows the model
+  // list to that agent and selects its first model, so the two controls never
+  // disagree. (A null match leaves the selection so an empty agent can't blank it.)
+  const handleAgentChange = useCallback(
+    (a: AgentInfo) => {
+      setSelectedAgent(a);
+      setSelectedModel((prev) =>
+        prev?.agent === a.id
+          ? prev
+          : (models.find((m) => m.agent === a.id) ?? prev),
+      );
+    },
+    [models],
+  );
+
+  // Selecting a model also syncs the agent back to that model's agent, so the
+  // pair stays consistent regardless of which control the user touches.
+  const handleModelChange = useCallback(
+    (m: ModelInfo) => {
+      setSelectedModel(m);
+      setSelectedAgent((prev) =>
+        prev?.id === m.agent ? prev : (agents.find((a) => a.id === m.agent) ?? prev),
+      );
+    },
+    [agents],
+  );
+
+  // Models for the currently selected agent — what the New Session model picker
+  // shows, so it can never list a model from a different agent than the one chosen.
+  const modelsForSelectedAgent = useMemo(
+    () => models.filter((m) => m.agent === (selectedAgent?.id ?? "claude")),
+    [models, selectedAgent?.id],
+  );
 
   // Sidebar toggle — persists the new value to localStorage immediately.
   function toggleSidebar() {
@@ -1065,12 +1113,15 @@ export default function App() {
     : null;
   const activeIsExternal = activeSession?.source === "external";
 
-  // Search filter applied before grouping — case-insensitive substring match on title.
-  const filteredSessions = sessionSearch
-    ? sessions.filter((s) =>
-        s.title.toLowerCase().includes(sessionSearch.toLowerCase()),
-      )
-    : sessions;
+  // Search + status + source filters applied before grouping. Search is a
+  // case-insensitive substring match on title; status/source are exact matches.
+  const searchLower = sessionSearch.trim().toLowerCase();
+  const filteredSessions = sessions.filter((s) => {
+    if (searchLower && !s.title.toLowerCase().includes(searchLower)) return false;
+    if (statusFilter !== "all" && s.status !== statusFilter) return false;
+    if (sourceFilter !== "all" && s.source !== sourceFilter) return false;
+    return true;
+  });
 
   // Open the active session's worktree in the system editor. Best-effort.
   async function handleOpenEditor() {
@@ -1134,6 +1185,10 @@ export default function App() {
                 diffstats={diffstats}
                 search={sessionSearch}
                 onSearchChange={setSessionSearch}
+                statusFilter={statusFilter}
+                sourceFilter={sourceFilter}
+                onStatusFilterChange={setStatusFilter}
+                onSourceFilterChange={setSourceFilter}
                 onOpenCustomization={(section) => {
                   setCustSection(section);
                   setCustDialogOpen(true);
@@ -1236,7 +1291,7 @@ export default function App() {
                             recents={recents}
                             agents={agents}
                             agent={selectedAgent}
-                            models={models}
+                            models={modelsForSelectedAgent}
                             model={selectedModel}
                             autoEdit={autoEdit}
                             running={false}
@@ -1244,8 +1299,8 @@ export default function App() {
                             onPickRecent={(p) => {
                               setSelectedRepo(p);
                             }}
-                            onAgentChange={setSelectedAgent}
-                            onModelChange={setSelectedModel}
+                            onAgentChange={handleAgentChange}
+                            onModelChange={handleModelChange}
                             onAutoEditChange={setAutoEdit}
                             onStart={handleStartNewSession}
                           />
@@ -1304,9 +1359,11 @@ export default function App() {
                           <PromptBar
                             onStart={handleSend}
                             running={paneRunning}
-                            models={models}
+                            models={models.filter(
+                              (m) => m.agent === (paneSession?.agent ?? "claude"),
+                            )}
                             model={selectedModel}
-                            onModelChange={setSelectedModel}
+                            onModelChange={handleModelChange}
                             autoEdit={autoEdit}
                             onAutoEditChange={setAutoEdit}
                           />

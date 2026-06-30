@@ -1,4 +1,5 @@
 import { render, screen, fireEvent } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { SessionList } from "../SessionList";
 import type { SessionSummary } from "../../lib/sessions";
 import type { CustomizationCounts, Diffstat } from "../../lib/conductor";
@@ -57,6 +58,10 @@ const defaultProps = {
   diffstats: {} as Record<string, Diffstat>,
   search: "",
   onSearchChange: () => {},
+  statusFilter: "all" as const,
+  sourceFilter: "all" as const,
+  onStatusFilterChange: () => {},
+  onSourceFilterChange: () => {},
   onOpenCustomization: () => {},
 };
 
@@ -193,6 +198,52 @@ test("calls onSearchChange when typing in the search input", () => {
 test("shows empty state when groups is empty", () => {
   render(<SessionList {...defaultProps} groups={[]} />);
   expect(screen.getByText(/no sessions yet/i)).toBeInTheDocument();
+});
+
+test("selecting a status in the filter menu calls onStatusFilterChange", async () => {
+  const onStatusFilterChange = vi.fn();
+  render(
+    <SessionList {...defaultProps} onStatusFilterChange={onStatusFilterChange} />,
+  );
+  await userEvent.click(screen.getByRole("button", { name: /filter sessions/i }));
+  await userEvent.click(await screen.findByRole("menuitemradio", { name: "Running" }));
+  expect(onStatusFilterChange).toHaveBeenCalledWith("running");
+});
+
+test("selecting a source in the filter menu calls onSourceFilterChange", async () => {
+  const onSourceFilterChange = vi.fn();
+  render(
+    <SessionList {...defaultProps} onSourceFilterChange={onSourceFilterChange} />,
+  );
+  await userEvent.click(screen.getByRole("button", { name: /filter sessions/i }));
+  await userEvent.click(await screen.findByRole("menuitemradio", { name: "CLI history" }));
+  expect(onSourceFilterChange).toHaveBeenCalledWith("external");
+});
+
+test("an active filter marks the filter button and empty state offers to clear", () => {
+  const onStatusFilterChange = vi.fn();
+  const onSourceFilterChange = vi.fn();
+  const onSearchChange = vi.fn();
+  render(
+    <SessionList
+      {...defaultProps}
+      groups={[]}
+      statusFilter="running"
+      onStatusFilterChange={onStatusFilterChange}
+      onSourceFilterChange={onSourceFilterChange}
+      onSearchChange={onSearchChange}
+    />,
+  );
+  // Funnel reflects the active filter via its aria-label.
+  expect(
+    screen.getByRole("button", { name: /filter sessions \(active\)/i }),
+  ).toBeInTheDocument();
+  // Empty state is the "no matches" variant, not onboarding.
+  expect(screen.getByText(/no matching sessions/i)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: /clear filters/i }));
+  expect(onStatusFilterChange).toHaveBeenCalledWith("all");
+  expect(onSourceFilterChange).toHaveBeenCalledWith("all");
+  expect(onSearchChange).toHaveBeenCalledWith("");
 });
 
 test("empty state New session button calls onNew", () => {

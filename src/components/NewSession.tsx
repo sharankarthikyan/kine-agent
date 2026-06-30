@@ -21,7 +21,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { type AgentInfo, type ModelInfo } from "@/lib/models";
+import { type AgentInfo, type ModelInfo, isAgentSpawnable } from "@/lib/models";
 import { AgentLogo } from "./AgentLogo";
 
 interface NewSessionProps {
@@ -177,26 +177,32 @@ export function NewSession({
             </DropdownMenuTrigger>
             <DropdownMenuContent align="start" className="min-w-48">
               {agents.length > 0 ? (
-                agents.map((a) => (
-                  <DropdownMenuItem
-                    key={a.id}
-                    disabled={!a.installed}
-                    onSelect={() => onAgentChange(a)}
-                    className="gap-2"
-                  >
-                    <Check
-                      data-icon
-                      className={cn(
-                        "shrink-0",
-                        a.id === agent?.id ? "opacity-100" : "opacity-0",
-                      )}
-                    />
-                    <span className="flex-1">{a.label}</span>
-                    {!a.installed && (
-                      <span className="text-xs text-muted-foreground">not installed</span>
-                    )}
-                  </DropdownMenuItem>
-                ))
+                agents.map((a) => {
+                  const spawnable = isAgentSpawnable(a.id);
+                  const enabled = a.installed && spawnable;
+                  return (
+                    <DropdownMenuItem
+                      key={a.id}
+                      disabled={!enabled}
+                      onSelect={() => onAgentChange(a)}
+                      className="gap-2"
+                    >
+                      <Check
+                        data-icon
+                        className={cn(
+                          "shrink-0",
+                          a.id === agent?.id ? "opacity-100" : "opacity-0",
+                        )}
+                      />
+                      <span className="flex-1">{a.label}</span>
+                      {!a.installed ? (
+                        <span className="text-xs text-muted-foreground">not installed</span>
+                      ) : !spawnable ? (
+                        <span className="text-xs text-muted-foreground">coming soon</span>
+                      ) : null}
+                    </DropdownMenuItem>
+                  );
+                })
               ) : (
                 <DropdownMenuItem disabled>No agents available</DropdownMenuItem>
               )}

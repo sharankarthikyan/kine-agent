@@ -25,6 +25,19 @@ export interface ModelInfo {
   contextWindow: number | null;
 }
 
+/**
+ * Agent ids Kineloop can currently spawn. Other detected agents still appear in
+ * the pickers (so they're discoverable) but are disabled with a "coming soon"
+ * hint until their spawn adapter lands. Keep in sync with the backend's
+ * `start_session`, which today only drives the Claude adapter.
+ */
+export const SPAWNABLE_AGENT_IDS = new Set<string>(["claude"]);
+
+/** Whether Kineloop can currently launch a session with this agent. */
+export function isAgentSpawnable(agentId: string): boolean {
+  return SPAWNABLE_AGENT_IDS.has(agentId);
+}
+
 /** Discover which agent CLIs are installed on this machine. */
 export async function detectAgents(): Promise<AgentInfo[]> {
   assertDesktop();

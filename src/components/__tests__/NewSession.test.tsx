@@ -140,11 +140,21 @@ test("agent trigger shows the current agent label", () => {
   expect(screen.getByRole("button", { name: /Agent: Claude Code/i })).toBeInTheDocument();
 });
 
-test("selecting an installed agent calls onAgentChange", async () => {
+test("selecting a spawnable agent calls onAgentChange", async () => {
   const { onAgentChange } = setup();
   await userEvent.click(screen.getByRole("button", { name: /Agent:/i }));
-  await userEvent.click(screen.getByRole("menuitem", { name: geminiAgent.label }));
-  expect(onAgentChange).toHaveBeenCalledWith(expect.objectContaining({ id: "gemini" }));
+  // Claude is the only spawnable agent today, so it's the only enabled item.
+  await userEvent.click(screen.getByRole("menuitem", { name: claudeAgent.label }));
+  expect(onAgentChange).toHaveBeenCalledWith(expect.objectContaining({ id: "claude" }));
+});
+
+test("an installed-but-not-spawnable agent is disabled with a 'coming soon' hint", async () => {
+  const { onAgentChange } = setup();
+  await userEvent.click(screen.getByRole("button", { name: /Agent:/i }));
+  // Gemini is installed but has no spawn adapter yet → disabled, "coming soon".
+  expect(screen.getByText("coming soon")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("menuitem", { name: /Gemini CLI/i }));
+  expect(onAgentChange).not.toHaveBeenCalled();
 });
 
 test("clicking a not-installed agent item does not call onAgentChange", async () => {

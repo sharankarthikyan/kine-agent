@@ -7,6 +7,15 @@ import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
   Empty,
   EmptyDescription,
   EmptyHeader,
@@ -19,6 +28,11 @@ import type { CustomizationSection } from "./CustomizationsDialog";
 import { relativeTime } from "../lib/relativeTime";
 import { AgentLogo } from "./AgentLogo";
 
+/** Sidebar filter on session status. `"all"` disables the status filter. */
+export type StatusFilter = "all" | SessionStatus;
+/** Sidebar filter on session origin. `"all"` disables the source filter. */
+export type SourceFilter = "all" | "kineloop" | "external";
+
 interface SessionListProps {
   groups: { workspace: string; sessions: SessionSummary[] }[];
   activeId: string | null;
@@ -28,6 +42,10 @@ interface SessionListProps {
   diffstats: Record<string, Diffstat>;
   search: string;
   onSearchChange: (s: string) => void;
+  statusFilter: StatusFilter;
+  sourceFilter: SourceFilter;
+  onStatusFilterChange: (f: StatusFilter) => void;
+  onSourceFilterChange: (f: SourceFilter) => void;
   onOpenCustomization: (section: CustomizationSection) => void;
 }
 
@@ -75,8 +93,13 @@ export function SessionList({
   diffstats,
   search,
   onSearchChange,
+  statusFilter,
+  sourceFilter,
+  onStatusFilterChange,
+  onSourceFilterChange,
   onOpenCustomization,
 }: SessionListProps) {
+  const filterActive = statusFilter !== "all" || sourceFilter !== "all";
   const [searchOpen, setSearchOpen] = useState(false);
   // Workspaces collapsed by the user — tracked by name; absent means expanded.
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
@@ -89,6 +112,9 @@ export function SessionList({
   }, []);
   const now = nowTick;
   const isEmpty = groups.length === 0;
+  // Empty because a search/filter excluded everything (vs. genuinely no sessions)
+  // — drives a "no matches / clear filters" empty state instead of the onboarding one.
+  const narrowedToEmpty = isEmpty && (search.trim().length > 0 || filterActive);
 
   const toggleWorkspace = (workspace: string) => {
     setCollapsed((prev) => {
@@ -107,36 +133,72 @@ export function SessionList({
       className="flex flex-col h-full bg-background min-h-0"
       aria-label="Sessions"
     >
-      {/* Header */}
-      <div className="flex items-center justify-between px-3 pt-3 pb-2 gap-2">
+      {/* Header — minimalist ghost controls; filter accents when active */}
+      <div className="flex items-center justify-between px-3 pt-3 pb-2 gap-1">
         <span className="text-sm font-medium text-muted-foreground">Sessions</span>
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-0.5">
           <Button
             type="button"
             variant="ghost"
             size="icon"
-            className="size-9"
+            className="size-8 text-muted-foreground hover:text-foreground [&_svg]:size-4"
             onClick={() => setSearchOpen((v) => !v)}
+            aria-pressed={searchOpen}
             aria-label="Search sessions"
           >
-            <Search className="size-3.5" />
+            <Search />
           </Button>
+
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className={cn(
+                  "size-8 [&_svg]:size-4",
+                  filterActive
+                    ? "text-foreground"
+                    : "text-muted-foreground hover:text-foreground",
+                )}
+                aria-label={filterActive ? "Filter sessions (active)" : "Filter sessions"}
+              >
+                <ListFilter />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-44">
+              <DropdownMenuLabel className="text-xs text-muted-foreground font-medium">
+                Status
+              </DropdownMenuLabel>
+              <DropdownMenuRadioGroup
+                value={statusFilter}
+                onValueChange={(v) => onStatusFilterChange(v as StatusFilter)}
+              >
+                <DropdownMenuRadioItem value="all">All</DropdownMenuRadioItem>
+                <DropdownMenuRadioItem value="running">Running</DropdownMenuRadioItem>
+                <DropdownMenuRadioItem value="idle">Idle</DropdownMenuRadioItem>
+                <DropdownMenuRadioItem value="error">Error</DropdownMenuRadioItem>
+              </DropdownMenuRadioGroup>
+              <DropdownMenuSeparator />
+              <DropdownMenuLabel className="text-xs text-muted-foreground font-medium">
+                Source
+              </DropdownMenuLabel>
+              <DropdownMenuRadioGroup
+                value={sourceFilter}
+                onValueChange={(v) => onSourceFilterChange(v as SourceFilter)}
+              >
+                <DropdownMenuRadioItem value="all">All</DropdownMenuRadioItem>
+                <DropdownMenuRadioItem value="kineloop">Kineloop</DropdownMenuRadioItem>
+                <DropdownMenuRadioItem value="external">CLI history</DropdownMenuRadioItem>
+              </DropdownMenuRadioGroup>
+            </DropdownMenuContent>
+          </DropdownMenu>
+
           <Button
             type="button"
             variant="ghost"
-            size="icon"
-            className="size-9"
-            aria-label="Filter sessions"
-            disabled
-            tabIndex={-1}
-          >
-            <ListFilter className="size-3.5" />
-          </Button>
-          <Button
-            type="button"
-            variant="outline"
             size="sm"
-            className="h-8 gap-1 px-2.5 text-xs [&_svg]:size-3.5"
+            className="h-8 gap-1 px-2 text-xs [&_svg]:size-4"
             onClick={onNew}
           >
             <Plus data-icon="inline-start" />
@@ -163,21 +225,47 @@ export function SessionList({
 
       {/* Body */}
       {isEmpty ? (
-        <Empty className="border-0">
-          <EmptyMedia variant="icon">
-            <Layers />
-          </EmptyMedia>
-          <EmptyHeader>
-            <EmptyTitle>No sessions yet</EmptyTitle>
-            <EmptyDescription>
-              Start a new session to begin working with an agent.
-            </EmptyDescription>
-          </EmptyHeader>
-          <Button type="button" variant="outline" size="sm" onClick={onNew}>
-            <Plus data-icon="inline-start" />
-            New session
-          </Button>
-        </Empty>
+        narrowedToEmpty ? (
+          <Empty className="border-0">
+            <EmptyMedia variant="icon">
+              <ListFilter />
+            </EmptyMedia>
+            <EmptyHeader>
+              <EmptyTitle>No matching sessions</EmptyTitle>
+              <EmptyDescription>
+                No sessions match the current search or filters.
+              </EmptyDescription>
+            </EmptyHeader>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                onSearchChange("");
+                onStatusFilterChange("all");
+                onSourceFilterChange("all");
+              }}
+            >
+              Clear filters
+            </Button>
+          </Empty>
+        ) : (
+          <Empty className="border-0">
+            <EmptyMedia variant="icon">
+              <Layers />
+            </EmptyMedia>
+            <EmptyHeader>
+              <EmptyTitle>No sessions yet</EmptyTitle>
+              <EmptyDescription>
+                Start a new session to begin working with an agent.
+              </EmptyDescription>
+            </EmptyHeader>
+            <Button type="button" variant="outline" size="sm" onClick={onNew}>
+              <Plus data-icon="inline-start" />
+              New session
+            </Button>
+          </Empty>
+        )
       ) : (
         <ScrollArea className="flex-1 min-h-0">
           <ul className="flex flex-col px-2 py-1">
