@@ -66,8 +66,27 @@ pub fn diff(worktree: &Path) -> Result<SessionDiff, ReviewError> {
 
 /// Compute all reviewable changes for a session branch relative to `base`: committed
 /// branch changes, tracked working-tree changes, and untracked files.
+///
+/// Diffs against the *merge-base* of `base` and HEAD, not `base`'s tip. This counts
+/// only what the session branch itself introduced — commits made since it forked plus
+/// uncommitted working-tree edits — and never attributes the base branch's later
+/// progress to this session. Diffing `base` directly (two-dot) would report a branch
+/// that has fallen behind `main` as if it deleted everything `main` gained meanwhile.
+/// Falls back to `base` when no common ancestor exists (unrelated histories).
 pub fn diff_from_base(worktree: &Path, base: &str) -> Result<SessionDiff, ReviewError> {
-    diff_from_ref(worktree, base)
+    let base_commit = merge_base(worktree, base).unwrap_or_else(|| base.to_string());
+    diff_from_ref(worktree, &base_commit)
+}
+
+/// Resolve the merge-base commit of `base` and HEAD. Returns `None` on any error
+/// (no common ancestor, missing ref) so callers can fall back to `base`.
+fn merge_base(worktree: &Path, base: &str) -> Option<String> {
+    let out = git(worktree, &["merge-base", base, "HEAD"], "merge-base").ok()?;
+    let sha = out.trim();
+    if sha.is_empty() {
+        return None;
+    }
+    Some(sha.to_string())
 }
 
 fn diff_from_ref(worktree: &Path, base: &str) -> Result<SessionDiff, ReviewError> {
@@ -473,6 +492,102 @@ mod tests {
             "expected non-zero files_changed, got {}",
             ds.files_changed
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn diffstat_from_base_ignores_base_progress_for_a_behind_branch() {
+        // Reproduces the "GM session" bug: a session branch that made no changes of
+        // its own but has fallen behind `main` must report +0/−0, not main's later
+        // additions inverted as deletions.
+        let dir = std::env::temp_dir().join(format!("ae-behind-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let git_in = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        git_in(&["init", "-b", "main"]);
+        git_in(&["config", "user.email", "test@test.com"]);
+        git_in(&["config", "user.name", "Test"]);
+
+        // Shared fork point.
+        std::fs::write(dir.join("main.rs"), "fn main() {}\n").unwrap();
+        git_in(&["add", "main.rs"]);
+        git_in(&["commit", "-m", "init"]);
+
+        // Session branch forks here and makes NO commits of its own.
+        git_in(&["checkout", "-b", "session"]);
+
+        // main advances with substantial work the session never saw.
+        git_in(&["checkout", "main"]);
+        std::fs::write(dir.join("big.rs"), "a\nb\nc\nd\ne\nf\n").unwrap();
+        git_in(&["add", "big.rs"]);
+        git_in(&["commit", "-m", "main progresses"]);
+
+        // Back on the (now behind) session branch with a clean tree.
+        git_in(&["checkout", "session"]);
+
+        let ds = diffstat_from_base(&dir, "main");
+        assert_eq!(ds.additions, 0, "branch made no additions of its own");
+        assert_eq!(
+            ds.deletions, 0,
+            "main's later work must not be counted as session deletions"
+        );
+        assert_eq!(ds.files_changed, 0, "no files changed by this session");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn diffstat_from_base_counts_branch_commits_and_uncommitted_edits() {
+        // A branch genuinely ahead of `main`: both its committed work and its
+        // uncommitted working-tree edits count, while main's divergence does not.
+        let dir = std::env::temp_dir().join(format!("ae-ahead-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let git_in = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        git_in(&["init", "-b", "main"]);
+        git_in(&["config", "user.email", "test@test.com"]);
+        git_in(&["config", "user.name", "Test"]);
+        std::fs::write(dir.join("main.rs"), "fn main() {}\n").unwrap();
+        git_in(&["add", "main.rs"]);
+        git_in(&["commit", "-m", "init"]);
+
+        // Branch forks and commits its own file.
+        git_in(&["checkout", "-b", "session"]);
+        std::fs::write(dir.join("feature.rs"), "// feature\nfn f() {}\n").unwrap();
+        git_in(&["add", "feature.rs"]);
+        git_in(&["commit", "-m", "add feature"]);
+        // Plus an uncommitted untracked file.
+        std::fs::write(dir.join("wip.rs"), "// wip\n").unwrap();
+
+        // main advances independently — must not affect the session's stat.
+        git_in(&["checkout", "main"]);
+        std::fs::write(dir.join("unrelated.rs"), "x\ny\nz\n").unwrap();
+        git_in(&["add", "unrelated.rs"]);
+        git_in(&["commit", "-m", "unrelated main work"]);
+        git_in(&["checkout", "session"]);
+
+        let ds = diffstat_from_base(&dir, "main");
+        // feature.rs (2) committed + wip.rs (1) untracked = 3 additions, 2 files.
+        assert_eq!(ds.additions, 3, "branch's own additions only");
+        assert_eq!(ds.deletions, 0);
+        assert_eq!(ds.files_changed, 2);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
