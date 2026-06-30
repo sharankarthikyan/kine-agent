@@ -97,3 +97,17 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets
 
 MVP, local-only. Cloud/remote control, live-terminal attach, and mobile are
 intentionally deferred to later phases.
+
+## Disclaimer
+
+Kineloop is an independent project and is **not affiliated with, sponsored by, or
+endorsed by** Anthropic, OpenAI, or Google. "Claude", "Claude Code", "Codex",
+"Gemini", and "Antigravity" are trademarks of their respective owners; they are
+referenced here only to describe compatibility.
+
+Kineloop orchestrates each vendor's own CLI on your machine. **Your use of those
+CLIs is governed by each vendor's Terms of Service** — including how they are
+authenticated. Some vendors restrict driving their tools programmatically under a
+consumer subscription; review the applicable terms and use a permitted
+authentication method (e.g. your own API key) for your situation. You are
+responsible for ensuring your usage complies.
