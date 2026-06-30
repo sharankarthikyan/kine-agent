@@ -1419,6 +1419,52 @@ mod tests {
     }
 
     #[test]
+    fn repo_for_session_accepts_windows_cwd_for_codex() {
+        // Codex records cwd in session_meta; on Windows it is a `C:\…` path
+        // (JSON-escaped backslashes). It must resolve as the scope on any host.
+        let home = temp_home("win-codex");
+        let dir = home.join(".codex/sessions/2026/06/29");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("rollout.jsonl"),
+            r#"{"type":"session_meta","payload":{"session_id":"c1","cwd":"C:\\work\\proj","model":"gpt-5.5"}}"#.to_string()
+                + "\n"
+                + r#"{"type":"event_msg","payload":{"type":"user_message","message":"hi"}}"#
+                + "\n",
+        )
+        .unwrap();
+        let sessions = list_sessions_in(&home);
+        let repo = repo_for_session_in(&home, &sessions[0].id);
+        assert_eq!(repo, Some(PathBuf::from(r"C:\work\proj")));
+    }
+
+    #[test]
+    fn repo_for_session_accepts_windows_workspace_for_antigravity() {
+        // Antigravity maps conversationId -> workspace in history.jsonl; on
+        // Windows the workspace is a `C:\…` path that must resolve on any host.
+        let home = temp_home("win-agy");
+        let conv = "conv-win";
+        let cli = home.join(".gemini/antigravity-cli");
+        let logs = cli.join(format!("brain/{conv}/.system_generated/logs"));
+        fs::create_dir_all(&logs).unwrap();
+        fs::write(
+            cli.join("history.jsonl"),
+            format!(
+                r#"{{"display":"Hi","timestamp":2,"workspace":"C:\\work\\proj","conversationId":"{conv}"}}"#
+            ) + "\n",
+        )
+        .unwrap();
+        fs::write(
+            logs.join("transcript_full.jsonl"),
+            r#"{"step_index":1,"source":"USER","type":"USER_INPUT","content":"<USER_REQUEST>Hi</USER_REQUEST>"}"#.to_string() + "\n",
+        )
+        .unwrap();
+        let sessions = list_sessions_in(&home);
+        let repo = repo_for_session_in(&home, &sessions[0].id);
+        assert_eq!(repo, Some(PathBuf::from(r"C:\work\proj")));
+    }
+
+    #[test]
     fn is_kineloop_worktree_matches_unix_and_windows_paths() {
         // Current `.kineloop` worktree (Unix + Windows).
         assert!(is_kineloop_worktree("/Users/me/.kineloop/worktrees/abc"));
