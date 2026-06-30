@@ -2,6 +2,7 @@ pub mod adapter;
 pub mod adapters;
 mod commands;
 pub mod events;
+pub mod external_sessions;
 pub mod git;
 pub mod inspect;
 pub mod models;

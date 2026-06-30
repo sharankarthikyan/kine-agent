@@ -11,6 +11,10 @@ const sessions: SessionSummary[] = [
     branch: "agent/a",
     title: "add auth",
     status: "idle",
+    source: "kineloop",
+    turnCount: null,
+    toolCallCount: null,
+    fileActionCount: null,
     createdAt: 1000,
     updatedAt: 3000,
   },
@@ -21,6 +25,10 @@ const sessions: SessionSummary[] = [
     branch: "agent/b",
     title: "fix bug",
     status: "running",
+    source: "kineloop",
+    turnCount: null,
+    toolCallCount: null,
+    fileActionCount: null,
     createdAt: 2000,
     updatedAt: 4000,
   },
@@ -95,6 +103,32 @@ test("marks the active session row with aria-current", () => {
   render(<SessionList {...defaultProps} activeId="b" />);
   const active = screen.getByText("fix bug").closest("[aria-current]");
   expect(active).toHaveAttribute("aria-current", "true");
+});
+
+test("labels external CLI sessions distinctly", () => {
+  render(
+    <SessionList
+      {...defaultProps}
+      groups={[
+        {
+          workspace: "cli",
+          sessions: [
+            {
+              ...sessions[0],
+              id: "external:claude:1",
+              source: "external",
+              turnCount: 4,
+              toolCallCount: 9,
+              fileActionCount: 3,
+            },
+          ],
+        },
+      ]}
+    />,
+  );
+  expect(screen.getByText("CLI")).toBeInTheDocument();
+  expect(screen.getByText(/4 turns · 9 tools · 3 files/)).toBeInTheDocument();
+  expect(screen.queryByText("+0")).not.toBeInTheDocument();
 });
 
 test("calls onNew when the New button in the header is clicked", () => {

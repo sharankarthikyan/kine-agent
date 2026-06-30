@@ -23,7 +23,8 @@ const STATUS_COLOR_VAR: Record<ChangeStatus, string> = {
 export interface ChangesPanelProps {
   branch: BranchChanges | null;
   status: "idle" | "loading" | "ready" | "error";
-  onCommit: (message: string) => void;
+  /** Returns true when the commit succeeded, so the composer can close itself. */
+  onCommit: (message: string) => Promise<boolean> | boolean;
   onOpenFile: (path: string) => void;
   committing: boolean;
 }
@@ -44,9 +45,15 @@ export function ChangesPanel({ branch, status, onCommit, onOpenFile, committing 
     setComposing(true);
   }
 
-  function handleConfirm() {
+  async function handleConfirm() {
     if (!message.trim() || committing) return;
-    onCommit(message.trim());
+    const ok = await onCommit(message.trim());
+    // Close + clear only on success; on failure keep the composer open with the typed
+    // message so the user can fix and retry.
+    if (ok) {
+      setMessage("");
+      setComposing(false);
+    }
   }
 
   function handleCancel() {
@@ -92,7 +99,7 @@ export function ChangesPanel({ branch, status, onCommit, onOpenFile, committing 
             value={message}
             onChange={(e) => setMessage(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter") handleConfirm();
+              if (e.key === "Enter") void handleConfirm();
               if (e.key === "Escape") handleCancel();
             }}
             disabled={committing}
@@ -101,7 +108,7 @@ export function ChangesPanel({ branch, status, onCommit, onOpenFile, committing 
           />
           <Button
             size="sm"
-            onClick={handleConfirm}
+            onClick={() => void handleConfirm()}
             disabled={!message.trim() || committing}
             aria-label="Confirm commit"
           >

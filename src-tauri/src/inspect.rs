@@ -61,7 +61,7 @@ pub fn rule_candidates(worktree: &Path) -> Vec<RuleFile> {
     out
 }
 
-/// Build the set of paths that both `read_text_file` and `write_text_file` are
+/// Build the set of paths that both `read_text_file` and `write_project_text_file` are
 /// permitted to access. Keeping this in one place ensures the two operations share
 /// identical validation — a drift between them would create a security gap.
 ///
@@ -149,32 +149,6 @@ pub fn read_text_file(path: &str, worktree: &Path) -> Result<String, InspectErro
     let mut buf = Vec::new();
     f.take(256 * 1024).read_to_end(&mut buf)?;
     Ok(String::from_utf8_lossy(&buf).to_string())
-}
-
-/// Write `content` to `path`, but ONLY if `path` resolves to a file already in
-/// the allowlist produced by `allowed_read_write_paths` — identical to the set
-/// that `read_text_file` accepts. This guarantees read and write enforce the same
-/// boundary with no risk of the two drifting apart.
-///
-/// The file must already exist (`canonicalize` fails for nonexistent paths): we edit
-/// discovered files, we do not create arbitrary new ones.
-///
-/// Content larger than 1 MiB is rejected before writing to prevent the UI from
-/// accidentally overwriting a file with a huge payload.
-pub fn write_text_file(path: &str, content: &str, worktree: &Path) -> Result<(), InspectError> {
-    // File must already exist — canonicalize resolves symlinks AND errors when absent.
-    let target = std::fs::canonicalize(path)?;
-    let canonical_worktree = std::fs::canonicalize(worktree)?;
-    let allowed = allowed_read_write_paths(worktree, &canonical_worktree);
-    if !allowed.contains(&target) {
-        return Err(InspectError::Forbidden(path.to_string()));
-    }
-    // 1 MiB cap — large enough for any realistic agent customization file.
-    if content.len() > 1024 * 1024 {
-        return Err(InspectError::ContentTooLarge);
-    }
-    std::fs::write(&target, content)?;
-    Ok(())
 }
 
 /// Write only project-local customization files. Global agent configuration and
@@ -965,7 +939,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // ── write_text_file tests ────────────────────────────────────────────────
+    // ── write_project_text_file tests (the IPC write path) ───────────────────
 
     #[test]
     fn write_succeeds_for_discovered_capability_file() {
@@ -976,7 +950,7 @@ mod tests {
         std::fs::write(&agent_file, "original content").unwrap();
 
         let new_content = "updated agent instructions";
-        write_text_file(&agent_file.display().to_string(), new_content, &dir).unwrap();
+        write_project_text_file(&agent_file.display().to_string(), new_content, &dir).unwrap();
 
         // Verify the new content was written by reading back from disk directly.
         let on_disk = std::fs::read_to_string(&agent_file).unwrap();
@@ -995,7 +969,7 @@ mod tests {
 
         assert!(
             matches!(
-                write_text_file(&arbitrary.display().to_string(), "new content", &dir),
+                write_project_text_file(&arbitrary.display().to_string(), "new content", &dir),
                 Err(InspectError::Forbidden(_))
             ),
             "expected Forbidden for a file not in the allowlist"
@@ -1101,7 +1075,7 @@ mod tests {
 
         assert!(
             matches!(
-                write_text_file(&link.display().to_string(), "injected", &dir),
+                write_project_text_file(&link.display().to_string(), "injected", &dir),
                 Err(InspectError::Forbidden(_))
             ),
             "expected Forbidden for a write via a symlink escaping the worktree / ~/.claude"
@@ -1127,7 +1101,7 @@ mod tests {
         let oversized = "x".repeat(1024 * 1024 + 1);
         assert!(
             matches!(
-                write_text_file(&target.display().to_string(), &oversized, &dir),
+                write_project_text_file(&target.display().to_string(), &oversized, &dir),
                 Err(InspectError::ContentTooLarge)
             ),
             "expected ContentTooLarge for payload exceeding 1 MiB"

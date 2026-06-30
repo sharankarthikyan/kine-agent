@@ -9,7 +9,7 @@ describe("sessions client", () => {
   it("listSessions invokes list_sessions and returns the rows", async () => {
     const { invoke } = await import("@tauri-apps/api/core");
     const rows: SessionSummary[] = [
-      { id: "s1", agent: "claude", repo: "/r", branch: "agent/s1", title: "t", status: "idle", createdAt: 1, updatedAt: 2 },
+      { id: "s1", agent: "claude", repo: "/r", branch: "agent/s1", title: "t", status: "idle", source: "kineloop", turnCount: null, toolCallCount: null, fileActionCount: null, createdAt: 1, updatedAt: 2 },
     ];
     vi.mocked(invoke).mockResolvedValue(rows);
     expect(await listSessions()).toEqual(rows);

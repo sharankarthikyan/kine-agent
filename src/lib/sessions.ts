@@ -10,6 +10,10 @@ export interface SessionSummary {
   branch: string;
   title: string;
   status: SessionStatus;
+  source: "kineloop" | "external";
+  turnCount: number | null;
+  toolCallCount: number | null;
+  fileActionCount: number | null;
   createdAt: number;
   updatedAt: number;
 }

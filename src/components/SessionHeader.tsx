@@ -21,6 +21,7 @@ export interface SessionHeaderProps {
   title: string;
   repo: string | null;
   status: string;
+  source: "kineloop" | "external";
   diffstat: Diffstat | null;
   onClose: () => void;
   onCleanup: () => void;
@@ -32,6 +33,7 @@ export function SessionHeader({
   title,
   repo,
   status,
+  source,
   diffstat,
   onClose,
   onCleanup,
@@ -44,7 +46,7 @@ export function SessionHeader({
     <div className="flex items-center gap-3 px-4 py-2 border-b border-border shrink-0">
       {/* Left: two-line info block — status dot, title, status label, repo/diffstat */}
       <div className="flex flex-col min-w-0 flex-1 gap-0.5">
-        {/* Top row: status dot + title + status label (mirrors SessionList row layout) */}
+        {/* Top row: status dot + title — color-coded dot carries status, no duplicate label */}
         <span className="flex items-center gap-2 min-w-0">
           <span
             role="img"
@@ -53,13 +55,14 @@ export function SessionHeader({
             className="size-2 rounded-full shrink-0"
             style={{ background: config.color }}
           />
-	          <span className="text-sm font-medium truncate flex-1">{title}</span>
-	          <span className="text-xs text-muted-foreground shrink-0">{config.label}</span>
+          <span className="text-sm font-medium truncate flex-1">{title}</span>
         </span>
 
         {/* Secondary line: repo and/or diffstat — omitted when both are null */}
-        {(repo !== null || diffstat !== null) && (
+        {(repo !== null || diffstat !== null || source === "external") && (
           <span className="text-xs text-muted-foreground tabular-nums pl-4 flex items-center gap-1">
+            {source === "external" && <span>CLI history</span>}
+            {source === "external" && repo !== null && <span aria-hidden>·</span>}
             {repo !== null && <span>{repo}</span>}
             {repo !== null && diffstat !== null && <span aria-hidden>·</span>}
             {diffstat !== null && (
@@ -82,6 +85,7 @@ export function SessionHeader({
           aria-pressed={panelOpen}
           className="size-9"
           onClick={onTogglePanel}
+          disabled={source === "external"}
         >
           <PanelRight data-icon />
         </Button>
@@ -91,6 +95,7 @@ export function SessionHeader({
           aria-label="Clean up worktree"
           className={cn("size-9 text-muted-foreground hover:text-destructive")}
           onClick={onCleanup}
+          disabled={source === "external"}
         >
           <Trash2 data-icon />
         </Button>

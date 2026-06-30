@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { Bot, FileText, Layers, ListFilter, Plus, Search, Server, Webhook, Zap } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Bot, ChevronRight, FileText, Layers, ListFilter, Plus, Search, Server, Webhook, Zap } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -63,8 +63,29 @@ export function SessionList({
   onOpenCustomization,
 }: SessionListProps) {
   const [searchOpen, setSearchOpen] = useState(false);
-  const now = Date.now();
+  // Workspaces collapsed by the user — tracked by name; absent means expanded.
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
+  // Re-render once a minute so relative timestamps ("2 min ago") stay current even when
+  // the session list is otherwise idle.
+  const [nowTick, setNowTick] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNowTick(Date.now()), 60_000);
+    return () => clearInterval(id);
+  }, []);
+  const now = nowTick;
   const isEmpty = groups.length === 0;
+
+  const toggleWorkspace = (workspace: string) => {
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(workspace)) {
+        next.delete(workspace);
+      } else {
+        next.add(workspace);
+      }
+      return next;
+    });
+  };
 
   return (
     <nav
@@ -100,12 +121,11 @@ export function SessionList({
             type="button"
             variant="outline"
             size="sm"
-            className="h-8 px-2.5"
+            className="h-8 gap-1 px-2.5 text-xs [&_svg]:size-3.5"
             onClick={onNew}
           >
             <Plus data-icon="inline-start" />
             New
-            <kbd className="ml-0.5 text-xs text-muted-foreground font-mono opacity-60">⌘N</kbd>
           </Button>
         </div>
       </div>
@@ -146,12 +166,26 @@ export function SessionList({
       ) : (
         <ScrollArea className="flex-1 min-h-0">
           <ul className="flex flex-col px-2 py-1">
-            {groups.map((group) => (
+            {groups.map((group) => {
+              const isCollapsed = collapsed.has(group.workspace);
+              return (
               <li key={group.workspace}>
-                {/* Workspace header — muted, normal-case */}
-                <div className="px-2 pt-2 pb-1 text-xs text-muted-foreground font-normal select-none truncate">
-                  {group.workspace}
-                </div>
+                {/* Workspace header — collapsible, muted, normal-case */}
+                <button
+                  type="button"
+                  onClick={() => toggleWorkspace(group.workspace)}
+                  aria-expanded={!isCollapsed}
+                  className="group flex w-full items-center gap-1 px-2 pt-2 pb-1 text-xs text-muted-foreground font-normal select-none hover:text-foreground"
+                >
+                  <ChevronRight
+                    className={cn(
+                      "size-3 shrink-0 transition-transform",
+                      !isCollapsed && "rotate-90",
+                    )}
+                  />
+                  <span className="truncate">{group.workspace}</span>
+                </button>
+                {!isCollapsed && (
                 <ul className="flex flex-col gap-0.5">
                   {group.sessions.map((session) => {
                     const active = session.id === activeId;
@@ -159,6 +193,11 @@ export function SessionList({
                     const stat = diffstats[session.id];
                     const additions = stat?.additions ?? 0;
                     const deletions = stat?.deletions ?? 0;
+                    const externalMeta = [
+                      session.turnCount !== null ? `${session.turnCount} turns` : null,
+                      session.toolCallCount !== null ? `${session.toolCallCount} tools` : null,
+                      session.fileActionCount !== null ? `${session.fileActionCount} files` : null,
+                    ].filter(Boolean);
                     return (
                       <li key={session.id}>
                         <Button
@@ -184,13 +223,19 @@ export function SessionList({
                               {session.title}
                             </span>
                             <span className="text-xs text-muted-foreground shrink-0">
-                              {config.label}
+                              {session.source === "external" ? "CLI" : config.label}
                             </span>
                           </span>
                           {/* Bottom row: diffstat + relative time */}
                           <span className="text-xs text-muted-foreground tabular-nums pl-4">
-                            <span style={{ color: "var(--status-success)" }}>+{additions}</span>{" "}
-                            <span style={{ color: "var(--status-error)" }}>−{deletions}</span>
+                            {session.source === "external" ? (
+                              <span>{externalMeta.length > 0 ? externalMeta.join(" · ") : "CLI history"}</span>
+                            ) : (
+                              <>
+                                <span style={{ color: "var(--status-success)" }}>+{additions}</span>{" "}
+                                <span style={{ color: "var(--status-error)" }}>−{deletions}</span>
+                              </>
+                            )}
                             {" · "}
                             {relativeTime(session.updatedAt, now)}
                           </span>
@@ -199,8 +244,10 @@ export function SessionList({
                     );
                   })}
                 </ul>
+                )}
               </li>
-            ))}
+              );
+            })}
           </ul>
         </ScrollArea>
       )}
