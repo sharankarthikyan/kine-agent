@@ -236,10 +236,12 @@ mod tests {
         let other_str = other.to_string_lossy();
 
         let history = cli.join("history.jsonl");
-        let line_old = format!(r#"{{"timestamp":1,"workspace":"{ws_str}","conversationId":"old"}}"#);
+        let line_old =
+            format!(r#"{{"timestamp":1,"workspace":"{ws_str}","conversationId":"old"}}"#);
         let line_other =
             format!(r#"{{"timestamp":5,"workspace":"{other_str}","conversationId":"unrelated"}}"#);
-        let line_new = format!(r#"{{"timestamp":9,"workspace":"{ws_str}","conversationId":"new"}}"#);
+        let line_new =
+            format!(r#"{{"timestamp":9,"workspace":"{ws_str}","conversationId":"new"}}"#);
         fs::write(&history, format!("{line_old}\n{line_other}\n{line_new}\n")).unwrap();
 
         // Newest matching workspace wins; entries for other workspaces are ignored.

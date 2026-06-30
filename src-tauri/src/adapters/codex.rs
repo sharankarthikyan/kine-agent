@@ -30,7 +30,14 @@ impl AgentAdapter for CodexAdapter {
         resume: bool,
         sink: Box<dyn EventSink>,
     ) -> impl std::future::Future<Output = Result<(), SessionError>> + Send {
-        spawn_and_stream(prompt, cwd, session_id, resume, sink, self.captured_thread.clone())
+        spawn_and_stream(
+            prompt,
+            cwd,
+            session_id,
+            resume,
+            sink,
+            self.captured_thread.clone(),
+        )
     }
 }
 
@@ -95,7 +102,11 @@ fn parse_item(item: Option<&Value>) -> Vec<AgentEvent> {
             .get("text")
             .and_then(Value::as_str)
             .filter(|t| !t.is_empty())
-            .map(|t| vec![AgentEvent::Token { text: t.to_string() }])
+            .map(|t| {
+                vec![AgentEvent::Token {
+                    text: t.to_string(),
+                }]
+            })
             .unwrap_or_default(),
         Some("command_execution") => {
             let command = item
@@ -184,9 +195,7 @@ pub async fn spawn_and_stream(
         // `session_id` here is the Codex thread id captured from the first run.
         command.arg("resume").arg(&session_id);
     }
-    command
-        .arg("--json")
-        .arg("--skip-git-repo-check");
+    command.arg("--json").arg("--skip-git-repo-check");
     if let Some(m) = model {
         command.arg("--model").arg(m);
     }
@@ -281,7 +290,8 @@ mod tests {
 
     #[test]
     fn parse_command_execution_emits_tool_call() {
-        let line = r#"{"type":"item.completed","item":{"type":"command_execution","command":"ls -la"}}"#;
+        let line =
+            r#"{"type":"item.completed","item":{"type":"command_execution","command":"ls -la"}}"#;
         let events = parse_line(line);
         assert_eq!(events.len(), 1);
         assert!(
@@ -325,12 +335,15 @@ mod tests {
         let line = r#"{"type":"turn.failed","error":{"message":"model overloaded"}}"#;
         let events = parse_line(line);
         assert_eq!(events.len(), 1);
-        assert!(matches!(&events[0], AgentEvent::Error { message } if message == "model overloaded"));
+        assert!(
+            matches!(&events[0], AgentEvent::Error { message } if message == "model overloaded")
+        );
     }
 
     #[test]
     fn thread_started_id_is_extracted() {
-        let line = r#"{"type":"thread.started","thread_id":"019f19d0-c3cf-7623-9afa-b988b2d42763"}"#;
+        let line =
+            r#"{"type":"thread.started","thread_id":"019f19d0-c3cf-7623-9afa-b988b2d42763"}"#;
         assert_eq!(
             thread_id_from_line(line).as_deref(),
             Some("019f19d0-c3cf-7623-9afa-b988b2d42763")

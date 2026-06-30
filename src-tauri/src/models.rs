@@ -359,8 +359,8 @@ pub fn list_antigravity_models() -> Vec<ModelInfo> {
 /// line is used verbatim as both value and label.
 pub fn refresh_antigravity_models() -> Vec<ModelInfo> {
     if let Some(cache) = read_antigravity_cache() {
-        let fresh =
-            !cache.models.is_empty() && now_unix().saturating_sub(cache.fetched_at) < CACHE_TTL_SECS;
+        let fresh = !cache.models.is_empty()
+            && now_unix().saturating_sub(cache.fetched_at) < CACHE_TTL_SECS;
         if fresh {
             return antigravity_cache_to_models(&cache);
         }
