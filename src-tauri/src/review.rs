@@ -75,16 +75,23 @@ fn diff_from_ref(worktree: &Path, base: &str) -> Result<SessionDiff, ReviewError
         return Err(ReviewError::NotFound(worktree.display().to_string()));
     }
 
+    // `--end-of-options` forces git to treat `base` as a revision, never an option,
+    // even if a malicious repo's default branch name begins with `-`. Option flags
+    // (`--name-status`, `--numstat`) must come BEFORE `--end-of-options`.
     // Status (A/M/D) per tracked path.
     let name_status = git(
         worktree,
-        &["diff", base, "--name-status"],
+        &["diff", "--name-status", "--end-of-options", base],
         "diff --name-status",
     )?;
     // Additions/deletions per tracked path.
-    let numstat = git(worktree, &["diff", base, "--numstat"], "diff --numstat")?;
+    let numstat = git(
+        worktree,
+        &["diff", "--numstat", "--end-of-options", base],
+        "diff --numstat",
+    )?;
     // The unified patch for tracked changes, capped before crossing IPC.
-    let mut patch = git_capped(worktree, &["diff", base], "diff")?;
+    let mut patch = git_capped(worktree, &["diff", "--end-of-options", base], "diff")?;
     // Untracked (new, unadded) files.
     let untracked = git(
         worktree,
@@ -111,14 +118,16 @@ fn diff_from_ref(worktree: &Path, base: &str) -> Result<SessionDiff, ReviewError
         status_by_path.insert(path.to_string(), status);
     }
 
-    // Parse numstat: "<adds>\t<dels>\t<path>" ("-" for binary).
+    // Parse numstat: "<adds>\t<dels>\t<path>" ("-" for binary). For renames/copies the
+    // path field is the `old => new` (or brace) notation, NOT a plain path, so we
+    // reconstruct the new path to match the name-status map and display correctly.
     for line in numstat.lines() {
         let mut parts = line.split('\t');
-        let (Some(adds), Some(dels), Some(path)) = (parts.next(), parts.next(), parts.next())
+        let (Some(adds), Some(dels), Some(raw_path)) = (parts.next(), parts.next(), parts.next())
         else {
             continue;
         };
-        let path = path.to_string();
+        let path = numstat_new_path(raw_path);
         let status = status_by_path
             .get(&path)
             .copied()
@@ -233,18 +242,12 @@ fn git_capped(dir: &Path, args: &[&str], op: &'static str) -> Result<String, Rev
     let stderr_reader = std::thread::spawn(move || read_with_storage_cap(&mut stderr, 64 * 1024));
 
     let status = child.wait()?;
-    let stdout = stdout_reader.join().map_err(|_| {
-        ReviewError::Io(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "stdout reader panicked",
-        ))
-    })??;
-    let stderr = stderr_reader.join().map_err(|_| {
-        ReviewError::Io(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "stderr reader panicked",
-        ))
-    })??;
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_| ReviewError::Io(std::io::Error::other("stdout reader panicked")))??;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| ReviewError::Io(std::io::Error::other("stderr reader panicked")))??;
 
     if !status.success() {
         return Err(ReviewError::Git {
@@ -304,33 +307,59 @@ fn patch_was_truncated(patch: &str) -> bool {
     patch.contains("diff --git a/.kineloop-truncated b/.kineloop-truncated")
 }
 
+/// Reconstruct the destination path from a `git diff --numstat` path field.
+///
+/// For renames/copies git emits the path as `old => new` or, with a common prefix/suffix,
+/// the brace form `pre{old => new}post`. Plain modifications/adds/deletes have no ` => `
+/// and are returned unchanged.
+fn numstat_new_path(raw: &str) -> String {
+    if let (Some(open), Some(close)) = (raw.find('{'), raw.find('}')) {
+        if let Some(arrow) = raw.find(" => ") {
+            if open < arrow && arrow < close {
+                let prefix = &raw[..open];
+                let new_mid = &raw[arrow + 4..close];
+                let suffix = &raw[close + 1..];
+                return format!("{prefix}{new_mid}{suffix}");
+            }
+        }
+    }
+    if let Some(idx) = raw.find(" => ") {
+        return raw[idx + 4..].to_string();
+    }
+    raw.to_string()
+}
+
 fn untracked_file_patch(path: &str, abs: &Path) -> (u32, String) {
     let Ok(meta) = std::fs::metadata(abs) else {
         return (0, String::new());
     };
     if meta.len() > UNTRACKED_FILE_CAP_BYTES {
         let patch = format!(
-            "diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1 @@\n+File omitted from inline diff because it exceeds 512 KiB.\n"
+            "diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,1 @@\n+File omitted from inline diff because it exceeds 512 KiB.\n"
         );
         return (0, patch);
     }
     let Ok(content) = std::fs::read_to_string(abs) else {
         let patch = format!(
-            "diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1 @@\n+Binary or non-UTF-8 file omitted from inline diff.\n"
+            "diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,1 @@\n+Binary or non-UTF-8 file omitted from inline diff.\n"
         );
         return (0, patch);
     };
     let additions = content.lines().count() as u32;
+    // Standards-compliant unified-diff hunk header: `@@ -0,0 +1,N @@` for N>0 added
+    // lines, `@@ -0,0 +0,0 @@` for a genuinely empty file.
+    let hunk_header = if additions == 0 {
+        "@@ -0,0 +0,0 @@".to_string()
+    } else {
+        format!("@@ -0,0 +1,{additions} @@")
+    };
     let mut patch = format!(
-        "diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +{additions} @@\n"
+        "diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n{hunk_header}\n"
     );
     for line in content.lines() {
         patch.push('+');
         patch.push_str(line);
         patch.push('\n');
-    }
-    if content.ends_with('\n') && additions == 0 {
-        patch.push_str("+\n");
     }
     (additions, patch)
 }
@@ -338,6 +367,37 @@ fn untracked_file_patch(path: &str, abs: &Path) -> (u32, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn numstat_new_path_handles_plain_brace_and_non_rename() {
+        // Plain modification/add — returned unchanged.
+        assert_eq!(numstat_new_path("src/main.rs"), "src/main.rs");
+        // Simple rename `old => new`.
+        assert_eq!(numstat_new_path("old.rs => new.rs"), "new.rs");
+        // Brace form with common prefix + suffix.
+        assert_eq!(
+            numstat_new_path("dir/{foo => bar}/baz.rs"),
+            "dir/bar/baz.rs"
+        );
+        // Brace form adding a directory level.
+        assert_eq!(numstat_new_path("src/{ => sub}/file.rs"), "src/sub/file.rs");
+    }
+
+    #[test]
+    fn untracked_patch_hunk_header_is_standards_compliant() {
+        let dir = std::env::temp_dir().join(format!("ae-untracked-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let abs = dir.join("new.txt");
+        std::fs::write(&abs, "line1\nline2\n").unwrap();
+
+        let (additions, patch) = untracked_file_patch("new.txt", &abs);
+        assert_eq!(additions, 2);
+        assert!(
+            patch.contains("@@ -0,0 +1,2 @@"),
+            "expected a count in the hunk header, got: {patch}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn overlap_returns_sorted_intersection() {

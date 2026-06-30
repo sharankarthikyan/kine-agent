@@ -8,6 +8,10 @@ function makeSession(overrides: Partial<SessionSummary> & { id: string; repo: st
     branch: "agent/s",
     title: "Test session",
     status: "idle",
+    source: "kineloop",
+    turnCount: null,
+    toolCallCount: null,
+    fileActionCount: null,
     createdAt: 1,
     ...overrides,
   };

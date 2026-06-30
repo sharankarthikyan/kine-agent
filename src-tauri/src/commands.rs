@@ -1,6 +1,7 @@
 use crate::adapter::{AgentAdapter, EventSink, Prompt};
 use crate::adapters::claude::ClaudeAdapter;
 use crate::events::AgentEvent;
+use crate::external_sessions;
 use crate::git::{self, BranchChanges, CommitResult, TreeEntry};
 use crate::inspect::{
     self, Capabilities, CustomizationCounts, HookEntry, McpServerEntry, PluginEntry, RuleFile,
@@ -119,7 +120,11 @@ async fn run_persisting(
     } else {
         "error"
     };
-    let _ = store.set_status(&session_id, status).await;
+    if let Err(e) = store.set_status(&session_id, status).await {
+        // A failed status write leaves the row stuck on its previous value (e.g.
+        // "running"). Log it so the stuck state is diagnosable rather than silent.
+        eprintln!("failed to set status '{status}' for session {session_id}: {e}");
+    }
     result.map_err(|e| e.to_string())
 }
 
@@ -158,19 +163,26 @@ fn worktrees_root() -> PathBuf {
 /// With an active session, that session's worktree (project + user scope merge).
 /// Without one (`None` / empty — e.g. the New Session screen), an app-owned empty
 /// directory: it contains no `.claude` config, so only the user's `~/.claude/`
-/// global-scope customizations surface. The directory is created so that
-/// `read_text_file` can still canonicalize a worktree root for its allowlist check.
+/// global-scope customizations surface.
+///
+/// This does NOT create the directory — list/count callers never need it to exist on
+/// disk (missing dirs just yield no project entries). Only `read_text_file`, which must
+/// `canonicalize` a worktree root for its allowlist check, materializes it first via
+/// `ensure_scope_dir`.
 fn inspect_scope(root: &Path, session_id: Option<String>) -> Result<PathBuf, String> {
     match session_id.filter(|s| !s.is_empty()) {
         Some(id) => Ok(worktree::worktree_for(root, &id)
             .map_err(|e| e.to_string())?
             .path),
-        None => {
-            let dir = root.join(".global-scope");
-            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-            Ok(dir)
-        }
+        None => Ok(root.join(".global-scope")),
     }
+}
+
+/// Ensure the resolved scope directory exists (idempotent). For a real session worktree
+/// this is a no-op; for the global `.global-scope` sentinel it creates the empty dir so
+/// `read_text_file` can canonicalize it.
+fn ensure_scope_dir(scope: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(scope).map_err(|e| e.to_string())
 }
 
 fn validate_permission_mode(mode: Option<String>) -> Result<Option<String>, String> {
@@ -181,6 +193,26 @@ fn validate_permission_mode(mode: Option<String>) -> Result<Option<String>, Stri
         }
         Some(other) => Err(format!("unsupported permission mode: {other}")),
     }
+}
+
+/// Validate a model identifier before it is forwarded to the agent CLI's `--model` flag.
+///
+/// Not shell injection (`Command` takes argv directly), but an unvalidated value can
+/// carry a NUL byte (crashes `spawn`) or be arbitrarily long. Restrict to the shape of
+/// real model ids/aliases: ASCII alphanumerics plus `- _ . :`, capped at 128 chars.
+fn validate_model(model: Option<String>) -> Result<Option<String>, String> {
+    if let Some(m) = model.as_deref() {
+        if m.is_empty() || m.len() > 128 {
+            return Err("model name must be between 1 and 128 characters".to_string());
+        }
+        if !m
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':'))
+        {
+            return Err(format!("invalid model name: {m}"));
+        }
+    }
+    Ok(model)
 }
 
 fn canonical_repo_path(repo: impl AsRef<Path>) -> Result<PathBuf, String> {
@@ -259,6 +291,9 @@ pub async fn list_trusted_repos(store: State<'_, SessionStore>) -> Result<Vec<St
 ///
 /// `permission_mode` is optional: `Some("acceptEdits")` / `Some("default")` etc. pass
 /// `--permission-mode` to the CLI; `None` omits the flag (CLI default applies).
+// A Tauri command's parameters are its IPC contract; the count is inherent, not a
+// code smell that a parameter struct would meaningfully improve.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn start_session(
     prompt: String,
@@ -272,7 +307,13 @@ pub async fn start_session(
 ) -> Result<(), String> {
     let _guard = runs.acquire(&session_id)?;
     let permission_mode = validate_permission_mode(permission_mode)?;
-    let repo_path = canonical_repo_path(&repo)?;
+    let model = validate_model(model)?;
+    // `canonical_repo_path` does blocking FS + a git subprocess — keep it off the async
+    // runtime thread.
+    let repo_for_canon = repo.clone();
+    let repo_path = tokio::task::spawn_blocking(move || canonical_repo_path(repo_for_canon))
+        .await
+        .map_err(|e| e.to_string())??;
     let repo = ensure_trusted_repo(&store, &repo_path).await?;
     let root = worktrees_root();
     let sid = session_id.clone();
@@ -283,7 +324,7 @@ pub async fn start_session(
         .map_err(|e| e.to_string())?;
 
     // Persist the session row + the user's prompt (seq 0) before streaming.
-    store
+    if let Err(e) = store
         .create_session(
             &session_id,
             "claude",
@@ -293,10 +334,12 @@ pub async fn start_session(
             &title_from_prompt(&prompt),
         )
         .await
-        .map_err(|e| {
-            let _ = worktree::remove(&repo_path, &wt);
-            e.to_string()
-        })?;
+    {
+        // Roll back the just-created worktree off the async runtime (git subprocess).
+        let cleanup_repo = repo_path.clone();
+        let _ = tokio::task::spawn_blocking(move || worktree::remove(&cleanup_repo, &wt)).await;
+        return Err(e.to_string());
+    }
     if let Err(e) = store
         .append_event(
             &session_id,
@@ -340,6 +383,7 @@ pub async fn send_message(
 ) -> Result<(), String> {
     let _guard = runs.acquire(&session_id)?;
     let permission_mode = validate_permission_mode(permission_mode)?;
+    let model = validate_model(model)?;
     let root = worktrees_root();
     let sid = session_id.clone();
     let wt_path = tokio::task::spawn_blocking(move || -> Result<PathBuf, String> {
@@ -353,7 +397,9 @@ pub async fn send_message(
     .map_err(|e| e.to_string())?
     .map_err(|e| e.to_string())?;
 
-    let _ = store.set_status(&session_id, "running").await;
+    if let Err(e) = store.set_status(&session_id, "running").await {
+        eprintln!("failed to mark session {session_id} running: {e}");
+    }
     if let Err(e) = store
         .append_event(
             &session_id,
@@ -421,7 +467,15 @@ pub async fn review_session(session_id: String) -> Result<SessionDiff, String> {
 /// All sessions for the list pane, most-recently-updated first.
 #[tauri::command]
 pub async fn list_sessions(store: State<'_, SessionStore>) -> Result<Vec<SessionSummary>, String> {
-    store.list_sessions().await.map_err(|e| e.to_string())
+    let mut sessions = store.list_sessions().await.map_err(|e| e.to_string())?;
+    // Scanning ~/.claude and ~/.codex transcripts is blocking FS work — keep it off
+    // the async runtime thread.
+    let external = tokio::task::spawn_blocking(external_sessions::list_sessions)
+        .await
+        .map_err(|e| e.to_string())?;
+    sessions.extend(external);
+    sessions.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
+    Ok(sessions)
 }
 
 /// A session's persisted events, in order — the frontend rebuilds its turns from these.
@@ -430,6 +484,14 @@ pub async fn session_events(
     session_id: String,
     store: State<'_, SessionStore>,
 ) -> Result<Vec<StoredEvent>, String> {
+    if session_id.starts_with("external:") {
+        // Reading + parsing a transcript file is blocking FS work.
+        let sid = session_id.clone();
+        return tokio::task::spawn_blocking(move || external_sessions::events_for_session(&sid))
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "external session not found".to_string());
+    }
     store
         .session_events(&session_id)
         .await
@@ -483,6 +545,7 @@ pub async fn read_text_file(session_id: Option<String>, path: String) -> Result<
     let root = worktrees_root();
     tokio::task::spawn_blocking(move || {
         let scope = inspect_scope(&root, session_id)?;
+        ensure_scope_dir(&scope)?;
         inspect::read_text_file(&path, &scope).map_err(|e| e.to_string())
     })
     .await
@@ -548,6 +611,13 @@ pub async fn customizations_counts(
 /// session's worktree. Best-effort: errors in the underlying diff return all zeros.
 #[tauri::command]
 pub async fn session_diffstat(session_id: String) -> Result<Diffstat, String> {
+    if session_id.starts_with("external:") {
+        return Ok(Diffstat {
+            additions: 0,
+            deletions: 0,
+            files_changed: 0,
+        });
+    }
     let root = worktrees_root();
     tokio::task::spawn_blocking(move || {
         let wt = crate::worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;

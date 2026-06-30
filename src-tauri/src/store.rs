@@ -26,6 +26,14 @@ pub struct SessionSummary {
     pub title: String,
     /// "running" | "idle" | "error".
     pub status: String,
+    /// "kineloop" for app-created worktree sessions, "external" for CLI history.
+    pub source: String,
+    /// User turns found in the session transcript, when known.
+    pub turn_count: Option<u32>,
+    /// Tool calls found in the session transcript, when known.
+    pub tool_call_count: Option<u32>,
+    /// Distinct files with verified write/patch actions in the transcript, when known.
+    pub file_action_count: Option<u32>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -236,6 +244,10 @@ impl SessionStore {
                 branch: r.get("branch"),
                 title: r.get("title"),
                 status: r.get("status"),
+                source: "kineloop".to_string(),
+                turn_count: None,
+                tool_call_count: None,
+                file_action_count: None,
                 created_at: r.get("created_at"),
                 updated_at: r.get("updated_at"),
             })

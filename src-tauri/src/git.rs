@@ -108,16 +108,47 @@ pub fn worktree_tree(worktree: &Path) -> Vec<TreeEntry> {
 
 /// Best-effort: derive the repo's default base branch for `worktree`.
 ///
-/// Resolves `origin/HEAD` (e.g. `origin/main`) and strips the `origin/` prefix. Falls
-/// back to `"main"` when there is no remote, no `origin/HEAD` symref, or the lookup
-/// produces empty output. Never panics.
+/// Resolves `origin/HEAD` (e.g. `origin/main`) and strips the `origin/` prefix. When
+/// there is no remote / no `origin/HEAD` symref, falls back to whichever of `main` or
+/// `master` actually exists locally (verified with `rev-parse`), so callers never
+/// silently diff against a non-existent ref. Defaults to `"main"` only as a last resort.
+///
+/// Security: a branch name may legitimately begin with `-` (git accepts it; only the
+/// porcelain `git branch` rejects it). Such a name, passed as a positional arg to
+/// `git diff`, would be parsed as an option (argument injection). We reject any
+/// candidate starting with `-` here, and callers additionally pass `--end-of-options`
+/// before the base — defence in depth. Never panics.
 pub fn default_base(worktree: &Path) -> String {
     let head = git_stdout(worktree, &["rev-parse", "--abbrev-ref", "origin/HEAD"]);
-    let head = head.trim();
-    head.strip_prefix("origin/")
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "main".to_string())
+    if let Some(branch) = head
+        .trim()
+        .strip_prefix("origin/")
+        .filter(|s| !s.is_empty() && !s.starts_with('-'))
+    {
+        return branch.to_string();
+    }
+    for candidate in ["main", "master"] {
+        if branch_exists(worktree, candidate) {
+            return candidate.to_string();
+        }
+    }
+    "main".to_string()
+}
+
+/// True when `branch` resolves to a local ref in `worktree`. Uses the fully-qualified
+/// `refs/heads/<branch>` form so the lookup cannot be satisfied by a tag or remote ref.
+fn branch_exists(worktree: &Path, branch: &str) -> bool {
+    !git_stdout(
+        worktree,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ],
+    )
+    .trim()
+    .is_empty()
 }
 
 /// Return the number of commits `worktree`'s HEAD is ahead of `base`, plus the set of

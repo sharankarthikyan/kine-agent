@@ -13,12 +13,14 @@ const BRANCH: BranchChanges = {
 };
 
 const noop = () => {};
+// onCommit must return a success flag (true) so the composer can decide to close.
+const commitNoop = (): boolean => false;
 
 // ── Empty states ───────────────────────────────────────────────────────────────
 
 test("shows 'No changes' when branch is null", () => {
   render(
-    <ChangesPanel status="ready" branch={null} onCommit={noop} onOpenFile={noop} committing={false} />,
+    <ChangesPanel status="ready" branch={null} onCommit={commitNoop} onOpenFile={noop} committing={false} />,
   );
   expect(screen.getByText("No changes")).toBeInTheDocument();
 });
@@ -28,7 +30,7 @@ test("shows 'No changes' when branch has no files", () => {
     <ChangesPanel
       status="ready"
       branch={{ aheadCount: 0, files: [] }}
-      onCommit={noop}
+      onCommit={commitNoop}
       onOpenFile={noop}
       committing={false}
     />,
@@ -38,14 +40,14 @@ test("shows 'No changes' when branch has no files", () => {
 
 test("shows a loading state before changes are ready", () => {
   render(
-    <ChangesPanel status="loading" branch={null} onCommit={noop} onOpenFile={noop} committing={false} />,
+    <ChangesPanel status="loading" branch={null} onCommit={commitNoop} onOpenFile={noop} committing={false} />,
   );
   expect(screen.getByText("Loading changes…")).toBeInTheDocument();
 });
 
 test("shows an error state when changes fail to load", () => {
   render(
-    <ChangesPanel status="error" branch={null} onCommit={noop} onOpenFile={noop} committing={false} />,
+    <ChangesPanel status="error" branch={null} onCommit={commitNoop} onOpenFile={noop} committing={false} />,
   );
   expect(screen.getByText("Changes could not be loaded.")).toBeInTheDocument();
 });
@@ -54,7 +56,7 @@ test("shows an error state when changes fail to load", () => {
 
 test("renders each file path", () => {
   render(
-    <ChangesPanel status="ready" branch={BRANCH} onCommit={noop} onOpenFile={noop} committing={false} />,
+    <ChangesPanel status="ready" branch={BRANCH} onCommit={commitNoop} onOpenFile={noop} committing={false} />,
   );
   expect(screen.getByText("src/app.ts")).toBeInTheDocument();
   expect(screen.getByText("src/new.ts")).toBeInTheDocument();
@@ -63,7 +65,7 @@ test("renders each file path", () => {
 
 test("shows per-file addition and deletion counts", () => {
   render(
-    <ChangesPanel status="ready" branch={BRANCH} onCommit={noop} onOpenFile={noop} committing={false} />,
+    <ChangesPanel status="ready" branch={BRANCH} onCommit={commitNoop} onOpenFile={noop} committing={false} />,
   );
   // First file: +5, -2
   expect(screen.getByText("+5")).toBeInTheDocument();
@@ -73,7 +75,7 @@ test("shows per-file addition and deletion counts", () => {
 test("clicking a file row calls onOpenFile with the file path", async () => {
   const onOpenFile = vi.fn();
   render(
-    <ChangesPanel status="ready" branch={BRANCH} onCommit={noop} onOpenFile={onOpenFile} committing={false} />,
+    <ChangesPanel status="ready" branch={BRANCH} onCommit={commitNoop} onOpenFile={onOpenFile} committing={false} />,
   );
   await userEvent.click(screen.getByRole("button", { name: /Open src\/app\.ts/i }));
   expect(onOpenFile).toHaveBeenCalledWith("src/app.ts");
@@ -83,7 +85,7 @@ test("clicking a file row calls onOpenFile with the file path", async () => {
 
 test("shows ahead count in the summary", () => {
   render(
-    <ChangesPanel status="ready" branch={BRANCH} onCommit={noop} onOpenFile={noop} committing={false} />,
+    <ChangesPanel status="ready" branch={BRANCH} onCommit={commitNoop} onOpenFile={noop} committing={false} />,
   );
   expect(screen.getByText(/2 ahead/)).toBeInTheDocument();
 });
@@ -92,7 +94,7 @@ test("shows ahead count in the summary", () => {
 
 test("Commit button reveals the message input", async () => {
   render(
-    <ChangesPanel status="ready" branch={BRANCH} onCommit={noop} onOpenFile={noop} committing={false} />,
+    <ChangesPanel status="ready" branch={BRANCH} onCommit={commitNoop} onOpenFile={noop} committing={false} />,
   );
   expect(screen.queryByLabelText("Commit message")).not.toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "Commit changes" }));
@@ -101,7 +103,7 @@ test("Commit button reveals the message input", async () => {
 
 test("confirm is disabled when message is empty", async () => {
   render(
-    <ChangesPanel status="ready" branch={BRANCH} onCommit={noop} onOpenFile={noop} committing={false} />,
+    <ChangesPanel status="ready" branch={BRANCH} onCommit={commitNoop} onOpenFile={noop} committing={false} />,
   );
   await userEvent.click(screen.getByRole("button", { name: "Commit changes" }));
   expect(screen.getByRole("button", { name: "Confirm commit" })).toBeDisabled();
@@ -109,7 +111,7 @@ test("confirm is disabled when message is empty", async () => {
 
 test("confirm is disabled when message is only whitespace", async () => {
   render(
-    <ChangesPanel status="ready" branch={BRANCH} onCommit={noop} onOpenFile={noop} committing={false} />,
+    <ChangesPanel status="ready" branch={BRANCH} onCommit={commitNoop} onOpenFile={noop} committing={false} />,
   );
   await userEvent.click(screen.getByRole("button", { name: "Commit changes" }));
   await userEvent.type(screen.getByLabelText("Commit message"), "   ");
@@ -127,11 +129,33 @@ test("confirming calls onCommit with the typed message", async () => {
   expect(onCommit).toHaveBeenCalledWith("fix: add tests");
 });
 
+test("composer closes after a successful commit but stays open on failure", async () => {
+  const ok = vi.fn(() => Promise.resolve(true));
+  const { rerender } = render(
+    <ChangesPanel status="ready" branch={BRANCH} onCommit={ok} onOpenFile={noop} committing={false} />,
+  );
+  await userEvent.click(screen.getByRole("button", { name: "Commit changes" }));
+  await userEvent.type(screen.getByLabelText("Commit message"), "fix: it");
+  await userEvent.click(screen.getByRole("button", { name: "Confirm commit" }));
+  // Success → composer closed (message input gone).
+  expect(screen.queryByLabelText("Commit message")).not.toBeInTheDocument();
+
+  const fail = vi.fn(() => Promise.resolve(false));
+  rerender(
+    <ChangesPanel status="ready" branch={BRANCH} onCommit={fail} onOpenFile={noop} committing={false} />,
+  );
+  await userEvent.click(screen.getByRole("button", { name: "Commit changes" }));
+  await userEvent.type(screen.getByLabelText("Commit message"), "bad");
+  await userEvent.click(screen.getByRole("button", { name: "Confirm commit" }));
+  // Failure → composer stays open with the typed message preserved.
+  expect(screen.getByLabelText("Commit message")).toHaveValue("bad");
+});
+
 // ── Committing busy state ──────────────────────────────────────────────────────
 
 test("commit button is disabled while committing", () => {
   render(
-    <ChangesPanel status="ready" branch={BRANCH} onCommit={noop} onOpenFile={noop} committing={true} />,
+    <ChangesPanel status="ready" branch={BRANCH} onCommit={commitNoop} onOpenFile={noop} committing={true} />,
   );
   // The initial commit button shows "Committing…" and is disabled
   expect(screen.getByRole("button", { name: "Commit changes" })).toBeDisabled();
@@ -139,14 +163,14 @@ test("commit button is disabled while committing", () => {
 
 test("confirm commit button is disabled while committing", async () => {
   const { rerender } = render(
-    <ChangesPanel status="ready" branch={BRANCH} onCommit={noop} onOpenFile={noop} committing={false} />,
+    <ChangesPanel status="ready" branch={BRANCH} onCommit={commitNoop} onOpenFile={noop} committing={false} />,
   );
   // Open the composer and type a message so confirm would normally be enabled
   await userEvent.click(screen.getByRole("button", { name: "Commit changes" }));
   await userEvent.type(screen.getByLabelText("Commit message"), "fix: something");
   // Simulate commit in-flight — confirm must become disabled
   rerender(
-    <ChangesPanel status="ready" branch={BRANCH} onCommit={noop} onOpenFile={noop} committing={true} />,
+    <ChangesPanel status="ready" branch={BRANCH} onCommit={commitNoop} onOpenFile={noop} committing={true} />,
   );
   expect(screen.getByRole("button", { name: "Confirm commit" })).toBeDisabled();
 });

@@ -13,6 +13,7 @@ function setup(overrides: Partial<React.ComponentProps<typeof SessionHeader>> = 
       title="Fix the login bug"
       repo="my-repo"
       status="idle"
+      source="kineloop"
       diffstat={DIFFSTAT}
       onClose={onClose}
       onCleanup={onCleanup}
@@ -79,6 +80,17 @@ test("cleanup button calls onCleanup", () => {
   expect(onCleanup).toHaveBeenCalledTimes(1);
 });
 
+test("external CLI sessions disable cleanup and show read-only source", () => {
+  const { onCleanup } = setup({ source: "external" });
+  const button = screen.getByRole("button", { name: "Clean up worktree" });
+  const panelButton = screen.getByRole("button", { name: "Toggle panel" });
+  expect(screen.getByText("CLI history")).toBeInTheDocument();
+  expect(button).toBeDisabled();
+  expect(panelButton).toBeDisabled();
+  fireEvent.click(button);
+  expect(onCleanup).not.toHaveBeenCalled();
+});
+
 // ── Panel toggle ──────────────────────────────────────────────────────────────
 
 test("panel toggle calls onTogglePanel", () => {
@@ -95,19 +107,21 @@ test("panel toggle reflects panelOpen via aria-pressed", () => {
   );
 });
 
-// ── Status label ──────────────────────────────────────────────────────────────
+// ── Status indicator ──────────────────────────────────────────────────────────
+// Status is conveyed by a single color-coded dot; the label is exposed to
+// assistive tech via the dot's accessible name (no duplicate visible text).
 
-test("renders the status label for a known status", () => {
+test("exposes the status via the dot's accessible label for a known status", () => {
   setup({ status: "running" });
-  expect(screen.getByText("Running")).toBeInTheDocument();
+  expect(screen.getByRole("img", { name: "Status: Running" })).toBeInTheDocument();
 });
 
-test("renders Idle instead of relying on color alone", () => {
+test("exposes Idle status without relying on color alone", () => {
   setup({ status: "idle" });
-  expect(screen.getByText("Idle")).toBeInTheDocument();
+  expect(screen.getByRole("img", { name: "Status: Idle" })).toBeInTheDocument();
 });
 
-test("renders 'Unknown' label for an unrecognised status", () => {
+test("exposes 'Unknown' status for an unrecognised status", () => {
   setup({ status: "pending" });
-  expect(screen.getByText("Unknown")).toBeInTheDocument();
+  expect(screen.getByRole("img", { name: "Status: Unknown" })).toBeInTheDocument();
 });

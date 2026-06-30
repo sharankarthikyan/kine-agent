@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import {
   ArrowLeft,
   Bot,
@@ -811,10 +811,21 @@ export function CustomizationsDialog({
   const [fileContent, setFileContent] = useState<string | null>(null);
   const [fileLoading, setFileLoading] = useState(false);
   const [fileError, setFileError] = useState(false);
+  // Path of the most recently requested file read — lets an in-flight read detect that
+  // a newer file was opened and bail out instead of clobbering the newer view.
+  const latestRequestRef = useRef<string | null>(null);
 
-  // Reset active section + clear detail/search whenever the dialog opens.
+  // Reset active section + clear any stale detail/file state whenever the dialog opens.
+  // Clearing here (not only in the activeSection effect) covers re-opening to the SAME
+  // section the dialog last showed — where setActiveSection would be a no-op and the
+  // section effect would not fire, leaving a stale file detail view on screen.
   useEffect(() => {
-    if (open) setActiveSection(initialSection);
+    if (!open) return;
+    setActiveSection(initialSection);
+    setDetail(null);
+    setFileContent(null);
+    setFileError(false);
+    setFileLoading(false);
   }, [open, initialSection]);
 
   // Clear detail + search whenever the active section changes (nav click or dialog open).
@@ -834,17 +845,23 @@ export function CustomizationsDialog({
 
   // Open a file in the in-dialog viewer.
   async function handleOpenDetail(name: string, path: string, editable: boolean) {
+    latestRequestRef.current = path;
     setDetail({ name, path, editable });
     setFileContent(null);
     setFileError(false);
     setFileLoading(true);
     try {
       const content = await readTextFile(sessionId, path);
+      // Guard against a fast A→B click: only apply the result if the file the user is
+      // looking at is still the one we fetched. Otherwise the header (B) and body (A)
+      // would disagree.
+      if (latestRequestRef.current !== path) return;
       setFileContent(content);
     } catch {
+      if (latestRequestRef.current !== path) return;
       setFileError(true);
     } finally {
-      setFileLoading(false);
+      if (latestRequestRef.current === path) setFileLoading(false);
     }
   }
 

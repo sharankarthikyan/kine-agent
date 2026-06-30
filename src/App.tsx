@@ -1,8 +1,15 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { Maximize2, Minimize2, X } from "lucide-react";
+import { Loader2, Maximize2, Minimize2, X } from "lucide-react";
 import { PromptBar } from "./components/PromptBar";
 import { NewSession } from "./components/NewSession";
 import { Conversation, type Turn } from "./components/Conversation";
@@ -15,16 +22,44 @@ import { ContextPanel } from "./components/ContextPanel";
 import { ChangesPanel } from "./components/ChangesPanel";
 import { FilesTree } from "./components/FilesTree";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import {
+  Sheet,
+  SheetContent,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Toaster } from "@/components/ui/sonner";
-import { cleanupSession, listTrustedRepos, pickRepository, startSession, sendMessage, type AgentEvent } from "./lib/agent";
-import { detectAgents, listModels, type AgentInfo, type ModelInfo } from "./lib/models";
+import {
+  cleanupSession,
+  listTrustedRepos,
+  pickRepository,
+  startSession,
+  sendMessage,
+  type AgentEvent,
+} from "./lib/agent";
+import {
+  detectAgents,
+  listModels,
+  type AgentInfo,
+  type ModelInfo,
+} from "./lib/models";
 import { reviewSession, type SessionDiff } from "./lib/review";
-import { listSessions, sessionEvents, type SessionSummary, type StoredEvent } from "./lib/sessions";
+import {
+  listSessions,
+  sessionEvents,
+  type SessionSummary,
+  type StoredEvent,
+} from "./lib/sessions";
 import { groupByWorkspace } from "./lib/workspaces";
 import { filesFromEvents, latestUsage } from "./lib/contextDerive";
-import { inspectRules, readTextFile, listCapabilities, type RuleFile, type Capabilities } from "./lib/inspect";
+import {
+  inspectRules,
+  readTextFile,
+  listCapabilities,
+  type RuleFile,
+  type Capabilities,
+} from "./lib/inspect";
 import { turnsFromEvents } from "./lib/turns";
 import {
   branchChanges as fetchBranchChanges,
@@ -54,8 +89,14 @@ const CustomizationsDialog = lazy(() =>
 
 /** Derive a short display title from the first non-empty line of the prompt. */
 function titleFromPrompt(text: string): string {
-  const line = text.split("\n").map((l) => l.trim()).find(Boolean) ?? "";
-  return line.length > 60 ? `${line.slice(0, 59)}…` : line || "Untitled session";
+  const line =
+    text
+      .split("\n")
+      .map((l) => l.trim())
+      .find(Boolean) ?? "";
+  return line.length > 60
+    ? `${line.slice(0, 59)}…`
+    : line || "Untitled session";
 }
 
 function safeErrorMessage(err: unknown): string {
@@ -70,14 +111,22 @@ export default function App() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [turns, setTurns] = useState<Turn[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
-  const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(() => new Set());
+  const [loadingSessionId, setLoadingSessionId] = useState<string | null>(null);
+  const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(
+    () => new Set(),
+  );
   const [diff, setDiff] = useState<SessionDiff | null>(null);
-  const [rightTab, setRightTab] = useState<"context" | "changes" | "files" | null>(null);
+  const [rightTab, setRightTab] = useState<
+    "context" | "changes" | "files" | null
+  >(null);
   const [rightExpanded, setRightExpanded] = useState(false);
   const [storedEvents, setStoredEvents] = useState<StoredEvent[]>([]);
   const [rules, setRules] = useState<RuleFile[]>([]);
   const [capabilities, setCapabilities] = useState<Capabilities | null>(null);
-  const [ruleView, setRuleView] = useState<{ label: string; content: string } | null>(null);
+  const [ruleView, setRuleView] = useState<{
+    label: string;
+    content: string;
+  } | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [selectedModel, setSelectedModel] = useState<ModelInfo | null>(null);
   const [agents, setAgents] = useState<AgentInfo[]>([]);
@@ -88,7 +137,11 @@ export default function App() {
   const [sessionSearch, setSessionSearch] = useState("");
   // Sidebar collapse — persisted in localStorage.
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
-    try { return localStorage.getItem("agent-editor.sidebarCollapsed") === "true"; } catch { return false; }
+    try {
+      return localStorage.getItem("agent-editor.sidebarCollapsed") === "true";
+    } catch {
+      return false;
+    }
   });
   // Customization counts for the active session, fetched best-effort.
   const [counts, setCounts] = useState<CustomizationCounts | null>(null);
@@ -99,18 +152,26 @@ export default function App() {
   const [plugins, setPlugins] = useState<PluginEntry[]>([]);
   // Customizations dialog state — section defaults to "overview" until set by the sidebar row click.
   const [custDialogOpen, setCustDialogOpen] = useState(false);
-  const [custSection, setCustSection] = useState<CustomizationSection>("overview");
+  const [custSection, setCustSection] =
+    useState<CustomizationSection>("overview");
   // Per-session diffstats, fetched opportunistically and retained across session switches.
   const [diffstats, setDiffstats] = useState<Record<string, Diffstat>>({});
   // Changes tab state.
-  const [branchChanges, setBranchChanges] = useState<BranchChanges | null>(null);
-  const [branchChangesStatus, setBranchChangesStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [branchChanges, setBranchChanges] = useState<BranchChanges | null>(
+    null,
+  );
+  const [branchChangesStatus, setBranchChangesStatus] = useState<
+    "idle" | "loading" | "ready" | "error"
+  >("idle");
   // Files tab state.
   const [treeNodes, setTreeNodes] = useState<TreeNode[]>([]);
   // Commit-in-flight flag.
   const [committing, setCommitting] = useState(false);
   // File-click diff Sheet — null means closed.
-  const [diffSheet, setDiffSheet] = useState<{ path: string; diff: SessionDiff } | null>(null);
+  const [diffSheet, setDiffSheet] = useState<{
+    path: string;
+    diff: SessionDiff;
+  } | null>(null);
 
   // Synchronous ref keeps the active session ID readable inside async callbacks
   // without stale-closure issues — the guard for cross-session contamination.
@@ -123,7 +184,9 @@ export default function App() {
   // Ref that tracks sidebarCollapsed for reading inside async callbacks without
   // stale-closure issues (same pattern as activeSessionIdRef above).
   const sidebarCollapsedRef = useRef(sidebarCollapsed);
-  useEffect(() => { sidebarCollapsedRef.current = sidebarCollapsed; }, [sidebarCollapsed]);
+  useEffect(() => {
+    sidebarCollapsedRef.current = sidebarCollapsed;
+  }, [sidebarCollapsed]);
 
   // Fetch diffstat for a single session and merge into the diffstats record.
   // Best-effort — silently ignores IPC failures (e.g. browser preview, no worktree yet).
@@ -140,10 +203,13 @@ export default function App() {
   // into a SINGLE setDiffstats call — avoids N separate re-renders and N subprocess
   // spawns. Skipped entirely when the sidebar is collapsed (rows aren't rendered).
   const refreshAllDiffstats = useCallback(async (list: SessionSummary[]) => {
-    if (sidebarCollapsedRef.current || list.length === 0) return;
-    const results = await Promise.allSettled(list.map((s) => sessionDiffstat(s.id)));
+    const reviewable = list.filter((s) => s.source !== "external");
+    if (sidebarCollapsedRef.current || reviewable.length === 0) return;
+    const results = await Promise.allSettled(
+      reviewable.map((s) => sessionDiffstat(s.id)),
+    );
     const updates: Record<string, Diffstat> = {};
-    list.forEach((s, i) => {
+    reviewable.forEach((s, i) => {
       const r = results[i];
       if (r.status === "fulfilled") updates[s.id] = r.value;
     });
@@ -170,7 +236,9 @@ export default function App() {
       const discovered = await detectAgents();
       const supported = discovered.filter((a) => a.id === "claude");
       const installed = supported.filter((a) => a.installed);
-      const results = await Promise.allSettled(installed.map((a) => listModels(a.id)));
+      const results = await Promise.allSettled(
+        installed.map((a) => listModels(a.id)),
+      );
       const all = results
         .flatMap((r) => (r.status === "fulfilled" ? r.value : []))
         .filter((m) => !m.disabled);
@@ -187,7 +255,11 @@ export default function App() {
   function toggleSidebar() {
     setSidebarCollapsed((prev) => {
       const next = !prev;
-      try { localStorage.setItem("agent-editor.sidebarCollapsed", String(next)); } catch { /* ignore */ }
+      try {
+        localStorage.setItem("agent-editor.sidebarCollapsed", String(next));
+      } catch {
+        /* ignore */
+      }
       return next;
     });
   }
@@ -245,9 +317,17 @@ export default function App() {
   }, [loadModels]);
 
   useEffect(() => {
-    try { localStorage.removeItem("agent-editor.recentRepos"); } catch { /* legacy cleanup */ }
+    try {
+      localStorage.removeItem("agent-editor.recentRepos");
+    } catch {
+      /* legacy cleanup */
+    }
     (async () => {
-      try { setRecents(await listTrustedRepos()); } catch { setRecents([]); }
+      try {
+        setRecents(await listTrustedRepos());
+      } catch {
+        setRecents([]);
+      }
     })();
   }, []);
 
@@ -274,14 +354,20 @@ export default function App() {
   }, [activeSessionId, fetchDiffstat]);
 
   // closeRight keeps the "reset both flags together" invariant structural.
-  const closeRight = () => { setRightTab(null); setRightExpanded(false); };
+  const closeRight = () => {
+    setRightTab(null);
+    setRightExpanded(false);
+  };
 
   // Esc closes the right pane — especially useful in the chat-hiding expanded state.
   // Inline the two setters so the linter's exhaustive-deps rule is satisfied.
   useEffect(() => {
     if (rightTab === null) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") { setRightTab(null); setRightExpanded(false); }
+      if (e.key === "Escape") {
+        setRightTab(null);
+        setRightExpanded(false);
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -294,10 +380,21 @@ export default function App() {
     if (rightTab !== "context" || !activeSessionId) return;
     const sessionId = activeSessionId;
     (async () => {
-      try { const r = await inspectRules(sessionId); if (activeSessionIdRef.current === sessionId) setRules(r); }
-      catch { if (activeSessionIdRef.current === sessionId) setRules([]); }
-      try { const c = await listCapabilities(sessionId, selectedModel?.agent ?? "claude"); if (activeSessionIdRef.current === sessionId) setCapabilities(c); }
-      catch { if (activeSessionIdRef.current === sessionId) setCapabilities(null); }
+      try {
+        const r = await inspectRules(sessionId);
+        if (activeSessionIdRef.current === sessionId) setRules(r);
+      } catch {
+        if (activeSessionIdRef.current === sessionId) setRules([]);
+      }
+      try {
+        const c = await listCapabilities(
+          sessionId,
+          selectedModel?.agent ?? "claude",
+        );
+        if (activeSessionIdRef.current === sessionId) setCapabilities(c);
+      } catch {
+        if (activeSessionIdRef.current === sessionId) setCapabilities(null);
+      }
     })();
   }, [rightTab, activeSessionId, selectedModel?.agent]);
 
@@ -313,25 +410,38 @@ export default function App() {
       try {
         const r = await inspectRules(sessionId);
         if (activeSessionIdRef.current === sessionId) setRules(r);
-      } catch { /* best-effort */ }
+      } catch {
+        /* best-effort */
+      }
       try {
-        const c = await listCapabilities(sessionId, selectedModel?.agent ?? "claude");
+        const c = await listCapabilities(
+          sessionId,
+          selectedModel?.agent ?? "claude",
+        );
         if (activeSessionIdRef.current === sessionId) setCapabilities(c);
-      } catch { /* best-effort */ }
+      } catch {
+        /* best-effort */
+      }
       try {
         const h = await listHooks(sessionId);
         if (activeSessionIdRef.current === sessionId) setHooks(h);
-      } catch { /* best-effort */ }
+      } catch {
+        /* best-effort */
+      }
       try {
         const m = await listMcpServers(sessionId);
         if (activeSessionIdRef.current === sessionId) setMcpServers(m);
-      } catch { /* best-effort */ }
+      } catch {
+        /* best-effort */
+      }
       try {
         const p = await listPlugins(sessionId);
         if (activeSessionIdRef.current === sessionId) setPlugins(p);
-      } catch { /* best-effort */ }
+      } catch {
+        /* best-effort */
+      }
     })();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [custDialogOpen, activeSessionId, selectedModel?.agent]);
 
   // Fetch branch-level changes when the Changes tab becomes active.
@@ -348,7 +458,8 @@ export default function App() {
     (async () => {
       try {
         const entries = await fetchWorktreeTree(sessionId);
-        if (activeSessionIdRef.current === sessionId) setTreeNodes(buildTree(entries));
+        if (activeSessionIdRef.current === sessionId)
+          setTreeNodes(buildTree(entries));
       } catch {
         if (activeSessionIdRef.current === sessionId) setTreeNodes([]);
       }
@@ -367,8 +478,11 @@ export default function App() {
 
   // Commit the session's worktree changes. Shows toast feedback and refreshes
   // the Changes tab data + the session's diffstat after a successful commit.
-  async function handleCommit(message: string) {
-    if (!activeSessionId || committing) return;
+  // Returns true on a successful commit so the composer can close itself; false on
+  // failure (or a no-op guard) so the user keeps their typed message to retry.
+  async function handleCommit(message: string): Promise<boolean> {
+    if (!activeSessionId || committing || activeSession?.source === "external")
+      return false;
     const sessionId = activeSessionId;
     setCommitting(true);
     try {
@@ -384,8 +498,10 @@ export default function App() {
           await refreshAllDiffstats(list);
         })(),
       ]);
+      return true;
     } catch (err) {
       toast.error(safeErrorMessage(err));
+      return false;
     } finally {
       setCommitting(false);
     }
@@ -416,12 +532,17 @@ export default function App() {
     model: ModelInfo | null,
     opts?: { repo?: string; permissionMode?: string },
   ) {
+    if (activeSession?.source === "external") {
+      toast.error("External CLI sessions are read-only in Kineloop.");
+      return;
+    }
     const isNew = activeSessionId === null;
     const sessionId = activeSessionId ?? crypto.randomUUID();
     const repo = opts?.repo ?? ".";
     // Set the ref synchronously before the first await so the cross-session guard
     // is exact for new sessions (id now known up front, not after startSession resolves).
     setActive(sessionId);
+    setLoadingSessionId(null);
     // Optimistically upsert a "running" row at the top of the list immediately —
     // refreshSessions() in finally reconciles the real title/status from the backend.
     setSessions((prev) => {
@@ -429,7 +550,20 @@ export default function App() {
       const now = Date.now();
       const row: SessionSummary = existing
         ? { ...existing, status: "running", updatedAt: now }
-        : { id: sessionId, agent: "claude", repo, branch: `agent/${sessionId}`, title: titleFromPrompt(text), status: "running", createdAt: now, updatedAt: now };
+        : {
+            id: sessionId,
+            agent: "claude",
+            repo,
+            branch: `agent/${sessionId}`,
+            title: titleFromPrompt(text),
+            status: "running",
+            source: "kineloop",
+            turnCount: null,
+            toolCallCount: null,
+            fileActionCount: null,
+            createdAt: now,
+            updatedAt: now,
+          };
       return [row, ...prev.filter((s) => s.id !== sessionId)];
     });
     closeRight();
@@ -443,12 +577,26 @@ export default function App() {
       appendToLastTurn(event);
     };
     // Forward the model value for Claude; null model → omit → CLI default.
-    const modelArg = model && model.agent === "claude" ? model.value : undefined;
+    const modelArg =
+      model && model.agent === "claude" ? model.value : undefined;
     try {
       if (isNew) {
-        await startSession({ prompt: text, repo, sessionId, model: modelArg, permissionMode: opts?.permissionMode, onEvent });
+        await startSession({
+          prompt: text,
+          repo,
+          sessionId,
+          model: modelArg,
+          permissionMode: opts?.permissionMode,
+          onEvent,
+        });
       } else {
-        await sendMessage({ sessionId, prompt: text, model: modelArg, permissionMode: autoEdit ? "acceptEdits" : "default", onEvent });
+        await sendMessage({
+          sessionId,
+          prompt: text,
+          model: modelArg,
+          permissionMode: autoEdit ? "acceptEdits" : "default",
+          onEvent,
+        });
       }
     } catch (err) {
       onEvent({ kind: "error", data: { message: safeErrorMessage(err) } });
@@ -467,7 +615,9 @@ export default function App() {
         try {
           const ev = await sessionEvents(sessionId);
           if (activeSessionIdRef.current === sessionId) setStoredEvents(ev);
-        } catch { /* ignore */ }
+        } catch {
+          /* ignore */
+        }
       }
     }
   }
@@ -482,8 +632,12 @@ export default function App() {
   }
 
   async function handleSelectSession(id: string) {
+    const selected = sessions.find((s) => s.id === id) ?? null;
     setActive(id);
+    setLoadingSessionId(id);
     closeRight();
+    setTurns([]);
+    setStoredEvents([]);
     setDiff(null);
     setRules([]);
     setCapabilities(null);
@@ -505,11 +659,17 @@ export default function App() {
       setStoredEvents([]);
       setTurns([]);
     }
-    await refreshDiff(id);
+    if (activeSessionIdRef.current === id) {
+      setLoadingSessionId(null);
+    }
+    if (selected?.source !== "external") {
+      await refreshDiff(id);
+    }
   }
 
   function handleNewSession() {
     setActive(null);
+    setLoadingSessionId(null);
     setTurns([]);
     setDiff(null);
     setStoredEvents([]);
@@ -527,7 +687,7 @@ export default function App() {
   }
 
   async function handleCleanupSession() {
-    if (!activeSessionId) return;
+    if (!activeSessionId || activeSession?.source === "external") return;
     const session = activeSession;
     const confirmed = window.confirm(
       `Remove the worktree and branch for "${session?.title ?? "this session"}"? This does not touch the original repository.`,
@@ -547,10 +707,20 @@ export default function App() {
 
   async function handleOpenRule(rule: RuleFile) {
     if (!activeSessionId) return;
+    // Capture the session this read belongs to; if the user switches sessions while
+    // the IPC is in flight, discard the result so we never show another session's file
+    // (mirrors the activeSessionIdRef guard used by every other async handler).
+    const sessionId = activeSessionId;
     try {
-      setRuleView({ label: rule.label, content: await readTextFile(activeSessionId, rule.path) });
+      const content = await readTextFile(sessionId, rule.path);
+      if (activeSessionIdRef.current !== sessionId) return;
+      setRuleView({ label: rule.label, content });
     } catch (e) {
-      setRuleView({ label: rule.label, content: `Failed to read: ${safeErrorMessage(e)}` });
+      if (activeSessionIdRef.current !== sessionId) return;
+      setRuleView({
+        label: rule.label,
+        content: `Failed to read: ${safeErrorMessage(e)}`,
+      });
     }
   }
 
@@ -561,25 +731,40 @@ export default function App() {
   const activeSession = sessions.find((s) => s.id === activeSessionId) ?? null;
   const activeRunning =
     activeSessionId !== null &&
-    (runningSessionIds.has(activeSessionId) || activeSession?.status === "running");
+    (runningSessionIds.has(activeSessionId) ||
+      activeSession?.status === "running");
+  const activeLoading =
+    activeSessionId !== null && loadingSessionId === activeSessionId;
   const titleBarTitle = activeSession?.title ?? null;
-  const titleBarRepo = activeSession?.repo ? (activeSession.repo.split("/").pop() ?? null) : null;
+  const titleBarRepo = activeSession?.repo
+    ? (activeSession.repo.split("/").pop() ?? null)
+    : null;
 
   // Search filter applied before grouping — case-insensitive substring match on title.
   const filteredSessions = sessionSearch
-    ? sessions.filter((s) => s.title.toLowerCase().includes(sessionSearch.toLowerCase()))
+    ? sessions.filter((s) =>
+        s.title.toLowerCase().includes(sessionSearch.toLowerCase()),
+      )
     : sessions;
 
   // Open the active session's worktree in the system editor. Best-effort.
   async function handleOpenEditor() {
-    if (!activeSessionId) return;
-    try { await openInEditor(activeSessionId); } catch (err) { toast.error(safeErrorMessage(err)); }
+    if (!activeSessionId || activeSession?.source === "external") return;
+    try {
+      await openInEditor(activeSessionId);
+    } catch (err) {
+      toast.error(safeErrorMessage(err));
+    }
   }
 
   // Open a terminal at the active session's worktree directory. Best-effort.
   async function handleOpenTerminal() {
-    if (!activeSessionId) return;
-    try { await openTerminal(activeSessionId); } catch (err) { toast.error(safeErrorMessage(err)); }
+    if (!activeSessionId || activeSession?.source === "external") return;
+    try {
+      await openTerminal(activeSessionId);
+    } catch (err) {
+      toast.error(safeErrorMessage(err));
+    }
   }
 
   return (
@@ -594,7 +779,7 @@ export default function App() {
       />
       <div className="flex flex-1 min-h-0 min-w-0 overflow-hidden gap-2 px-2 pb-2">
         {!sidebarCollapsed && (
-	          <div className="w-72 shrink-0 max-[900px]:hidden flex flex-col rounded-xl border border-border overflow-hidden">
+          <div className="w-72 shrink-0 max-[900px]:hidden flex flex-col rounded-xl overflow-hidden">
             <SessionList
               groups={groupByWorkspace(filteredSessions)}
               activeId={activeSessionId}
@@ -614,10 +799,12 @@ export default function App() {
         <main className="flex flex-1 min-h-0 min-w-0 gap-2">
           {/* Chat column — hidden only while the right pane is expanded to fullscreen. */}
           {!rightExpanded && (
-	            <section className={cn(
-	              "flex flex-1 flex-col min-w-0 min-h-0 rounded-xl border border-border bg-card overflow-hidden",
-	              rightTab && "max-[900px]:hidden",
-	            )}>
+            <section
+              className={cn(
+                "flex flex-1 flex-col min-w-0 min-h-0 rounded-xl border border-border bg-card overflow-hidden",
+                rightTab && "max-[900px]:hidden",
+              )}
+            >
               {activeSessionId === null ? (
                 /* No active session — show the new-session composer. */
                 <NewSession
@@ -646,26 +833,52 @@ export default function App() {
                     title={activeSession?.title ?? ""}
                     repo={titleBarRepo}
                     status={activeSession?.status ?? "idle"}
+                    source={activeSession?.source ?? "kineloop"}
                     diffstat={diffstats[activeSessionId] ?? null}
                     onClose={handleNewSession}
                     onCleanup={() => void handleCleanupSession()}
                     panelOpen={rightTab !== null}
-                    onTogglePanel={() => (rightTab ? closeRight() : setRightTab("context"))}
+                    onTogglePanel={() =>
+                      rightTab ? closeRight() : setRightTab("context")
+                    }
                   />
                   <div className="flex flex-1 flex-col overflow-auto min-h-0">
                     <div className="mt-auto w-full max-w-3xl mx-auto px-4">
-                      <Conversation turns={turns} running={activeRunning} onOpenFile={(path) => void handleOpenFile(path)} />
+                      {activeLoading ? (
+                        <div
+                          role="status"
+                          className="flex items-center gap-2 p-4 text-sm text-muted-foreground"
+                        >
+                          <Loader2
+                            aria-hidden="true"
+                            className="size-4 animate-spin motion-reduce:animate-none shrink-0"
+                          />
+                          Loading session…
+                        </div>
+                      ) : (
+                        <Conversation
+                          turns={turns}
+                          running={activeRunning}
+                          onOpenFile={(path) => void handleOpenFile(path)}
+                        />
+                      )}
                     </div>
                   </div>
-                  <PromptBar
-                    onStart={handleSend}
-                    running={activeRunning}
-                    models={models}
-                    model={selectedModel}
-                    onModelChange={setSelectedModel}
-                    autoEdit={autoEdit}
-                    onAutoEditChange={setAutoEdit}
-                  />
+                  {activeSession?.source === "external" ? (
+                    <div className="border-t border-border px-4 py-3 text-sm text-muted-foreground">
+                      External CLI history is read-only in Kineloop.
+                    </div>
+                  ) : (
+                    <PromptBar
+                      onStart={handleSend}
+                      running={activeRunning}
+                      models={models}
+                      model={selectedModel}
+                      onModelChange={setSelectedModel}
+                      autoEdit={autoEdit}
+                      onAutoEditChange={setAutoEdit}
+                    />
+                  )}
                 </>
               )}
             </section>
@@ -676,12 +889,16 @@ export default function App() {
             <aside
               className={cn(
                 "flex flex-col min-w-0 min-h-0 rounded-xl border border-border bg-card overflow-hidden",
-	                rightExpanded ? "w-full" : "w-[clamp(420px,46%,760px)] max-[900px]:w-full"
+                rightExpanded
+                  ? "w-full"
+                  : "w-[clamp(420px,46%,760px)] max-[900px]:w-full",
               )}
             >
               <Tabs
                 value={rightTab}
-                onValueChange={(v) => setRightTab(v as "context" | "changes" | "files")}
+                onValueChange={(v) =>
+                  setRightTab(v as "context" | "changes" | "files")
+                }
                 className="flex flex-col min-h-0 flex-1"
               >
                 <header className="flex items-center gap-2 px-3 pt-1.5 border-b border-border/60">
@@ -695,7 +912,9 @@ export default function App() {
                       variant="ghost"
                       size="icon-sm"
                       onClick={() => setRightExpanded((v) => !v)}
-                      aria-label={rightExpanded ? "Collapse panel" : "Expand panel"}
+                      aria-label={
+                        rightExpanded ? "Collapse panel" : "Expand panel"
+                      }
                     >
                       {rightExpanded ? <Minimize2 /> : <Maximize2 />}
                     </Button>
@@ -709,7 +928,10 @@ export default function App() {
                     </Button>
                   </div>
                 </header>
-                <TabsContent value="context" className="flex-1 min-h-0 overflow-auto">
+                <TabsContent
+                  value="context"
+                  className="flex-1 min-h-0 overflow-auto"
+                >
                   <ContextPanel
                     usage={usage}
                     files={files}
@@ -720,16 +942,22 @@ export default function App() {
                     onOpenFile={(path) => void handleOpenFile(path)}
                   />
                 </TabsContent>
-                <TabsContent value="changes" className="flex-1 min-h-0 overflow-hidden">
-	                  <ChangesPanel
-	                    branch={branchChanges}
-	                    status={branchChangesStatus}
-	                    onCommit={(message) => void handleCommit(message)}
+                <TabsContent
+                  value="changes"
+                  className="flex-1 min-h-0 overflow-hidden"
+                >
+                  <ChangesPanel
+                    branch={branchChanges}
+                    status={branchChangesStatus}
+                    onCommit={handleCommit}
                     onOpenFile={(path) => void handleOpenFile(path)}
                     committing={committing}
                   />
                 </TabsContent>
-                <TabsContent value="files" className="flex-1 min-h-0 overflow-hidden">
+                <TabsContent
+                  value="files"
+                  className="flex-1 min-h-0 overflow-hidden"
+                >
                   <FilesTree
                     nodes={treeNodes}
                     onOpenFile={(path) => void handleOpenFile(path)}
@@ -742,23 +970,39 @@ export default function App() {
       </div>
 
       {/* Rule viewer Sheet — rendered once, controlled by ruleView state. */}
-      <Sheet open={ruleView !== null} onOpenChange={(o) => { if (!o) setRuleView(null); }}>
-	        <SheetContent className="w-[min(480px,calc(100vw-1rem))] sm:max-w-none flex flex-col rounded-l-xl">
+      <Sheet
+        open={ruleView !== null}
+        onOpenChange={(o) => {
+          if (!o) setRuleView(null);
+        }}
+      >
+        <SheetContent className="w-[min(480px,calc(100vw-1rem))] sm:max-w-none flex flex-col rounded-l-xl">
           <SheetHeader>
-            <SheetTitle className="font-mono text-sm">{ruleView?.label}</SheetTitle>
+            <SheetTitle className="font-mono text-sm">
+              {ruleView?.label}
+            </SheetTitle>
           </SheetHeader>
           <ScrollArea className="flex-1 min-h-0">
-            <pre className="font-mono text-xs whitespace-pre-wrap p-4">{ruleView?.content}</pre>
+            <pre className="font-mono text-xs whitespace-pre-wrap p-4">
+              {ruleView?.content}
+            </pre>
           </ScrollArea>
         </SheetContent>
       </Sheet>
 
       {/* File diff Sheet — opens when a file is clicked in Changes or Files tab.
           Shows the full session patch (DiffViewer has no per-file filter). */}
-      <Sheet open={diffSheet !== null} onOpenChange={(o) => { if (!o) setDiffSheet(null); }}>
-	        <SheetContent className="w-[min(640px,calc(100vw-1rem))] sm:max-w-none flex flex-col rounded-l-xl">
+      <Sheet
+        open={diffSheet !== null}
+        onOpenChange={(o) => {
+          if (!o) setDiffSheet(null);
+        }}
+      >
+        <SheetContent className="w-[min(640px,calc(100vw-1rem))] sm:max-w-none flex flex-col rounded-l-xl">
           <SheetHeader>
-            <SheetTitle className="font-mono text-sm">{diffSheet?.path}</SheetTitle>
+            <SheetTitle className="font-mono text-sm">
+              {diffSheet?.path}
+            </SheetTitle>
           </SheetHeader>
           <ScrollArea className="flex-1 min-h-0">
             {diffSheet && <DiffViewer diff={diffSheet.diff} />}
@@ -767,20 +1011,20 @@ export default function App() {
       </Sheet>
 
       {/* Customizations dialog — opened when a sidebar Customizations row is clicked. */}
-	      <Suspense fallback={null}>
-	        <CustomizationsDialog
-	          open={custDialogOpen}
-	          onOpenChange={setCustDialogOpen}
-	          initialSection={custSection}
-	          counts={counts}
-	          capabilities={capabilities}
-	          rules={rules}
-	          sessionId={activeSessionId}
-	          hooks={hooks}
-	          mcpServers={mcpServers}
-	          plugins={plugins}
-	        />
-	      </Suspense>
+      <Suspense fallback={null}>
+        <CustomizationsDialog
+          open={custDialogOpen}
+          onOpenChange={setCustDialogOpen}
+          initialSection={custSection}
+          counts={counts}
+          capabilities={capabilities}
+          rules={rules}
+          sessionId={activeSessionId}
+          hooks={hooks}
+          mcpServers={mcpServers}
+          plugins={plugins}
+        />
+      </Suspense>
 
       <Toaster />
     </div>

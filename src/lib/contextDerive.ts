@@ -66,11 +66,28 @@ export function filesFromEvents(events: StoredEvent[]): SessionFile[] {
   return order.map((path) => ({ path, action: action.get(path)! }));
 }
 
-/** The most recent usage event's data, or null. */
+/** Coerce an unknown value to a finite number, falling back to 0. */
+function asNumber(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+/**
+ * The most recent usage event's data, or null. Every numeric field is validated and
+ * coerced — a malformed or partial stored payload (e.g. missing `costUsd`) must never
+ * produce `undefined` that later crashes `.toFixed()`/`.toLocaleString()` in the UI.
+ */
 export function latestUsage(events: StoredEvent[]): UsageData | null {
   for (let i = events.length - 1; i >= 0; i--) {
     if (events[i].kind === "usage") {
-      return safeParse(events[i].payloadJson) as unknown as UsageData;
+      const raw = safeParse(events[i].payloadJson);
+      return {
+        inputTokens: asNumber(raw.inputTokens),
+        outputTokens: asNumber(raw.outputTokens),
+        cacheReadTokens: asNumber(raw.cacheReadTokens),
+        cacheCreationTokens: asNumber(raw.cacheCreationTokens),
+        costUsd: typeof raw.costUsd === "number" && Number.isFinite(raw.costUsd) ? raw.costUsd : null,
+        model: typeof raw.model === "string" ? raw.model : null,
+      };
     }
   }
   return null;

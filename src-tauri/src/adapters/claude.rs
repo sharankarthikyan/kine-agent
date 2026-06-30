@@ -175,9 +175,21 @@ pub async fn spawn_and_stream(
         lines[start..].join("\n")
     });
 
-    let mut lines = BufReader::new(stdout).lines();
-
-    while let Some(line) = lines.next_line().await? {
+    // Read newline-delimited stream-json by bytes and decode each line lossily, rather
+    // than `lines()`/`next_line()` which return Err on invalid UTF-8 — a single bad byte
+    // would otherwise abort the whole session via `?`. Genuine IO errors still propagate.
+    let mut reader = BufReader::new(stdout);
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        let read = reader.read_until(b'\n', &mut buf).await?;
+        if read == 0 {
+            break; // EOF
+        }
+        while matches!(buf.last(), Some(b'\n' | b'\r')) {
+            buf.pop();
+        }
+        let line = String::from_utf8_lossy(&buf);
         for event in parse_line(&line) {
             sink.emit(event);
         }
