@@ -1,3 +1,4 @@
+import { useRef, useState } from "react";
 import { PanelRight, Trash2, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -29,6 +30,8 @@ export interface SessionHeaderProps {
   onCleanup: () => void;
   onTogglePanel: () => void;
   panelOpen: boolean;
+  /** Persist a new title for this session. When omitted, the title is read-only. */
+  onRename?: (title: string) => void;
 }
 
 export function SessionHeader({
@@ -42,8 +45,46 @@ export function SessionHeader({
   onCleanup,
   onTogglePanel,
   panelOpen,
+  onRename,
 }: SessionHeaderProps) {
   const config = STATUS_CONFIG[status as SessionStatus] ?? FALLBACK_CONFIG;
+
+  // Inline title editing — mirrors the sidebar. A double-click is detected from two
+  // clicks (the macOS webview suppresses native dblclick on non-selectable text), and
+  // a hover pencil offers a discoverable affordance. Only enabled when onRename is set
+  // and there's a title to edit.
+  const editable = typeof onRename === "function" && title.length > 0;
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const committedRef = useRef(false);
+  const lastClickRef = useRef(0);
+
+  const startEdit = () => {
+    committedRef.current = false;
+    setDraft(title);
+    setEditing(true);
+  };
+  const cancelEdit = () => {
+    committedRef.current = true;
+    setEditing(false);
+  };
+  const commitEdit = () => {
+    if (committedRef.current) return;
+    committedRef.current = true;
+    setEditing(false);
+    const next = draft.trim();
+    if (next && next !== title) onRename?.(next);
+  };
+  const handleTitleClick = () => {
+    if (!editable) return;
+    const now = Date.now();
+    if (now - lastClickRef.current < 400) {
+      lastClickRef.current = 0;
+      startEdit();
+    } else {
+      lastClickRef.current = now;
+    }
+  };
 
   return (
     <div className="flex items-center gap-3 px-4 py-2 border-b border-border shrink-0">
@@ -59,7 +100,42 @@ export function SessionHeader({
             className="size-2 rounded-full shrink-0"
             style={{ background: config.color }}
           />
-          <span className="text-sm font-medium truncate flex-1">{title}</span>
+          {editing ? (
+            <input
+              value={draft}
+              autoFocus
+              onFocus={(e) => e.currentTarget.select()}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  commitEdit();
+                } else if (e.key === "Escape") {
+                  e.preventDefault();
+                  cancelEdit();
+                }
+              }}
+              onBlur={commitEdit}
+              maxLength={60}
+              // Hug the content (capped) instead of filling the header. `size` is the
+              // text-width in characters — clamped to a sane min and the 60-char max.
+              size={Math.min(Math.max(draft.length + 1, 8), 60)}
+              aria-label="Session title"
+              className="max-w-full -my-0.5 rounded-md border border-input bg-background px-1.5 py-0.5 text-sm font-medium leading-tight outline-none transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[2px]"
+            />
+          ) : (
+            <span
+              className={cn(
+                "text-sm font-medium truncate flex-1 select-none",
+                editable && "cursor-pointer"
+              )}
+              onClick={editable ? handleTitleClick : undefined}
+              onDoubleClick={editable ? startEdit : undefined}
+              title={editable ? "Double-click to rename" : undefined}
+            >
+              {title}
+            </span>
+          )}
         </span>
 
         {/* Secondary line: repo and/or diffstat — omitted when both are null */}

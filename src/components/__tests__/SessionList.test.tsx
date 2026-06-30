@@ -63,6 +63,7 @@ const defaultProps = {
   onStatusFilterChange: () => {},
   onSourceFilterChange: () => {},
   onOpenCustomization: () => {},
+  onRename: () => {},
 };
 
 test("renders workspace header", () => {
@@ -134,6 +135,87 @@ test("labels external CLI sessions distinctly", () => {
   expect(screen.getByText("CLI")).toBeInTheDocument();
   expect(screen.getByText(/4t · 9 tools · 3f/)).toBeInTheDocument();
   expect(screen.queryByText("+0")).not.toBeInTheDocument();
+});
+
+test("double-clicking a session title opens an inline editor seeded with the title", async () => {
+  render(<SessionList {...defaultProps} />);
+  fireEvent.doubleClick(screen.getByText("add auth"));
+  const input = (await screen.findByRole("textbox", {
+    name: /session title/i,
+  })) as HTMLInputElement;
+  expect(input.value).toBe("add auth");
+});
+
+test("two quick clicks on a row open the inline editor (WKWebView dblclick fallback)", async () => {
+  // The macOS webview doesn't fire dblclick on <button> descendants, so the row
+  // detects a double-click from two clicks. This path must work independently of
+  // the native onDoubleClick handler.
+  render(<SessionList {...defaultProps} />);
+  const title = screen.getByText("add auth");
+  fireEvent.click(title);
+  fireEvent.click(title);
+  const input = (await screen.findByRole("textbox", {
+    name: /session title/i,
+  })) as HTMLInputElement;
+  expect(input.value).toBe("add auth");
+});
+
+test("Enter commits a renamed title via onRename with the trimmed value", async () => {
+  const onRename = vi.fn();
+  render(<SessionList {...defaultProps} onRename={onRename} />);
+  fireEvent.doubleClick(screen.getByText("add auth"));
+  const input = await screen.findByRole("textbox", { name: /session title/i });
+  await userEvent.clear(input);
+  await userEvent.type(input, "  add auth flow  ");
+  fireEvent.keyDown(input, { key: "Enter" });
+  expect(onRename).toHaveBeenCalledWith("a", "add auth flow");
+});
+
+test("Escape cancels editing without calling onRename", async () => {
+  const onRename = vi.fn();
+  render(<SessionList {...defaultProps} onRename={onRename} />);
+  fireEvent.doubleClick(screen.getByText("add auth"));
+  const input = await screen.findByRole("textbox", { name: /session title/i });
+  await userEvent.clear(input);
+  await userEvent.type(input, "discarded");
+  fireEvent.keyDown(input, { key: "Escape" });
+  expect(onRename).not.toHaveBeenCalled();
+  expect(screen.getByText("add auth")).toBeInTheDocument();
+});
+
+test("committing an unchanged title does not call onRename", async () => {
+  const onRename = vi.fn();
+  render(<SessionList {...defaultProps} onRename={onRename} />);
+  fireEvent.doubleClick(screen.getByText("add auth"));
+  const input = await screen.findByRole("textbox", { name: /session title/i });
+  fireEvent.keyDown(input, { key: "Enter" });
+  expect(onRename).not.toHaveBeenCalled();
+});
+
+test("renaming is double-click only — no edit icon affordance is rendered", () => {
+  render(<SessionList {...defaultProps} />);
+  expect(screen.queryByRole("button", { name: /rename/i })).not.toBeInTheDocument();
+});
+
+test("double-clicking an external CLI session title opens its inline editor", async () => {
+  render(
+    <SessionList
+      {...defaultProps}
+      groups={[
+        {
+          workspace: "cli",
+          sessions: [
+            { ...sessions[0], id: "external:claude:1", title: "scan logs", source: "external" },
+          ],
+        },
+      ]}
+    />,
+  );
+  fireEvent.doubleClick(screen.getByText("scan logs"));
+  const input = (await screen.findByRole("textbox", {
+    name: /session title/i,
+  })) as HTMLInputElement;
+  expect(input.value).toBe("scan logs");
 });
 
 test("calls onNew when the New button in the header is clicked", () => {

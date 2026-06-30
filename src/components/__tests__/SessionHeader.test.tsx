@@ -38,6 +38,52 @@ test("renders the repo name in the secondary line", () => {
   expect(screen.getByText("my-repo")).toBeInTheDocument();
 });
 
+// ── Inline rename ───────────────────────────────────────────────────────────────
+
+test("double-clicking the title opens an inline editor seeded with the title", async () => {
+  setup({ onRename: vi.fn() });
+  fireEvent.doubleClick(screen.getByText("Fix the login bug"));
+  const input = (await screen.findByRole("textbox", {
+    name: /session title/i,
+  })) as HTMLInputElement;
+  expect(input.value).toBe("Fix the login bug");
+});
+
+test("two quick clicks on the title also open the editor (webview dblclick fallback)", async () => {
+  setup({ onRename: vi.fn() });
+  const title = screen.getByText("Fix the login bug");
+  fireEvent.click(title);
+  fireEvent.click(title);
+  expect(await screen.findByRole("textbox", { name: /session title/i })).toBeInTheDocument();
+});
+
+test("Enter commits a renamed title via onRename with the trimmed value", async () => {
+  const onRename = vi.fn();
+  setup({ onRename });
+  fireEvent.doubleClick(screen.getByText("Fix the login bug"));
+  const input = await screen.findByRole("textbox", { name: /session title/i });
+  fireEvent.change(input, { target: { value: "  Fix login redirect  " } });
+  fireEvent.keyDown(input, { key: "Enter" });
+  expect(onRename).toHaveBeenCalledWith("Fix login redirect");
+});
+
+test("Escape cancels editing without calling onRename", async () => {
+  const onRename = vi.fn();
+  setup({ onRename });
+  fireEvent.doubleClick(screen.getByText("Fix the login bug"));
+  const input = await screen.findByRole("textbox", { name: /session title/i });
+  fireEvent.change(input, { target: { value: "discarded" } });
+  fireEvent.keyDown(input, { key: "Escape" });
+  expect(onRename).not.toHaveBeenCalled();
+  expect(screen.getByText("Fix the login bug")).toBeInTheDocument();
+});
+
+test("the title is not editable when onRename is omitted", () => {
+  setup();
+  fireEvent.doubleClick(screen.getByText("Fix the login bug"));
+  expect(screen.queryByRole("textbox", { name: /session title/i })).not.toBeInTheDocument();
+});
+
 // ── Diffstat ──────────────────────────────────────────────────────────────────
 
 test("renders diffstat additions and deletions", () => {

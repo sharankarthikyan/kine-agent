@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Bot, ChevronRight, FileText, Layers, ListFilter, Plus, Search, Server, Webhook, Zap } from "lucide-react";
 
 import { cn } from "@/lib/utils";
@@ -47,6 +47,8 @@ interface SessionListProps {
   onStatusFilterChange: (f: StatusFilter) => void;
   onSourceFilterChange: (f: SourceFilter) => void;
   onOpenCustomization: (section: CustomizationSection) => void;
+  /** Persist a new title for a session. Only called for editable (Kineloop) sessions. */
+  onRename: (id: string, title: string) => void;
 }
 
 type StatusConfig = { label: string; color: string };
@@ -98,9 +100,51 @@ export function SessionList({
   onStatusFilterChange,
   onSourceFilterChange,
   onOpenCustomization,
+  onRename,
 }: SessionListProps) {
   const filterActive = statusFilter !== "all" || sourceFilter !== "all";
   const [searchOpen, setSearchOpen] = useState(false);
+  // Inline title editing: id of the row being renamed and the in-progress draft.
+  // `editingRef` de-dupes the commit that Enter + the resulting blur would both fire.
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [draft, setDraft] = useState("");
+  const editingRef = useRef(false);
+  // Manual double-click detection. WKWebView (the macOS Tauri webview) does not fire
+  // `dblclick` on <button> descendants, so the native onDoubleClick is unreliable for
+  // the row's title (it lives inside a shadcn Button). We detect a double-click from
+  // two `click`s on the same row within a short window instead — clicks always fire.
+  const lastRowClickRef = useRef<{ id: string; time: number } | null>(null);
+  const DOUBLE_CLICK_MS = 400;
+
+  const handleRowClick = (id: string, title: string, isEditable: boolean) => {
+    onSelect(id);
+    if (!isEditable) return;
+    const now = Date.now();
+    const last = lastRowClickRef.current;
+    if (last && last.id === id && now - last.time < DOUBLE_CLICK_MS) {
+      lastRowClickRef.current = null;
+      startRename(id, title);
+    } else {
+      lastRowClickRef.current = { id, time: now };
+    }
+  };
+
+  const startRename = (id: string, title: string) => {
+    editingRef.current = true;
+    setDraft(title);
+    setEditingId(id);
+  };
+  const cancelRename = () => {
+    editingRef.current = false;
+    setEditingId(null);
+  };
+  const commitRename = (id: string, currentTitle: string) => {
+    if (!editingRef.current) return;
+    editingRef.current = false;
+    setEditingId(null);
+    const next = draft.trim();
+    if (next && next !== currentTitle) onRename(id, next);
+  };
   // Workspaces collapsed by the user — tracked by name; absent means expanded.
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   // Re-render once a minute so relative timestamps ("2 min ago") stay current even when
@@ -312,52 +356,113 @@ export function SessionList({
                       session.source === "external"
                         ? `${fullExternalMeta.length > 0 ? fullExternalMeta.join(" · ") : "CLI history"} · ${fullTime}`
                         : `+${additions} −${deletions} · ${fullTime}`;
+                    // Every session is renameable: Kineloop rows update their DB title in
+                    // place; external CLI rows get a stored title override (their on-disk
+                    // transcript is never touched).
+                    const editable = true;
+                    const editing = editingId === session.id;
+                    // Bottom row (diffstat / external meta + relative time) is identical
+                    // in both display and edit modes, so it's built once and reused.
+                    const metaRow = (
+                      <span
+                        className="block w-full min-w-0 truncate text-xs text-muted-foreground tabular-nums pl-4"
+                        title={secondaryTitle}
+                      >
+                        {session.source === "external" ? (
+                          <span>{externalMeta.length > 0 ? externalMeta.join(" · ") : "CLI history"}</span>
+                        ) : (
+                          <>
+                            <span style={{ color: "var(--status-success)" }}>+{additions}</span>{" "}
+                            <span style={{ color: "var(--status-error)" }}>−{deletions}</span>
+                          </>
+                        )}
+                        {" · "}
+                        {shortTime}
+                      </span>
+                    );
                     return (
                       <li key={session.id}>
-                        <Button
-                          type="button"
-                          variant={active ? "secondary" : "ghost"}
-                          className={cn(
-                            "w-full justify-start h-auto py-2 px-3 gap-1 flex-col items-start overflow-hidden text-left",
-                            active && "font-medium"
-                          )}
-                          aria-current={active ? "true" : undefined}
-                          onClick={() => onSelect(session.id)}
-                        >
-                          {/* Top row: agent logo + status dot + title + status label */}
-                          <span className="flex items-center gap-2 w-full min-w-0">
-                            <AgentLogo agent={session.agent} className="size-4" />
-                            <span
-                              role="img"
-                              aria-label={`Status: ${config.label}`}
-                              title={config.label}
-                              className="size-2 rounded-full shrink-0"
-                              style={{ background: config.color }}
-                            />
-                            <span className="truncate flex-1 min-w-0 text-left text-sm">
-                              {session.title}
+                        {editing ? (
+                          // Edit mode: a clearly-bordered input replaces the title in the
+                          // same layout slot, so the row appears to turn into a field.
+                          <div className="w-full h-auto py-2 px-3 gap-1 flex flex-col items-start overflow-hidden text-left rounded-md bg-secondary">
+                            <span className="flex items-center gap-2 w-full min-w-0">
+                              <AgentLogo agent={session.agent} className="size-4" />
+                              <span
+                                aria-hidden="true"
+                                className="size-2 rounded-full shrink-0"
+                                style={{ background: config.color }}
+                              />
+                              <input
+                                value={draft}
+                                autoFocus
+                                onFocus={(e) => e.currentTarget.select()}
+                                onChange={(e) => setDraft(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") {
+                                    e.preventDefault();
+                                    commitRename(session.id, session.title);
+                                  } else if (e.key === "Escape") {
+                                    e.preventDefault();
+                                    cancelRename();
+                                  }
+                                }}
+                                onBlur={() => commitRename(session.id, session.title)}
+                                maxLength={60}
+                                aria-label="Session title"
+                                className="flex-1 min-w-0 -my-0.5 rounded-md border border-input bg-background px-1.5 py-0.5 text-sm leading-tight outline-none transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[2px]"
+                              />
                             </span>
-                            <span className="text-xs text-muted-foreground shrink-0">
-                              {session.source === "external" ? "CLI" : config.label}
-                            </span>
-                          </span>
-                          {/* Bottom row: diffstat + relative time */}
-                          <span
-                            className="block w-full min-w-0 truncate text-xs text-muted-foreground tabular-nums pl-4"
-                            title={secondaryTitle}
-                          >
-                            {session.source === "external" ? (
-                              <span>{externalMeta.length > 0 ? externalMeta.join(" · ") : "CLI history"}</span>
-                            ) : (
-                              <>
-                                <span style={{ color: "var(--status-success)" }}>+{additions}</span>{" "}
-                                <span style={{ color: "var(--status-error)" }}>−{deletions}</span>
-                              </>
+                            {metaRow}
+                          </div>
+                        ) : (
+                          <Button
+                            type="button"
+                            variant={active ? "secondary" : "ghost"}
+                            className={cn(
+                              "group/row w-full justify-start h-auto py-2 px-3 gap-1 flex-col items-start overflow-hidden text-left",
+                              active && "font-medium"
                             )}
-                            {" · "}
-                            {shortTime}
-                          </span>
-                        </Button>
+                            aria-current={active ? "true" : undefined}
+                            onClick={() => handleRowClick(session.id, session.title, editable)}
+                          >
+                            {/* Top row: agent logo + status dot + title + status/rename */}
+                            <span className="flex items-center gap-2 w-full min-w-0">
+                              <AgentLogo agent={session.agent} className="size-4" />
+                              <span
+                                role="img"
+                                aria-label={`Status: ${config.label}`}
+                                title={config.label}
+                                className="size-2 rounded-full shrink-0"
+                                style={{ background: config.color }}
+                              />
+                              {/* Renaming opens via the row's click-timing handler (see
+                                  handleRowClick) — NOT native dblclick — so the title can
+                                  stay `select-none`. That avoids the word-selection
+                                  highlight that made double-click look like text-selecting.
+                                  onDoubleClick stays as a non-WebKit / test fallback. */}
+                              <span
+                                className="truncate flex-1 min-w-0 text-left text-sm select-none"
+                                onDoubleClick={
+                                  editable
+                                    ? (e) => {
+                                        e.stopPropagation();
+                                        startRename(session.id, session.title);
+                                      }
+                                    : undefined
+                                }
+                              >
+                                {session.title}
+                              </span>
+                              {/* Status label (or "CLI" for external history). Renaming is
+                                  double-click only — no inline edit affordance. */}
+                              <span className="text-xs text-muted-foreground shrink-0">
+                                {session.source === "external" ? "CLI" : config.label}
+                              </span>
+                            </span>
+                            {metaRow}
+                          </Button>
+                        )}
                       </li>
                     );
                   })}
