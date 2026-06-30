@@ -148,11 +148,14 @@ function NavRow({ item, active, count, onClick }: NavRowProps) {
 
 // Returns a display-friendly path: worktree files become repo-relative, home
 // files become ~/…, everything else is unchanged. The full path is preserved
-// as a title attribute for hover inspection.
+// as a title attribute for hover inspection. Handles both Unix (`/`) and Windows
+// (`\`, drive letters) separators by normalizing to `/` for matching.
 function shortenPath(path: string): string {
-  const wt = path.match(/\/\.agent-editor\/worktrees\/[^/]+\/(.+)$/);
+  const norm = path.replace(/\\/g, "/");
+  const wt = norm.match(/\/\.(?:kineloop|agent-editor)\/worktrees\/[^/]+\/(.+)$/);
   if (wt) return wt[1];
-  return path.replace(/^\/(?:Users|home)\/[^/]+\//, "~/");
+  // ~/ for Unix homes (/Users/x, /home/x) and Windows homes (C:/Users/x).
+  return norm.replace(/^(?:[A-Za-z]:)?\/(?:Users|home)\/[^/]+\//, "~/");
 }
 
 interface FileDetailViewProps {
@@ -192,7 +195,7 @@ function FileDetailView({ detail, loading, error, content, sessionId, onBack, on
     setSaving(true);
     try {
       await writeTextFile(sessionId, detail.path, editedContent);
-      const basename = detail.path.split("/").pop() ?? detail.name;
+      const basename = detail.path.split(/[\\/]/).pop() || detail.name;
       toast.success(`Saved ${basename}`);
       onSaved(editedContent);
       setIsEditing(false);

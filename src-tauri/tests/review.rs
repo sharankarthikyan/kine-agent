@@ -1,5 +1,5 @@
-use agent_editor_lib::review::{diff, diff_from_base, ChangeStatus};
-use agent_editor_lib::worktree::create;
+use kineloop_lib::review::{diff, diff_from_base, ChangeStatus};
+use kineloop_lib::worktree::create;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

@@ -203,7 +203,9 @@ function describeToolCall(name: string, input: string): string {
   }
   const str = (value: unknown): string | undefined =>
     typeof value === "string" && value.trim() !== "" ? value.trim() : undefined;
-  const basename = (path: string): string => path.replace(/\/+$/, "").split("/").pop() || path;
+  // Separator-agnostic: agent tool-call file paths may be absolute Windows paths.
+  const basename = (path: string): string =>
+    path.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || path;
 
   switch (name) {
     case "Read":

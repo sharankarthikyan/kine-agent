@@ -138,7 +138,7 @@ export default function App() {
   // Sidebar collapse — persisted in localStorage.
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
     try {
-      return localStorage.getItem("agent-editor.sidebarCollapsed") === "true";
+      return localStorage.getItem("kineloop.sidebarCollapsed") === "true";
     } catch {
       return false;
     }
@@ -256,7 +256,7 @@ export default function App() {
     setSidebarCollapsed((prev) => {
       const next = !prev;
       try {
-        localStorage.setItem("agent-editor.sidebarCollapsed", String(next));
+        localStorage.setItem("kineloop.sidebarCollapsed", String(next));
       } catch {
         /* ignore */
       }

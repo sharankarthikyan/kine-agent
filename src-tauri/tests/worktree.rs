@@ -1,4 +1,4 @@
-use agent_editor_lib::worktree::{create, remove, WorktreeError};
+use kineloop_lib::worktree::{create, remove, WorktreeError};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

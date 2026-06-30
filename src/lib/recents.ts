@@ -1,4 +1,4 @@
-const STORAGE_KEY = "agent-editor.recentRepos";
+const STORAGE_KEY = "kineloop.recentRepos";
 const MAX_RECENTS = 8;
 
 /**

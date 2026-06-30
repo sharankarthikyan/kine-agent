@@ -125,7 +125,9 @@ pub async fn spawn_and_stream(
     let model = prompt.model.as_deref();
     let permission_mode = prompt.permission_mode.as_deref();
 
-    let mut command = Command::new("claude");
+    // Resolve via PATHEXT so the Windows npm shim (`claude.cmd`) is found, not just
+    // `claude.exe`; on Unix this resolves the absolute path (or falls back to the name).
+    let mut command = Command::new(crate::agent_paths::resolve_program("claude"));
     command
         .arg("-p")
         .arg(&prompt.text)

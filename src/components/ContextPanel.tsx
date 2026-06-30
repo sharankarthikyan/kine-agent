@@ -32,9 +32,11 @@ function SectionHeading({ children }: { children: React.ReactNode }) {
 
 // Strip the per-session worktree prefix so a file reads relative to the repo
 // root (e.g. "src/components/App.tsx") instead of the long absolute path.
+// Normalizes Windows separators to `/` so the match works cross-platform.
 function displayPath(path: string): string {
-  const match = path.match(/\/\.agent-editor\/worktrees\/[^/]+\/(.+)$/);
-  return match ? match[1] : path;
+  const norm = path.replace(/\\/g, "/");
+  const match = norm.match(/\/\.(?:kineloop|agent-editor)\/worktrees\/[^/]+\/(.+)$/);
+  return match ? match[1] : norm;
 }
 
 // Shared inset card wrapper for section bodies

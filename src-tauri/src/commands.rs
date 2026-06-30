@@ -147,15 +147,12 @@ fn title_from_prompt(prompt: &str) -> String {
 
 /// Root under which per-session worktrees are created (outside any target repo).
 ///
-/// Uses a stable per-user directory (`$HOME/.agent-editor/worktrees`), NOT the system
+/// Uses a stable per-user directory (`<home>/.kineloop/worktrees`), NOT the system
 /// temp dir — worktrees hold unreviewed agent work that must survive across reboots
-/// until the user reviews and `cleanup_session`s them. Falls back to temp only if HOME
-/// is unset. (A later phase moves this to the Tauri app-data dir via AppHandle.)
+/// until the user reviews and `cleanup_session`s them. Falls back to temp only if the
+/// home dir is unavailable. (A later phase moves this to the Tauri app-data dir.)
 fn worktrees_root() -> PathBuf {
-    let base = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    base.join(".agent-editor").join("worktrees")
+    crate::agent_paths::data_dir().join("worktrees")
 }
 
 /// Resolve which directory to inspect for customizations.
@@ -665,7 +662,9 @@ pub async fn open_in_editor(session_id: String) -> Result<(), String> {
     let root = worktrees_root();
     tokio::task::spawn_blocking(move || -> Result<(), String> {
         let wt = worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
-        std::process::Command::new("code")
+        // Resolve `code` via PATHEXT so the Windows `code.cmd` shim is found, not just
+        // `code.exe`.
+        std::process::Command::new(crate::agent_paths::resolve_program("code"))
             .arg(&wt.path)
             .spawn()
             .map_err(|_| "VS Code (code) not found on PATH".to_string())?;
@@ -675,28 +674,73 @@ pub async fn open_in_editor(session_id: String) -> Result<(), String> {
     .map_err(|e| e.to_string())?
 }
 
-/// Open a terminal at the session's worktree. macOS only (uses `open -a Terminal`);
-/// returns a friendly error on other platforms.
+/// Spawn the platform's terminal at `dir`. Best-effort and per-OS:
+/// - macOS: `open -a Terminal <dir>`
+/// - Windows: Windows Terminal (`wt -d <dir>`), falling back to a classic console
+/// - Linux/BSD: the first available common emulator, launched with `dir` as its cwd
+fn open_terminal_at(dir: &Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg("-a")
+            .arg("Terminal")
+            .arg(dir)
+            .spawn()
+            .map_err(|e| format!("failed to open Terminal: {e}"))?;
+        Ok(())
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // Prefer Windows Terminal when present.
+        if std::process::Command::new(crate::agent_paths::resolve_program("wt"))
+            .arg("-d")
+            .arg(dir)
+            .spawn()
+            .is_ok()
+        {
+            return Ok(());
+        }
+        // Fall back to a classic console window opened in the directory. `start ""`
+        // supplies an empty window title so the path isn't misread as the title.
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", "cmd", "/K"])
+            .arg(format!("cd /d \"{}\"", dir.display()))
+            .spawn()
+            .map_err(|e| format!("failed to open a terminal: {e}"))?;
+        Ok(())
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        // Try common emulators in order; each inherits `dir` as its working directory.
+        for term in [
+            "x-terminal-emulator",
+            "gnome-terminal",
+            "konsole",
+            "xfce4-terminal",
+            "alacritty",
+            "kitty",
+            "xterm",
+        ] {
+            if std::process::Command::new(term)
+                .current_dir(dir)
+                .spawn()
+                .is_ok()
+            {
+                return Ok(());
+            }
+        }
+        Err("No terminal emulator found (tried x-terminal-emulator, gnome-terminal, konsole, xfce4-terminal, alacritty, kitty, xterm)".into())
+    }
+}
+
+/// Open a terminal at the session's worktree. Supported on macOS, Windows, and Linux;
+/// returns a friendly error if no terminal could be launched.
 #[tauri::command]
 pub async fn open_terminal(session_id: String) -> Result<(), String> {
     let root = worktrees_root();
     tokio::task::spawn_blocking(move || -> Result<(), String> {
         let wt = worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
-        #[cfg(target_os = "macos")]
-        {
-            std::process::Command::new("open")
-                .arg("-a")
-                .arg("Terminal")
-                .arg(&wt.path)
-                .spawn()
-                .map_err(|e| format!("failed to open Terminal: {e}"))?;
-            Ok(())
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            drop(wt);
-            Err("Opening a terminal is only supported on macOS for now".into())
-        }
+        open_terminal_at(&wt.path)
     })
     .await
     .map_err(|e| e.to_string())?

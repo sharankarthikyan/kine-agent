@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-/// An agent CLI that agent-editor can drive, with an `installed` flag
+/// An agent CLI that Kineloop can drive, with an `installed` flag
 /// indicating whether the binary is reachable on PATH.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
