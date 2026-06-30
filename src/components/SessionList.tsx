@@ -51,6 +51,20 @@ const CUSTOMIZATION_ROWS = [
   { key: "mcpServers" as const, section: "mcp" as const, label: "MCP Servers", Icon: Server },
 ];
 
+function compactRelativeTime(ts: number, now: number): string {
+  const diffSeconds = Math.max(0, Math.floor((now - ts) / 1000));
+  if (diffSeconds < 60) return "now";
+
+  const diffMinutes = Math.floor(diffSeconds / 60);
+  if (diffMinutes < 60) return `${diffMinutes}m`;
+
+  const diffHours = Math.floor(diffMinutes / 60);
+  if (diffHours < 24) return `${diffHours}h`;
+
+  const diffDays = Math.floor(diffHours / 24);
+  return `${diffDays}d`;
+}
+
 export function SessionList({
   groups,
   activeId,
@@ -194,17 +208,28 @@ export function SessionList({
                     const additions = stat?.additions ?? 0;
                     const deletions = stat?.deletions ?? 0;
                     const externalMeta = [
+                      session.turnCount !== null ? `${session.turnCount}t` : null,
+                      session.toolCallCount !== null ? `${session.toolCallCount} tools` : null,
+                      session.fileActionCount !== null ? `${session.fileActionCount}f` : null,
+                    ].filter(Boolean);
+                    const fullExternalMeta = [
                       session.turnCount !== null ? `${session.turnCount} turns` : null,
                       session.toolCallCount !== null ? `${session.toolCallCount} tools` : null,
                       session.fileActionCount !== null ? `${session.fileActionCount} files` : null,
                     ].filter(Boolean);
+                    const fullTime = relativeTime(session.updatedAt, now);
+                    const shortTime = compactRelativeTime(session.updatedAt, now);
+                    const secondaryTitle =
+                      session.source === "external"
+                        ? `${fullExternalMeta.length > 0 ? fullExternalMeta.join(" · ") : "CLI history"} · ${fullTime}`
+                        : `+${additions} −${deletions} · ${fullTime}`;
                     return (
                       <li key={session.id}>
                         <Button
                           type="button"
                           variant={active ? "secondary" : "ghost"}
                           className={cn(
-                            "w-full justify-start h-auto py-2 px-3 gap-1 flex-col items-start",
+                            "w-full justify-start h-auto py-2 px-3 gap-1 flex-col items-start overflow-hidden text-left",
                             active && "font-medium"
                           )}
                           aria-current={active ? "true" : undefined}
@@ -227,7 +252,10 @@ export function SessionList({
                             </span>
                           </span>
                           {/* Bottom row: diffstat + relative time */}
-                          <span className="text-xs text-muted-foreground tabular-nums pl-4">
+                          <span
+                            className="block w-full min-w-0 truncate text-xs text-muted-foreground tabular-nums pl-4"
+                            title={secondaryTitle}
+                          >
                             {session.source === "external" ? (
                               <span>{externalMeta.length > 0 ? externalMeta.join(" · ") : "CLI history"}</span>
                             ) : (
@@ -237,7 +265,7 @@ export function SessionList({
                               </>
                             )}
                             {" · "}
-                            {relativeTime(session.updatedAt, now)}
+                            {shortTime}
                           </span>
                         </Button>
                       </li>

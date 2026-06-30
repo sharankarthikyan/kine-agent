@@ -42,7 +42,7 @@ function displayPath(path: string): string {
 // Shared inset card wrapper for section bodies
 function SectionCard({ children, className }: { children: React.ReactNode; className?: string }) {
   return (
-    <div className={cn(className)}>
+    <div className={cn("min-w-0", className)}>
       {children}
     </div>
   );
@@ -127,13 +127,19 @@ function CapabilitySubsection({ label, items }: CapabilitySubsectionProps) {
         <span className="tabular-nums opacity-60">{items.length}</span>
       </p>
       {visible.map((cap) => (
-        <div key={cap.name} className={cn("flex items-center gap-2 min-w-0 px-1 py-0.5 rounded-md")}>
-          <span className="text-xs font-medium shrink-0">{cap.name}</span>
-          {cap.description && (
-            <span className="truncate text-xs text-muted-foreground flex-1 min-w-0">
-              {cap.description}
-            </span>
-          )}
+        <div
+          key={cap.name}
+          className="grid min-w-0 grid-cols-[minmax(0,12rem)_minmax(0,1fr)_auto] items-center gap-2 rounded-md px-1 py-0.5"
+        >
+          <span className="min-w-0 truncate text-xs font-medium" title={cap.name}>
+            {cap.name}
+          </span>
+          <span
+            className="min-w-0 truncate text-xs text-muted-foreground"
+            title={cap.description ?? undefined}
+          >
+            {cap.description ?? ""}
+          </span>
           <Badge variant="outline" className="ml-auto shrink-0 text-xs">
             {cap.source}
           </Badge>
@@ -168,7 +174,7 @@ function FileRow({ file, onOpenFile }: { file: SessionFile; onOpenFile?: (path: 
     <Button
       variant="ghost"
       size="sm"
-      className="h-auto w-full min-w-0 justify-start gap-2 px-2 py-1 font-normal"
+      className="h-auto w-full min-w-0 justify-start gap-2 overflow-hidden px-2 py-1 font-normal"
       onClick={() => onOpenFile?.(file.path)}
       title={file.path}
     >
@@ -189,7 +195,7 @@ function FilesThisSession({ files, onOpenFile }: FilesThisSessionProps) {
   const reads = files.filter((f) => f.action === "read");
 
   return (
-    <div className="p-1 flex flex-col gap-0.5">
+    <div className="flex min-w-0 flex-col gap-0.5 p-1">
       {changed.map((file) => (
         <FileRow key={file.path} file={file} onOpenFile={onOpenFile} />
       ))}
@@ -231,8 +237,8 @@ export function ContextPanel({
       capabilities.commands.length > 0);
 
   return (
-    <ScrollArea className="h-full">
-      <div className="flex flex-col gap-4 p-3">
+    <ScrollArea className="h-full min-w-0">
+      <div className="flex min-w-0 flex-col gap-4 p-3">
         {/* ── Window usage ─────────────────────────── */}
         <section className="flex flex-col gap-1.5">
           <SectionHeading>Window usage</SectionHeading>
@@ -266,14 +272,15 @@ export function ContextPanel({
             {existingRules.length === 0 ? (
               <p className="px-3 py-2 text-sm text-muted-foreground">No rules found</p>
             ) : (
-              <div className="p-1 flex flex-col gap-0.5">
+              <div className="flex min-w-0 flex-col gap-0.5 p-1">
                 {existingRules.map((rule) => (
                   <Button
                     key={rule.path}
                     variant="ghost"
                     size="sm"
-                    className="h-auto w-full min-w-0 justify-start gap-2 px-2 py-1 font-normal"
+                    className="h-auto w-full min-w-0 justify-start gap-2 overflow-hidden px-2 py-1 font-normal"
                     onClick={() => onOpenRule(rule)}
+                    title={rule.path}
                   >
                     <FileCode data-icon="inline-start" />
                     <span className="flex-1 min-w-0 truncate text-left text-xs">{rule.label}</span>
@@ -294,7 +301,7 @@ export function ContextPanel({
             {!hasCapabilities ? (
               <p className="px-3 py-2 text-sm text-muted-foreground">No capabilities found</p>
             ) : (
-              <div className="p-3 flex flex-col gap-3">
+              <div className="flex min-w-0 flex-col gap-3 p-3">
                 {capabilities!.skills.length > 0 && (
                   <CapabilitySubsection label="Skills" items={capabilities!.skills} />
                 )}
@@ -313,9 +320,9 @@ export function ContextPanel({
         <section className="flex flex-col gap-1.5">
           <SectionHeading>Settings</SectionHeading>
           <SectionCard className="p-3 flex flex-col gap-1 text-sm">
-            <div className="flex items-center gap-2">
+            <div className="flex min-w-0 items-center gap-2">
               <span className="text-muted-foreground">Model</span>
-              <span className="font-medium">{model?.label ?? "—"}</span>
+              <span className="min-w-0 truncate font-medium">{model?.label ?? "—"}</span>
             </div>
             <p className="text-xs text-muted-foreground">
               Autonomy: default · Sandbox: default

@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
 } from "react";
+import type { PointerEvent as ReactPointerEvent } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -87,6 +88,28 @@ const CustomizationsDialog = lazy(() =>
   })),
 );
 
+const SIDEBAR_MIN_WIDTH = 220;
+const SIDEBAR_MAX_WIDTH = 420;
+const SIDEBAR_DEFAULT_WIDTH = 288;
+const RIGHT_PANE_MIN_WIDTH = 360;
+const RIGHT_PANE_MAX_WIDTH = 820;
+const RIGHT_PANE_DEFAULT_WIDTH = 560;
+const CENTER_MIN_WIDTH = 360;
+
+function clampNumber(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function storedNumber(key: string, fallback: number, min: number, max: number): number {
+  try {
+    const raw = localStorage.getItem(key);
+    const parsed = raw === null ? NaN : Number(raw);
+    return Number.isFinite(parsed) ? clampNumber(parsed, min, max) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 /** Derive a short display title from the first non-empty line of the prompt. */
 function titleFromPrompt(text: string): string {
   const line =
@@ -135,6 +158,22 @@ export default function App() {
   const [autoEdit, setAutoEdit] = useState(false);
   const [recents, setRecents] = useState<string[]>([]);
   const [sessionSearch, setSessionSearch] = useState("");
+  const [sidebarWidth, setSidebarWidth] = useState(() =>
+    storedNumber(
+      "kineloop.sidebarWidth",
+      SIDEBAR_DEFAULT_WIDTH,
+      SIDEBAR_MIN_WIDTH,
+      SIDEBAR_MAX_WIDTH,
+    ),
+  );
+  const [rightPaneWidth, setRightPaneWidth] = useState(() =>
+    storedNumber(
+      "kineloop.rightPaneWidth",
+      RIGHT_PANE_DEFAULT_WIDTH,
+      RIGHT_PANE_MIN_WIDTH,
+      RIGHT_PANE_MAX_WIDTH,
+    ),
+  );
   // Sidebar collapse — persisted in localStorage.
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
     try {
@@ -262,6 +301,108 @@ export default function App() {
       }
       return next;
     });
+  }
+
+  function persistPanelWidth(key: string, value: number) {
+    try {
+      localStorage.setItem(key, String(Math.round(value)));
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function rightPaneMaxWidth(): number {
+    const sidebarSpace = sidebarCollapsed ? 0 : sidebarWidth;
+    const available = window.innerWidth - sidebarSpace - CENTER_MIN_WIDTH - 48;
+    return Math.max(RIGHT_PANE_MIN_WIDTH, Math.min(RIGHT_PANE_MAX_WIDTH, available));
+  }
+
+  function startSidebarResize(e: ReactPointerEvent<HTMLDivElement>) {
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = sidebarWidth;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+
+    const onMove = (event: PointerEvent) => {
+      const next = clampNumber(
+        startWidth + event.clientX - startX,
+        SIDEBAR_MIN_WIDTH,
+        SIDEBAR_MAX_WIDTH,
+      );
+      setSidebarWidth(next);
+    };
+    const onUp = (event: PointerEvent) => {
+      const next = clampNumber(
+        startWidth + event.clientX - startX,
+        SIDEBAR_MIN_WIDTH,
+        SIDEBAR_MAX_WIDTH,
+      );
+      setSidebarWidth(next);
+      persistPanelWidth("kineloop.sidebarWidth", next);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+    };
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+  }
+
+  function startRightPaneResize(e: ReactPointerEvent<HTMLDivElement>) {
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = rightPaneWidth;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+
+    const onMove = (event: PointerEvent) => {
+      const next = clampNumber(
+        startWidth - (event.clientX - startX),
+        RIGHT_PANE_MIN_WIDTH,
+        rightPaneMaxWidth(),
+      );
+      setRightPaneWidth(next);
+    };
+    const onUp = (event: PointerEvent) => {
+      const next = clampNumber(
+        startWidth - (event.clientX - startX),
+        RIGHT_PANE_MIN_WIDTH,
+        rightPaneMaxWidth(),
+      );
+      setRightPaneWidth(next);
+      persistPanelWidth("kineloop.rightPaneWidth", next);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+    };
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+  }
+
+  function resizeSidebarBy(delta: number) {
+    const next = clampNumber(sidebarWidth + delta, SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
+    setSidebarWidth(next);
+    persistPanelWidth("kineloop.sidebarWidth", next);
+  }
+
+  function resizeRightPaneBy(delta: number) {
+    const next = clampNumber(
+      rightPaneWidth + delta,
+      RIGHT_PANE_MIN_WIDTH,
+      rightPaneMaxWidth(),
+    );
+    setRightPaneWidth(next);
+    persistPanelWidth("kineloop.rightPaneWidth", next);
   }
 
   // Guard: only apply the fetched diff if the session is still the active one.
@@ -779,32 +920,58 @@ export default function App() {
       />
       <div className="flex flex-1 min-h-0 min-w-0 overflow-hidden gap-2 px-2 pb-2">
         {!sidebarCollapsed && (
-          <div className="w-72 shrink-0 max-[900px]:hidden flex flex-col rounded-xl overflow-hidden">
-            <SessionList
-              groups={groupByWorkspace(filteredSessions)}
-              activeId={activeSessionId}
-              onSelect={handleSelectSession}
-              onNew={handleNewSession}
-              counts={counts}
-              diffstats={diffstats}
-              search={sessionSearch}
-              onSearchChange={setSessionSearch}
-              onOpenCustomization={(section) => {
-                setCustSection(section);
-                setCustDialogOpen(true);
-              }}
-            />
-          </div>
+          <>
+            <div
+              className="shrink-0 max-[900px]:hidden flex flex-col rounded-xl overflow-hidden"
+              style={{ width: sidebarWidth }}
+            >
+              <SessionList
+                groups={groupByWorkspace(filteredSessions)}
+                activeId={activeSessionId}
+                onSelect={handleSelectSession}
+                onNew={handleNewSession}
+                counts={counts}
+                diffstats={diffstats}
+                search={sessionSearch}
+                onSearchChange={setSessionSearch}
+                onOpenCustomization={(section) => {
+                  setCustSection(section);
+                  setCustDialogOpen(true);
+                }}
+              />
+            </div>
+          </>
         )}
         <main className="flex flex-1 min-h-0 min-w-0 gap-2">
           {/* Chat column — hidden only while the right pane is expanded to fullscreen. */}
           {!rightExpanded && (
             <section
               className={cn(
-                "flex flex-1 flex-col min-w-0 min-h-0 rounded-xl border border-border bg-card overflow-hidden",
+                "relative flex flex-1 flex-col min-w-0 min-h-0 rounded-xl border border-border bg-card overflow-hidden",
                 rightTab && "max-[900px]:hidden",
               )}
             >
+              {!sidebarCollapsed && (
+                <div
+                  role="separator"
+                  aria-label="Resize sessions panel"
+                  aria-orientation="vertical"
+                  aria-valuemin={SIDEBAR_MIN_WIDTH}
+                  aria-valuemax={SIDEBAR_MAX_WIDTH}
+                  aria-valuenow={Math.round(sidebarWidth)}
+                  tabIndex={0}
+                  onPointerDown={startSidebarResize}
+                  onKeyDown={(e) => {
+                    if (e.key === "ArrowLeft") resizeSidebarBy(-16);
+                    else if (e.key === "ArrowRight") resizeSidebarBy(16);
+                    else if (e.key === "Home") resizeSidebarBy(SIDEBAR_MIN_WIDTH - sidebarWidth);
+                    else if (e.key === "End") resizeSidebarBy(SIDEBAR_MAX_WIDTH - sidebarWidth);
+                    else return;
+                    e.preventDefault();
+                  }}
+                  className="absolute inset-y-0 left-0 z-10 w-2 cursor-col-resize outline-none max-[900px]:hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
+                />
+              )}
               {activeSessionId === null ? (
                 /* No active session — show the new-session composer. */
                 <NewSession
@@ -888,12 +1055,34 @@ export default function App() {
           {rightTab && (
             <aside
               className={cn(
-                "flex flex-col min-w-0 min-h-0 rounded-xl border border-border bg-card overflow-hidden",
+                "relative flex flex-col min-w-0 min-h-0 rounded-xl border border-border bg-card overflow-hidden",
                 rightExpanded
                   ? "w-full"
-                  : "w-[clamp(420px,46%,760px)] max-[900px]:w-full",
+                  : "max-[900px]:w-full",
               )}
+              style={rightExpanded ? undefined : { width: rightPaneWidth }}
             >
+              {!rightExpanded && (
+                <div
+                  role="separator"
+                  aria-label="Resize detail panel"
+                  aria-orientation="vertical"
+                  aria-valuemin={RIGHT_PANE_MIN_WIDTH}
+                  aria-valuemax={Math.round(rightPaneMaxWidth())}
+                  aria-valuenow={Math.round(rightPaneWidth)}
+                  tabIndex={0}
+                  onPointerDown={startRightPaneResize}
+                  onKeyDown={(e) => {
+                    if (e.key === "ArrowLeft") resizeRightPaneBy(16);
+                    else if (e.key === "ArrowRight") resizeRightPaneBy(-16);
+                    else if (e.key === "Home") resizeRightPaneBy(RIGHT_PANE_MIN_WIDTH - rightPaneWidth);
+                    else if (e.key === "End") resizeRightPaneBy(rightPaneMaxWidth() - rightPaneWidth);
+                    else return;
+                    e.preventDefault();
+                  }}
+                  className="absolute inset-y-0 left-0 z-10 w-2 cursor-col-resize outline-none max-[900px]:hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
+                />
+              )}
               <Tabs
                 value={rightTab}
                 onValueChange={(v) =>

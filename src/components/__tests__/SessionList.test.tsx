@@ -87,8 +87,8 @@ test("shows +0 −0 for sessions without diffstat data", () => {
 
 test("shows relative time for each session row", () => {
   render(<SessionList {...defaultProps} />);
-  // Timestamps far in the past relative to now — any "ago" text is correct
-  const timeLabels = screen.getAllByText(/ago|just now/i);
+  // Sidebar rows use compact timestamps so metadata survives narrow panel widths.
+  const timeLabels = screen.getAllByText(/\d+d|\d+h|\d+m|now/i);
   expect(timeLabels.length).toBeGreaterThan(0);
 });
 
@@ -127,7 +127,7 @@ test("labels external CLI sessions distinctly", () => {
     />,
   );
   expect(screen.getByText("CLI")).toBeInTheDocument();
-  expect(screen.getByText(/4 turns · 9 tools · 3 files/)).toBeInTheDocument();
+  expect(screen.getByText(/4t · 9 tools · 3f/)).toBeInTheDocument();
   expect(screen.queryByText("+0")).not.toBeInTheDocument();
 });
 
