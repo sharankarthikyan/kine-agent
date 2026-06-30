@@ -69,8 +69,27 @@ fn repo_for_session_from(roots: &DiscoveryRoots, session_id: &str) -> Option<Pat
         "antigravity" => summarize_antigravity(&file.path),
         _ => None,
     }?;
-    let repo = PathBuf::from(summary.repo);
-    repo.is_absolute().then_some(repo)
+    path_looks_absolute(&summary.repo).then(|| PathBuf::from(summary.repo))
+}
+
+/// Whether `path` looks absolute under *either* Unix or Windows conventions,
+/// independent of the host OS. [`Path::is_absolute`] only recognizes the host's
+/// own form — on macOS it rejects `C:\repo`, on Windows it rejects `/repo` — so
+/// a transcript written on the other OS (or simply a Windows session read by the
+/// host's `is_absolute`) would have its repo wrongly dropped. We only need to
+/// tell a real directory apart from a placeholder label like `"Claude CLI"`, so
+/// a syntactic check covering both forms is sufficient and host-agnostic.
+fn path_looks_absolute(path: &str) -> bool {
+    // Unix absolute (`/repo`) or UNC / Windows root (`\\server`, `\repo`).
+    if path.starts_with('/') || path.starts_with('\\') {
+        return true;
+    }
+    // Windows drive-absolute: `C:\repo` or `C:/repo`.
+    let bytes = path.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
 }
 
 fn list_sessions_from(roots: &DiscoveryRoots) -> Vec<SessionSummary> {
@@ -1357,6 +1376,46 @@ mod tests {
         assert!(prompts.iter().any(|p| p.contains("second prompt")));
         // The tool_result must NOT have produced a prompt event.
         assert!(!prompts.iter().any(|p| p.contains("file body")));
+    }
+
+    #[test]
+    fn path_looks_absolute_accepts_both_conventions_and_rejects_labels() {
+        // Unix absolute.
+        assert!(path_looks_absolute("/work/myrepo"));
+        // Windows drive-absolute, both separator styles.
+        assert!(path_looks_absolute(r"C:\Users\me\repo"));
+        assert!(path_looks_absolute("C:/Users/me/repo"));
+        // UNC / Windows root.
+        assert!(path_looks_absolute(r"\\server\share\repo"));
+        // Placeholder labels (no recorded cwd) must be rejected.
+        assert!(!path_looks_absolute("Claude CLI"));
+        assert!(!path_looks_absolute("Codex CLI"));
+        assert!(!path_looks_absolute("Gemini CLI"));
+        assert!(!path_looks_absolute("Antigravity CLI"));
+        // Relative paths are not a resolvable scope.
+        assert!(!path_looks_absolute("repo"));
+        assert!(!path_looks_absolute("./repo"));
+        assert!(!path_looks_absolute(""));
+        // Drive-relative (`C:repo`, no separator) is not absolute on Windows.
+        assert!(!path_looks_absolute("C:repo"));
+    }
+
+    #[test]
+    fn repo_for_session_accepts_windows_cwd_on_any_host() {
+        // A session recorded on Windows carries a `C:\…` cwd. The repo must
+        // resolve regardless of the host OS reading it — `Path::is_absolute`
+        // would have dropped it on macOS.
+        let home = temp_home("win-cwd");
+        let dir = home.join(".claude/projects/-repo");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("abc.jsonl"),
+            r#"{"type":"user","cwd":"C:\\Users\\me\\proj","message":{"role":"user","content":"hi"}}"#,
+        )
+        .unwrap();
+        let sessions = list_sessions_in(&home);
+        let repo = repo_for_session_in(&home, &sessions[0].id);
+        assert_eq!(repo, Some(PathBuf::from(r"C:\Users\me\proj")));
     }
 
     #[test]
