@@ -157,7 +157,7 @@ export function PermissionModeSelect({
       </DropdownMenu>
 
       {showSandbox && (
-        <label className="flex cursor-pointer select-none items-center gap-1.5 text-xs text-muted-foreground">
+        <label className="flex shrink-0 cursor-pointer select-none items-center gap-1.5 whitespace-nowrap text-xs text-muted-foreground">
           <Switch
             checked={sandboxTerminal}
             onCheckedChange={onSandboxTerminalChange}

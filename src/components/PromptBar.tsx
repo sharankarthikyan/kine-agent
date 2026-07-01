@@ -188,10 +188,10 @@ export function PromptBar({
           </div>
         )}
 
-        {/* Bottom action row */}
-        <div className="flex items-center justify-between gap-2">
+        {/* Bottom action row — wraps so the send button never overlaps the controls */}
+        <div className="flex flex-wrap items-center gap-2">
           {/* LEFT: model + permission selectors, side by side */}
-          <div className="flex min-w-0 items-center gap-1">
+          <div className="flex min-w-0 flex-wrap items-center gap-1">
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button
@@ -256,7 +256,7 @@ export function PromptBar({
           </div>
 
           {/* RIGHT: attach + send */}
-          <div className="flex shrink-0 items-center gap-1">
+          <div className="ml-auto flex shrink-0 items-center gap-1">
             <Button variant="ghost" size="icon" aria-label="Attach" className="size-9" disabled>
               <Paperclip data-icon />
             </Button>
