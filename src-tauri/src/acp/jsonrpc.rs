@@ -45,6 +45,10 @@ pub struct RpcPeer {
     pending: Pending,
     next_id: Arc<AtomicU64>,
     inbound_rx: Arc<Mutex<Option<mpsc::UnboundedReceiver<Inbound>>>>,
+    /// Set once the reader hits EOF. Guards the half-closed transport case: the
+    /// agent's stdout is gone but its stdin still accepts writes, so a request
+    /// issued after the EOF drain would write fine and then wait forever.
+    closed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl RpcPeer {
@@ -56,12 +60,17 @@ impl RpcPeer {
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         let (inbound_tx, inbound_rx) = mpsc::unbounded_channel();
         let reader_pending = Arc::clone(&pending);
+        let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader_closed = Arc::clone(&closed);
         tokio::spawn(async move {
             let mut lines = BufReader::new(read).lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 route_line(&line, &reader_pending, &inbound_tx);
             }
-            // EOF: fail every still-pending request so callers don't hang.
+            // EOF: mark closed FIRST, then fail every still-pending request. A
+            // request that checks `closed` after inserting therefore either sees
+            // the flag or has its entry drained here — no window to hang in.
+            reader_closed.store(true, Ordering::SeqCst);
             let mut map = reader_pending.lock().unwrap_or_else(|p| p.into_inner());
             for (_, tx) in map.drain() {
                 let _ = tx.send(Err(RpcError::Closed));
@@ -72,6 +81,7 @@ impl RpcPeer {
             pending,
             next_id: Arc::new(AtomicU64::new(1)),
             inbound_rx: Arc::new(Mutex::new(Some(inbound_rx))),
+            closed,
         }
     }
 
@@ -115,6 +125,17 @@ impl RpcPeer {
                 }
                 other => other,
             });
+        }
+        // Half-closed guard: if the reader already hit EOF, its drain may have run
+        // before our insert — nothing would ever resolve this slot even though the
+        // write succeeded. Checked AFTER insert to pair with the drain's store-then-
+        // drain ordering above.
+        if self.closed.load(Ordering::SeqCst) {
+            self.pending
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(&id);
+            return Err(RpcError::Closed);
         }
         rx.await.map_err(|_| RpcError::Closed)?
     }
@@ -326,5 +347,20 @@ mod tests {
         drop(agent); // close the connection with the request outstanding
         let err = fut.await.unwrap_err();
         assert!(matches!(err, RpcError::Closed));
+    }
+
+    #[tokio::test]
+    async fn request_on_half_closed_transport_returns_closed_instead_of_hanging() {
+        // Reads EOF immediately, but writes still succeed — the live equivalent is
+        // an agent that closed stdout while its stdin stays open. The successful
+        // write means the write-failure path can't save us; the closed flag must.
+        let peer = RpcPeer::start(tokio::io::empty(), tokio::io::sink());
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            peer.request("x", serde_json::json!({})),
+        )
+        .await
+        .expect("request must not hang on a half-closed transport");
+        assert!(matches!(result.unwrap_err(), RpcError::Closed));
     }
 }
