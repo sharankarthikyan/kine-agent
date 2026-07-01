@@ -1,3 +1,4 @@
+pub mod acp;
 pub mod adapter;
 pub mod adapters;
 pub mod agent_paths;
