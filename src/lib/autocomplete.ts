@@ -37,8 +37,9 @@ export interface Suggestion {
  *
  * A token is the whitespace-delimited word ending at the caret. It's a trigger when that
  * word starts with `@` or `/`. `@` fires after start-of-text or any whitespace (so it can
- * appear mid-line, and its query may contain `/` for paths). `/` fires only at line start
- * (matching Claude Code's "commands recognized only at message start" rule). Returns null
+ * appear mid-line, and its query may contain `/` for paths). `/` fires for a bare command
+ * token anywhere in the text — including after an `@` mention — but NOT when the word has an
+ * interior slash (that's an absolute path like `/usr/bin`, not a command name). Returns null
  * when the caret isn't inside such a token.
  */
 function isWhitespace(c: string): boolean {
@@ -57,8 +58,10 @@ export function detectTrigger(text: string, caret: number): TriggerContext | nul
   if (ch !== "@" && ch !== "/") return null;
 
   if (ch === "/") {
-    const atLineStart = start === 0 || text[start - 1] === "\n";
-    if (!atLineStart) return null; // mid-line slash is a path/literal, not a command
+    // Command names are single bare words; an interior slash means it's a path, not a command.
+    let wordEnd = caret;
+    while (wordEnd < text.length && !isWhitespace(text[wordEnd])) wordEnd++;
+    if (text.slice(start + 1, wordEnd).includes("/")) return null;
   }
 
   return { trigger: ch, query: text.slice(start + 1, caret), start, end: caret };

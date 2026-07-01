@@ -1,4 +1,5 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { Conversation, type Turn } from "../Conversation";
 
 test("empty state when there are no turns and not running", () => {
@@ -51,4 +52,51 @@ test("running indicator summarizes latest activity", () => {
   expect(screen.getByRole("status")).toHaveTextContent(/running bash/i);
   expect(screen.getByRole("status")).toHaveTextContent(/npm test/i);
   expect(screen.getByRole("status")).toHaveTextContent(/1 tool/i);
+});
+
+test("does not force-scroll while the user is reading older output", async () => {
+  const scrollIntoView = vi.fn();
+  const original = HTMLElement.prototype.scrollIntoView;
+  HTMLElement.prototype.scrollIntoView = scrollIntoView;
+
+  const initialTurns: Turn[] = [
+    { prompt: "x", events: [{ kind: "token", data: { text: "first" } }] },
+  ];
+  const { rerender } = render(
+    <div data-testid="scroller" style={{ overflowY: "auto", height: 100 }}>
+      <Conversation turns={initialTurns} running />
+    </div>,
+  );
+  const scroller = screen.getByTestId("scroller");
+  Object.defineProperties(scroller, {
+    scrollHeight: { value: 1000, configurable: true },
+    clientHeight: { value: 100, configurable: true },
+    scrollTop: { value: 100, configurable: true, writable: true },
+  });
+
+  scrollIntoView.mockClear();
+  fireEvent.scroll(scroller);
+  expect(await screen.findByRole("button", { name: /latest/i })).toBeInTheDocument();
+
+  rerender(
+    <div data-testid="scroller" style={{ overflowY: "auto", height: 100 }}>
+      <Conversation
+        turns={[
+          {
+            prompt: "x",
+            events: [
+              { kind: "token", data: { text: "first" } },
+              { kind: "token", data: { text: " second" } },
+            ],
+          },
+        ]}
+        running
+      />
+    </div>,
+  );
+  expect(scrollIntoView).not.toHaveBeenCalled();
+
+  await userEvent.click(screen.getByRole("button", { name: /latest/i }));
+  expect(scrollIntoView).toHaveBeenCalled();
+  HTMLElement.prototype.scrollIntoView = original;
 });

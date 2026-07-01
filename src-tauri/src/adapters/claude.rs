@@ -66,12 +66,26 @@ pub fn parse_line(line: &str) -> Vec<AgentEvent> {
 fn parse_usage(v: &Value) -> Option<AgentEvent> {
     let usage = v.get("usage")?;
     let n = |k: &str| usage.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+    let input_tokens = n("input_tokens");
+    let output_tokens = n("output_tokens");
+    let cache_read_tokens = n("cache_read_input_tokens");
+    let cache_creation_tokens = n("cache_creation_input_tokens");
+    let cost_usd = v.get("total_cost_usd").and_then(|x| x.as_f64());
+    // A result whose counts are all zero comes from a turn that made no API call
+    // (e.g. /usage or /status handled locally by the CLI) — not a real sample.
+    let all_zero = input_tokens == 0
+        && output_tokens == 0
+        && cache_read_tokens == 0
+        && cache_creation_tokens == 0;
+    if all_zero && cost_usd.unwrap_or(0.0) == 0.0 {
+        return None;
+    }
     Some(AgentEvent::Usage {
-        input_tokens: n("input_tokens"),
-        output_tokens: n("output_tokens"),
-        cache_read_tokens: n("cache_read_input_tokens"),
-        cache_creation_tokens: n("cache_creation_input_tokens"),
-        cost_usd: v.get("total_cost_usd").and_then(|x| x.as_f64()),
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        cache_creation_tokens,
+        cost_usd,
         model: v.get("model").and_then(|x| x.as_str()).map(String::from),
     })
 }
@@ -327,6 +341,27 @@ mod tests {
             "expected Done as second event, got {:?}",
             events[1]
         );
+    }
+
+    #[test]
+    fn parse_result_with_all_zero_usage_emits_only_done() {
+        // Local slash-command turns (/usage, /status) make no API call; the CLI still
+        // reports a usage object with every count at zero. That is not a real sample.
+        let line = r#"{
+            "type": "result",
+            "is_error": false,
+            "result": "You are currently using your subscription",
+            "usage": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0
+            },
+            "total_cost_usd": 0.0
+        }"#;
+        let events = parse_line(line);
+        assert_eq!(events.len(), 1, "expected [Done] only, got {events:?}");
+        assert!(matches!(&events[0], AgentEvent::Done { .. }));
     }
 
     #[test]

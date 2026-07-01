@@ -1,10 +1,10 @@
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { AgentEvent } from "../lib/agent";
 import { EventStream } from "./EventStream";
 import { EmptyState } from "./EmptyState";
 import { RunningIndicator } from "./RunningIndicator";
 import { Button } from "@/components/ui/button";
-import { Loader2 } from "lucide-react";
+import { ArrowDown, Loader2 } from "lucide-react";
 
 export interface Turn {
   prompt: string;
@@ -22,6 +22,8 @@ interface ConversationProps {
   onLoadMore?: () => void;
 }
 
+const FOLLOW_BOTTOM_THRESHOLD = 96;
+
 export function Conversation({
   turns,
   running,
@@ -31,9 +33,53 @@ export function Conversation({
   loadingMore = false,
   onLoadMore,
 }: ConversationProps) {
+  const rootRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const firstTurnKeyRef = useRef<string | null>(null);
+  const followOutputRef = useRef(true);
+  const [isFollowingOutput, setIsFollowingOutput] = useState(true);
+
+  const scrollParent = useCallback((): HTMLElement | null => {
+    const root = rootRef.current;
+    if (!root) return null;
+    let node: HTMLElement | null = root.parentElement;
+    while (node) {
+      const style = window.getComputedStyle(node);
+      if (/(auto|scroll)/.test(`${style.overflowY} ${style.overflow}`)) {
+        return node;
+      }
+      node = node.parentElement;
+    }
+    return null;
+  }, []);
+
+  const isNearBottom = useCallback((node: HTMLElement): boolean => {
+    return node.scrollHeight - node.scrollTop - node.clientHeight < FOLLOW_BOTTOM_THRESHOLD;
+  }, []);
+
+  const setFollowing = useCallback((next: boolean) => {
+    followOutputRef.current = next;
+    setIsFollowingOutput(next);
+  }, []);
+
+  const scrollToBottom = useCallback(() => {
+    try {
+      bottomRef.current?.scrollIntoView({ block: "end", behavior: "auto" });
+    } catch {
+      /* jsdom: no-op */
+    }
+  }, []);
+
   useEffect(() => {
+    const node = scrollParent();
+    if (!node) return;
+    setFollowing(isNearBottom(node));
+    const onScroll = () => setFollowing(isNearBottom(node));
+    node.addEventListener("scroll", onScroll, { passive: true });
+    return () => node.removeEventListener("scroll", onScroll);
+  }, [isNearBottom, scrollParent, setFollowing]);
+
+  useLayoutEffect(() => {
     const first = turns[0];
     const firstTurnKey =
       first === undefined
@@ -43,12 +89,8 @@ export function Conversation({
       firstTurnKeyRef.current !== null && firstTurnKeyRef.current !== firstTurnKey;
     firstTurnKeyRef.current = firstTurnKey;
     if (insertedOlderContent) return;
-    try {
-      bottomRef.current?.scrollIntoView({ block: "end" });
-    } catch {
-      /* jsdom: no-op */
-    }
-  }, [turns, running]);
+    if (followOutputRef.current) scrollToBottom();
+  }, [turns, running, scrollToBottom]);
 
   if (turns.length === 0 && !running) {
     return (
@@ -63,7 +105,7 @@ export function Conversation({
 
   return (
     // More space between turns than within a single turn (no divider lines).
-    <div className="flex flex-col gap-6 p-4">
+    <div ref={rootRef} className="relative flex flex-col gap-6 p-4">
       {hasMore && onLoadMore && (
         <div className="flex justify-center">
           <Button
@@ -117,6 +159,23 @@ export function Conversation({
         </div>
       ))}
       {running && <RunningIndicator events={runningEvents} />}
+      {!isFollowingOutput && (
+        <div className="sticky bottom-3 z-10 flex justify-center pointer-events-none">
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            className="pointer-events-auto gap-1.5 rounded-full border border-border/80 bg-background/95 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-background/75"
+            onClick={() => {
+              setFollowing(true);
+              scrollToBottom();
+            }}
+          >
+            <ArrowDown aria-hidden="true" className="size-3.5" />
+            Latest
+          </Button>
+        </div>
+      )}
       <div ref={bottomRef} />
     </div>
   );
