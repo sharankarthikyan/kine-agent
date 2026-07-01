@@ -1,6 +1,8 @@
 use crate::adapter::{AgentAdapter, EventSink, Prompt, SessionError};
 use crate::events::AgentEvent;
-use crate::adapters::{read_capped_line, CappedLine, MAX_LINE_BYTES};
+use crate::adapters::{
+    feed_prompt_via_stdin, is_batch_shim, read_capped_line, CappedLine, MAX_LINE_BYTES,
+};
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -191,7 +193,13 @@ pub async fn spawn_and_stream(
         .and_then(crate::permission::PermissionMode::from_wire)
         .unwrap_or(crate::permission::PermissionMode::Default);
 
-    let mut command = Command::new(crate::agent_paths::resolve_program("codex"));
+    let program = crate::agent_paths::resolve_program("codex");
+    // On a Windows batch shim the prompt cannot be a CLI argument (Rust rejects `\r`/`\n`
+    // args to `.cmd`/`.bat`), so a multi-line prompt is fed over stdin instead. `codex exec`
+    // reads the prompt from stdin when the positional prompt is `-`; stdin MUST then be
+    // closed (EOF) or `codex exec` hangs waiting for more input.
+    let prompt_via_stdin = is_batch_shim(&program);
+    let mut command = Command::new(&program);
     command.arg("exec");
     // The sandbox/bypass flag is an `exec`-level option and MUST precede the `resume`
     // subcommand (`codex exec -s <tier> resume <id>` is accepted; `codex exec resume -s`
@@ -214,16 +222,32 @@ pub async fn spawn_and_stream(
     if !resume {
         command.arg("--cd").arg(&cwd);
     }
-    command.arg(&prompt.text);
+    if prompt_via_stdin {
+        command.arg("-");
+    } else {
+        command.arg(&prompt.text);
+    }
 
+    let stdin_cfg = if prompt_via_stdin {
+        // The prompt is written to stdin below, then stdin is closed (EOF).
+        std::process::Stdio::piped()
+    } else {
+        std::process::Stdio::null()
+    };
     let mut child = command
         .current_dir(&cwd)
-        .stdin(std::process::Stdio::null())
+        .stdin(stdin_cfg)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .spawn()
         .map_err(|e| SessionError::Spawn(e.to_string()))?;
+
+    if prompt_via_stdin {
+        if let Some(stdin) = child.stdin.take() {
+            feed_prompt_via_stdin(stdin, prompt.text.clone());
+        }
+    }
 
     let stdout = child
         .stdout

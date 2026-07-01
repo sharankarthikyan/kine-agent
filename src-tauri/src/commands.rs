@@ -1,5 +1,6 @@
 use crate::adapter::{AgentAdapter, EventSink, Prompt};
 use crate::adapters::claude::ClaudeAdapter;
+use crate::approval::{ApprovalDecision, ApprovalRegistry};
 use crate::events::AgentEvent;
 use crate::external_sessions;
 use crate::git::{self, BranchChanges, CommitResult, TreeEntry};
@@ -126,6 +127,7 @@ impl EventSink for StoreSink {
 #[allow(clippy::too_many_arguments)]
 async fn run_persisting(
     store: &SessionStore,
+    approvals: &ApprovalRegistry,
     session_id: String,
     agent: String,
     prompt: Prompt,
@@ -230,6 +232,9 @@ async fn run_persisting(
         // startup `reset_running_sessions` sweep is the backstop that un-sticks it.
         eprintln!("failed to set status '{status}' for session {session_id}: {e}");
     }
+    // Release any approval requests this session was still blocking on, so a gated tool
+    // can't hang past the run (the awaiting bridge sees a closed channel and denies).
+    approvals.cancel_session(&session_id);
     result.map_err(|e| e.to_string())
 }
 
@@ -538,6 +543,7 @@ pub async fn list_trusted_repos(store: State<'_, SessionStore>) -> Result<Vec<St
 #[allow(clippy::too_many_arguments)]
 async fn create_session_and_run(
     store: &SessionStore,
+    approvals: &ApprovalRegistry,
     session_id: String,
     agent: String,
     repo_path: PathBuf,
@@ -590,6 +596,7 @@ async fn create_session_and_run(
 
     run_persisting(
         store,
+        approvals,
         session_id,
         agent,
         Prompt {
@@ -631,6 +638,7 @@ pub async fn start_session(
     on_event: Channel<AgentEvent>,
     store: State<'_, SessionStore>,
     runs: State<'_, RunRegistry>,
+    approvals: State<'_, ApprovalRegistry>,
 ) -> Result<(), String> {
     validate_prompt(&prompt)?;
     let (_guard, cancel_rx) = runs.acquire(&session_id)?;
@@ -648,6 +656,7 @@ pub async fn start_session(
 
     create_session_and_run(
         &store,
+        &approvals,
         session_id,
         agent,
         repo_path,
@@ -681,6 +690,7 @@ pub async fn continue_external_session(
     on_event: Channel<AgentEvent>,
     store: State<'_, SessionStore>,
     runs: State<'_, RunRegistry>,
+    approvals: State<'_, ApprovalRegistry>,
 ) -> Result<(), String> {
     validate_prompt(&prompt)?;
     let (_guard, cancel_rx) = runs.acquire(&session_id)?;
@@ -745,6 +755,7 @@ pub async fn continue_external_session(
 
     create_session_and_run(
         &store,
+        &approvals,
         session_id,
         agent,
         repo_path,
@@ -778,6 +789,7 @@ pub async fn send_message(
     on_event: Channel<AgentEvent>,
     store: State<'_, SessionStore>,
     runs: State<'_, RunRegistry>,
+    approvals: State<'_, ApprovalRegistry>,
 ) -> Result<(), String> {
     validate_prompt(&prompt)?;
     let (_guard, cancel_rx) = runs.acquire(&session_id)?;
@@ -823,6 +835,7 @@ pub async fn send_message(
 
     run_persisting(
         &store,
+        &approvals,
         session_id,
         agent,
         Prompt {
@@ -849,6 +862,26 @@ pub async fn stop_session(
     runs: State<'_, RunRegistry>,
 ) -> Result<bool, String> {
     Ok(runs.cancel(&session_id))
+}
+
+/// Answer a pending tool-approval request (the Approve/Deny buttons in the UI). Resolves
+/// the request the agent's approval bridge is blocking on. Returns true when a matching
+/// pending request for this session was found; false (unknown/foreign/already-resolved id)
+/// is a no-op, since the request id crosses the untrusted IPC boundary. Agent-agnostic:
+/// every agent that can raise an approval is answered through this one command.
+#[tauri::command]
+pub async fn respond_to_approval(
+    session_id: String,
+    request_id: String,
+    approve: bool,
+    message: Option<String>,
+    approvals: State<'_, ApprovalRegistry>,
+) -> Result<bool, String> {
+    let decision = ApprovalDecision {
+        allow: approve,
+        message,
+    };
+    Ok(approvals.resolve(&session_id, &request_id, decision))
 }
 
 /// Remove the worktree (and branch) for a finished session, then delete its persisted
@@ -1131,6 +1164,25 @@ pub async fn write_text_file(
     tokio::task::spawn_blocking(move || {
         let wt = crate::worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
         inspect::write_project_text_file(&path, &content, &wt.path).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Read a text file from within a session's worktree, for inlining `@file` mentions when
+/// the target agent (codex/antigravity) doesn't resolve them natively. Unlike
+/// `read_text_file` (which is restricted to the customizations allowlist), this reads any
+/// regular file inside the worktree, path-validated against traversal; content over 512 KiB
+/// is truncated. External (read-only CLI history) sessions have no worktree and are rejected.
+#[tauri::command]
+pub async fn read_worktree_file(session_id: String, path: String) -> Result<String, String> {
+    if session_id.starts_with("external:") {
+        return Err("external CLI-history sessions have no worktree to read from".to_string());
+    }
+    let root = worktrees_root();
+    tokio::task::spawn_blocking(move || {
+        let wt = crate::worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
+        crate::git::read_worktree_file(&wt.path, &path)
     })
     .await
     .map_err(|e| e.to_string())?

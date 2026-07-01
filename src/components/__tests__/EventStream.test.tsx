@@ -1,6 +1,12 @@
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { EventStream } from "../EventStream";
 import type { AgentEvent } from "../../lib/agent";
+
+const APPROVAL: AgentEvent = {
+  kind: "approvalNeeded",
+  data: { requestId: "req-1", tool: "Bash", input: '{"command":"rm -rf build"}', prompt: "Run rm -rf build?" },
+};
 
 test("shows empty state when no events", () => {
   render(<EventStream events={[]} />);
@@ -50,7 +56,26 @@ test("renders a done event with its summary", () => {
 });
 
 test("renders an approvalNeeded event with its prompt", () => {
-  const events: AgentEvent[] = [{ kind: "approvalNeeded", data: { prompt: "run rm?" } }];
-  render(<EventStream events={events} />);
-  expect(screen.getByText(/run rm\?/)).toBeInTheDocument();
+  render(<EventStream events={[APPROVAL]} />);
+  expect(screen.getByText(/Run rm -rf build\?/)).toBeInTheDocument();
+});
+
+test("shows a read-only notice (no buttons) when no answer handler is wired", () => {
+  render(<EventStream events={[APPROVAL]} />);
+  expect(screen.queryByRole("button", { name: "Approve" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Deny" })).not.toBeInTheDocument();
+});
+
+test("Approve calls onApprovalRespond with the request id and true", async () => {
+  const onApprovalRespond = vi.fn();
+  render(<EventStream events={[APPROVAL]} onApprovalRespond={onApprovalRespond} />);
+  await userEvent.click(screen.getByRole("button", { name: "Approve" }));
+  expect(onApprovalRespond).toHaveBeenCalledWith("req-1", true);
+});
+
+test("Deny calls onApprovalRespond with the request id and false", async () => {
+  const onApprovalRespond = vi.fn();
+  render(<EventStream events={[APPROVAL]} onApprovalRespond={onApprovalRespond} />);
+  await userEvent.click(screen.getByRole("button", { name: "Deny" }));
+  expect(onApprovalRespond).toHaveBeenCalledWith("req-1", false);
 });

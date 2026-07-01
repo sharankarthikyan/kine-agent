@@ -4,6 +4,7 @@ import { EmptyState } from "./EmptyState";
 import { Markdown } from "./Markdown";
 import { Badge, badgeVariants } from "@/components/ui/badge";
 import { Alert, AlertTitle, AlertDescription } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
 import { Wrench, Pencil } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -11,6 +12,12 @@ interface EventStreamProps {
   events: AgentEvent[];
   /** Open a file's diff when a file-related tool chip is clicked. */
   onOpenFile?: (path: string) => void;
+  /**
+   * Answer a pending approval request. When provided, an `approvalNeeded` event renders
+   * Approve/Deny buttons; when omitted (e.g. historical turns), it renders a read-only
+   * notice. Agent-agnostic: any agent that raises an approval is answered the same way.
+   */
+  onApprovalRespond?: (requestId: string, approve: boolean) => void;
 }
 
 /**
@@ -20,7 +27,7 @@ interface EventStreamProps {
  * is NOT re-rendered when prose already exists — the streamed text is the answer;
  * it's only shown when the turn produced no prose.
  */
-export function EventStream({ events, onOpenFile }: EventStreamProps) {
+export function EventStream({ events, onOpenFile, onApprovalRespond }: EventStreamProps) {
   if (events.length === 0) {
     return (
       <EmptyState
@@ -39,11 +46,15 @@ export function EventStream({ events, onOpenFile }: EventStreamProps) {
           // chip per line — far less vertical noise when an agent reads N files.
           <div key={i} className="flex w-full flex-wrap gap-1.5">
             {group.events.map((event, j) => (
-              <Fragment key={j}>{renderEvent(event, hasProse, onOpenFile)}</Fragment>
+              <Fragment key={j}>
+                {renderEvent(event, hasProse, onOpenFile, onApprovalRespond)}
+              </Fragment>
             ))}
           </div>
         ) : (
-          <Fragment key={i}>{renderEvent(group.event, hasProse, onOpenFile)}</Fragment>
+          <Fragment key={i}>
+            {renderEvent(group.event, hasProse, onOpenFile, onApprovalRespond)}
+          </Fragment>
         )
       )}
     </div>
@@ -75,6 +86,7 @@ function renderEvent(
   event: AgentEvent,
   hasProse: boolean,
   onOpenFile?: (path: string) => void,
+  onApprovalRespond?: (requestId: string, approve: boolean) => void,
 ) {
   switch (event.kind) {
     case "token":
@@ -145,14 +157,30 @@ function renderEvent(
     }
 
     case "approvalNeeded":
-      // The agent reported an action it can't take without approval. Kineloop runs agents
-      // headless (no live approval channel yet), so this is an informational notice, not an
-      // answerable prompt: pick a more permissive mode (Auto-edit / Full access) to let the
-      // agent proceed. (Interactive approval for Claude is tracked separately.)
+      // A gated tool call awaiting the user's decision. When an answer handler is wired
+      // (a live run), show Approve/Deny; otherwise (historical turns, or an agent with no
+      // answerable gate) show a read-only notice so the card never implies a dead button.
       return (
         <Alert className="w-full">
           <AlertTitle>Approval required</AlertTitle>
           <AlertDescription>{event.data.prompt}</AlertDescription>
+          {onApprovalRespond && (
+            <div className="mt-3 flex gap-2">
+              <Button
+                size="sm"
+                onClick={() => onApprovalRespond(event.data.requestId, true)}
+              >
+                Approve
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => onApprovalRespond(event.data.requestId, false)}
+              >
+                Deny
+              </Button>
+            </div>
+          )}
         </Alert>
       );
 

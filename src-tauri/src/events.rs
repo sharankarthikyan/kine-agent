@@ -14,7 +14,14 @@ pub enum AgentEvent {
     FileWrite {
         path: String,
     },
+    /// A gated tool call awaiting the user's decision. `request_id` correlates the UI's
+    /// answer (via `respond_to_approval`) back to the agent bridge that is blocking on it;
+    /// `tool` + `input` describe the action, and `prompt` is a human-readable summary.
+    #[serde(rename_all = "camelCase")]
     ApprovalNeeded {
+        request_id: String,
+        tool: String,
+        input: String,
         prompt: String,
     },
     Done {

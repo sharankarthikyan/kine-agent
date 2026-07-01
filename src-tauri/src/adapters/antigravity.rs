@@ -1,6 +1,8 @@
 use crate::adapter::{AgentAdapter, EventSink, Prompt, SessionError};
 use crate::events::AgentEvent;
-use crate::adapters::{read_capped_line, CappedLine, MAX_LINE_BYTES};
+use crate::adapters::{
+    feed_prompt_via_stdin, is_batch_shim, read_capped_line, CappedLine, MAX_LINE_BYTES,
+};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -60,8 +62,18 @@ pub async fn spawn_and_stream(
     sink: Box<dyn EventSink>,
     captured_conversation: Arc<Mutex<Option<String>>>,
 ) -> Result<(), SessionError> {
-    let mut command = Command::new(crate::agent_paths::resolve_program("agy"));
-    command.arg("--print").arg(&prompt.text);
+    let program = crate::agent_paths::resolve_program("agy");
+    // On a Windows batch shim the prompt cannot be a CLI argument (Rust rejects `\r`/`\n`
+    // args to `.cmd`/`.bat`), so a multi-line prompt is fed over stdin instead. NOTE:
+    // `agy --print` consuming its prompt from stdin is not yet verified live — needs a
+    // Windows smoke test. Because stdin is closed (EOF) after the write, the worst case if
+    // agy ignores stdin is a clean "no prompt" exit, not a hang.
+    let prompt_via_stdin = is_batch_shim(&program);
+    let mut command = Command::new(&program);
+    command.arg("--print");
+    if !prompt_via_stdin {
+        command.arg(&prompt.text);
+    }
     // Antigravity is project-based and otherwise ignores the process cwd, which would
     // let it operate on the wrong repo. `--add-dir <worktree>` scopes its workspace to
     // this session's isolated worktree. (We intentionally avoid `--new-project`, which
@@ -90,14 +102,26 @@ pub async fn spawn_and_stream(
         command.arg("--conversation").arg(&session_id);
     }
 
+    let stdin_cfg = if prompt_via_stdin {
+        // The prompt is written to stdin below, then stdin is closed (EOF).
+        std::process::Stdio::piped()
+    } else {
+        std::process::Stdio::null()
+    };
     let mut child = command
         .current_dir(&cwd)
-        .stdin(std::process::Stdio::null())
+        .stdin(stdin_cfg)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .spawn()
         .map_err(|e| SessionError::Spawn(e.to_string()))?;
+
+    if prompt_via_stdin {
+        if let Some(stdin) = child.stdin.take() {
+            feed_prompt_via_stdin(stdin, prompt.text.clone());
+        }
+    }
 
     let stdout = child
         .stdout

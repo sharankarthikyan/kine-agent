@@ -19,7 +19,10 @@ export type AgentEvent =
   | { kind: "status"; data: { text: string } }
   | { kind: "toolCall"; data: { name: string; input: string } }
   | { kind: "fileWrite"; data: { path: string } }
-  | { kind: "approvalNeeded"; data: { prompt: string } }
+  | {
+      kind: "approvalNeeded";
+      data: { requestId: string; tool: string; input: string; prompt: string };
+    }
   | { kind: "done"; data: { summary: string } }
   | { kind: "error"; data: { message: string } }
   | {
@@ -69,6 +72,21 @@ export async function startSession({ prompt, repo, sessionId, agent, model, perm
 export async function cleanupSession(sessionId: string): Promise<void> {
   assertDesktop();
   await invoke("cleanup_session", { sessionId });
+}
+
+/**
+ * Answer a pending tool-approval request (the Approve/Deny buttons). Resolves the request
+ * the agent's approval bridge is blocking on. Returns true when a matching pending request
+ * for this session was found; an unknown/stale id is a harmless no-op. Agent-agnostic.
+ */
+export async function respondToApproval(
+  sessionId: string,
+  requestId: string,
+  approve: boolean,
+  message?: string,
+): Promise<boolean> {
+  assertDesktop();
+  return invoke<boolean>("respond_to_approval", { sessionId, requestId, approve, message });
 }
 
 /**

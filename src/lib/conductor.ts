@@ -104,6 +104,14 @@ export async function worktreeTree(sessionId: string): Promise<TreeEntry[]> {
   return invoke<TreeEntry[]>("worktree_tree", { sessionId });
 }
 
+/** Read a text file from within a session's worktree, for inlining `@file` mentions when
+ *  the target agent doesn't resolve them natively. Path is validated server-side against
+ *  traversal; content over 512 KiB is truncated. */
+export async function readWorktreeFile(sessionId: string, path: string): Promise<string> {
+  assertDesktop();
+  return invoke<string>("read_worktree_file", { sessionId, path });
+}
+
 /** Return the changed files and ahead-count for the session's branch relative to its base. */
 export async function branchChanges(sessionId: string): Promise<BranchChanges> {
   assertDesktop();

@@ -1,6 +1,7 @@
 pub mod adapter;
 pub mod adapters;
 pub mod agent_paths;
+pub mod approval;
 mod commands;
 pub mod events;
 pub mod external_sessions;
@@ -38,6 +39,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(store)
         .manage(commands::RunRegistry::default())
+        .manage(approval::ApprovalRegistry::default())
         .setup(|app| {
             if let Some(win) = app.get_webview_window("main") {
                 // Paint the native window (including the transparent Overlay titlebar region on
@@ -55,6 +57,7 @@ pub fn run() {
             commands::continue_external_session,
             commands::cleanup_session,
             commands::stop_session,
+            commands::respond_to_approval,
             commands::review_session,
             commands::send_message,
             commands::list_sessions,
@@ -67,6 +70,7 @@ pub fn run() {
             commands::inspect_rules,
             commands::read_text_file,
             commands::write_text_file,
+            commands::read_worktree_file,
             commands::list_capabilities,
             commands::customizations_counts,
             commands::session_diffstat,

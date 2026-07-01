@@ -15,6 +15,8 @@ interface ConversationProps {
   turns: Turn[];
   running: boolean;
   onOpenFile?: (path: string) => void;
+  /** Answer a pending approval request raised in this session's live turn. */
+  onApprovalRespond?: (requestId: string, approve: boolean) => void;
   hasMore?: boolean;
   loadingMore?: boolean;
   onLoadMore?: () => void;
@@ -24,6 +26,7 @@ export function Conversation({
   turns,
   running,
   onOpenFile,
+  onApprovalRespond,
   hasMore = false,
   loadingMore = false,
   onLoadMore,
@@ -100,7 +103,15 @@ export function Conversation({
               <div className="text-xs font-medium text-muted-foreground">
                 Agent
               </div>
-              <EventStream events={turn.events} onOpenFile={onOpenFile} />
+              <EventStream
+                events={turn.events}
+                onOpenFile={onOpenFile}
+                // Approvals are only answerable on the latest turn (the live run); older
+                // turns' requests have already resolved, so they stay read-only.
+                onApprovalRespond={
+                  i === turns.length - 1 ? onApprovalRespond : undefined
+                }
+              />
             </section>
           )}
         </div>

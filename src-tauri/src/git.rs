@@ -106,6 +106,43 @@ pub fn worktree_tree(worktree: &Path) -> Vec<TreeEntry> {
     entries
 }
 
+/// Maximum bytes read from one worktree file when inlining an `@file` mention.
+const MAX_INLINE_READ_BYTES: u64 = 512 * 1024;
+
+/// Read a repo-relative text file inside `worktree` (UTF-8, lossy) for inlining `@file`
+/// mentions when the target agent doesn't resolve them natively (codex/antigravity).
+///
+/// Security: both the worktree root and the resolved target are canonicalized, and the
+/// target must remain within the root — so `..` traversal and symlinks escaping the
+/// worktree are rejected. Only regular files are read; content beyond
+/// `MAX_INLINE_READ_BYTES` is truncated (the frontend marks it).
+pub fn read_worktree_file(worktree: &Path, rel: &str) -> Result<String, String> {
+    use std::io::Read;
+
+    let root = worktree
+        .canonicalize()
+        .map_err(|e| format!("worktree unavailable: {e}"))?;
+    let target = root
+        .join(rel)
+        .canonicalize()
+        .map_err(|e| format!("cannot open {rel}: {e}"))?;
+    if !target.starts_with(&root) {
+        return Err(format!("path escapes the worktree: {rel}"));
+    }
+    let meta = std::fs::metadata(&target).map_err(|e| e.to_string())?;
+    if !meta.is_file() {
+        return Err(format!("not a file: {rel}"));
+    }
+
+    let mut buf = Vec::new();
+    std::fs::File::open(&target)
+        .map_err(|e| e.to_string())?
+        .take(MAX_INLINE_READ_BYTES)
+        .read_to_end(&mut buf)
+        .map_err(|e| e.to_string())?;
+    Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
 /// Best-effort: derive the repo's default base branch for `worktree`.
 ///
 /// Resolves `origin/HEAD` (e.g. `origin/main`) and strips the `origin/` prefix. When
@@ -366,6 +403,51 @@ mod tests {
             "untracked.txt should have status=untracked"
         );
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_worktree_file_reads_a_repo_relative_file() {
+        let dir = init_repo("read-basic");
+        fs::write(dir.join("hello.txt"), "hi there\n").unwrap();
+        assert_eq!(read_worktree_file(&dir, "hello.txt").unwrap(), "hi there\n");
+
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(dir.join("src/app.rs"), "fn a() {}\n").unwrap();
+        assert_eq!(read_worktree_file(&dir, "src/app.rs").unwrap(), "fn a() {}\n");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_worktree_file_rejects_traversal_outside_the_worktree() {
+        let dir = init_repo("read-traversal");
+        let secret = dir
+            .parent()
+            .unwrap()
+            .join(format!("ae-secret-{}.txt", std::process::id()));
+        fs::write(&secret, "top secret\n").unwrap();
+        let rel = format!("../{}", secret.file_name().unwrap().to_str().unwrap());
+        assert!(read_worktree_file(&dir, &rel).is_err());
+        let _ = fs::remove_file(&secret);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_worktree_file_rejects_a_directory() {
+        let dir = init_repo("read-isdir");
+        fs::create_dir_all(dir.join("src")).unwrap();
+        assert!(read_worktree_file(&dir, "src").is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_worktree_file_truncates_large_files() {
+        let dir = init_repo("read-large");
+        let big = "a".repeat((MAX_INLINE_READ_BYTES as usize) + 5000);
+        fs::write(dir.join("big.txt"), &big).unwrap();
+        let out = read_worktree_file(&dir, "big.txt").unwrap();
+        assert_eq!(out.len(), MAX_INLINE_READ_BYTES as usize);
         let _ = fs::remove_dir_all(&dir);
     }
 

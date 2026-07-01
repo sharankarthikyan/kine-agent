@@ -41,6 +41,7 @@ import {
   continueExternalSession,
   listTrustedRepos,
   pickRepository,
+  respondToApproval,
   startSession,
   sendMessage,
   stopSession,
@@ -1390,6 +1391,20 @@ export default function App() {
     }
   }
 
+  // Answer a pending tool-approval request from a session's live turn. Agent-agnostic:
+  // resolves whatever the agent's approval bridge is blocking on so the run proceeds.
+  async function handleApprovalRespond(
+    sessionId: string,
+    requestId: string,
+    approve: boolean,
+  ) {
+    try {
+      await respondToApproval(sessionId, requestId, approve);
+    } catch (err) {
+      toast.error(safeErrorMessage(err));
+    }
+  }
+
   async function handleOpenRule(rule: RuleFile) {
     if (!activeSessionId) return;
     // Capture the session this read belongs to; if the user switches sessions while
@@ -1682,6 +1697,16 @@ export default function App() {
                                   if (!paneFocused) focusPane(pane);
                                   void handleOpenFile(path);
                                 }}
+                                onApprovalRespond={
+                                  pane.sessionId !== null
+                                    ? (requestId, approve) =>
+                                        void handleApprovalRespond(
+                                          pane.sessionId!,
+                                          requestId,
+                                          approve,
+                                        )
+                                    : undefined
+                                }
                               />
                             )}
                           </div>
@@ -1709,6 +1734,11 @@ export default function App() {
                             }
                           }}
                           agent={paneAgent}
+                          sessionId={
+                            pane.sessionId !== null && paneSession?.source !== "external"
+                              ? pane.sessionId
+                              : undefined
+                          }
                           permissionMode={permissionModeForSession(paneSession)}
                           onPermissionModeChange={(m) =>
                             setSessionPermissionMode(pane.sessionId!, m)

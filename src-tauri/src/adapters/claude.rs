@@ -1,6 +1,8 @@
 use crate::adapter::{AgentAdapter, EventSink, Prompt, SessionError};
 use crate::events::AgentEvent;
-use crate::adapters::{read_capped_line, CappedLine, MAX_LINE_BYTES};
+use crate::adapters::{
+    feed_prompt_via_stdin, is_batch_shim, read_capped_line, CappedLine, MAX_LINE_BYTES,
+};
 use serde_json::Value;
 use std::path::PathBuf;
 use tokio::io::{AsyncReadExt, BufReader};
@@ -132,10 +134,17 @@ pub async fn spawn_and_stream(
 
     // Resolve via PATHEXT so the Windows npm shim (`claude.cmd`) is found, not just
     // `claude.exe`; on Unix this resolves the absolute path (or falls back to the name).
-    let mut command = Command::new(crate::agent_paths::resolve_program("claude"));
+    let program = crate::agent_paths::resolve_program("claude");
+    // On a Windows batch shim the prompt cannot be a CLI argument (Rust rejects `\r`/`\n`
+    // args to `.cmd`/`.bat`), so a multi-line prompt is fed over stdin instead. `claude -p`
+    // reads the prompt from stdin when no positional prompt is supplied.
+    let prompt_via_stdin = is_batch_shim(&program);
+    let mut command = Command::new(&program);
+    command.arg("-p");
+    if !prompt_via_stdin {
+        command.arg(&prompt.text);
+    }
     command
-        .arg("-p")
-        .arg(&prompt.text)
         .arg("--output-format")
         .arg("stream-json")
         .arg("--verbose");
@@ -150,16 +159,28 @@ pub async fn spawn_and_stream(
     if let Some(mode) = permission_mode {
         command.arg("--permission-mode").arg(mode.claude_flag());
     }
+    let stdin_cfg = if prompt_via_stdin {
+        // The prompt is written to stdin below, then stdin is closed (EOF).
+        std::process::Stdio::piped()
+    } else {
+        // Close stdin: claude otherwise waits ~3s for piped stdin before proceeding.
+        std::process::Stdio::null()
+    };
     let mut child = command
         .current_dir(&cwd)
-        // Close stdin: claude otherwise waits ~3s for piped stdin before proceeding.
-        .stdin(std::process::Stdio::null())
+        .stdin(stdin_cfg)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         // If this future is dropped (e.g. cancelled), kill the child instead of leaking it.
         .kill_on_drop(true)
         .spawn()
         .map_err(|e| SessionError::Spawn(e.to_string()))?;
+
+    if prompt_via_stdin {
+        if let Some(stdin) = child.stdin.take() {
+            feed_prompt_via_stdin(stdin, prompt.text.clone());
+        }
+    }
 
     let stdout = child
         .stdout

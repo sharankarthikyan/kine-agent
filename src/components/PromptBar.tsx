@@ -23,6 +23,10 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { type ModelInfo } from "@/lib/models";
 import { AgentLogo } from "./AgentLogo";
+import { AutocompletePopover } from "./AutocompletePopover";
+import { usePromptAutocomplete } from "@/lib/usePromptAutocomplete";
+import { agentResolvesMentions, buildPromptForAgent } from "@/lib/mentions";
+import { readWorktreeFile } from "@/lib/conductor";
 
 interface PromptBarProps {
   onStart: (text: string, model: ModelInfo | null) => void;
@@ -32,6 +36,8 @@ interface PromptBarProps {
   onModelChange: (m: ModelInfo) => void;
   /** The session's agent, so the permission dropdown offers the right modes. */
   agent: string;
+  /** Active session id — enables `@file` / `/command` autocomplete and file inlining. */
+  sessionId?: string;
   /** The session's current permission mode. */
   permissionMode: PermissionMode;
   /** Called when the user picks a different permission mode. */
@@ -68,6 +74,7 @@ export function PromptBar({
   model,
   onModelChange,
   agent,
+  sessionId,
   permissionMode,
   onPermissionModeChange,
   sandboxTerminal = false,
@@ -77,6 +84,7 @@ export function PromptBar({
 }: PromptBarProps) {
   const [text, setText] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const ac = usePromptAutocomplete({ text, setText, textareaRef, sessionId, agent });
   const canSend = !running && text.trim().length > 0;
   const continuingExternal = mode === "external-continuation";
   const placeholder = continuingExternal
@@ -104,13 +112,27 @@ export function PromptBar({
 
   function send() {
     if (!canSend) return;
-    onStart(text.trim(), model);
+    const raw = text.trim();
+    const mentions = ac.mentionsRef.current;
+    const needsInline =
+      !agentResolvesMentions(agent) && mentions.some((m) => raw.includes(m.token));
+    if (needsInline) {
+      // codex/antigravity don't resolve `@path` — inline the referenced files first, then send.
+      void buildPromptForAgent(raw, mentions, agent, (p) =>
+        readWorktreeFile(sessionId ?? "", p),
+      ).then((finalText) => onStart(finalText, model));
+    } else {
+      onStart(raw, model);
+    }
     setText("");
+    ac.reset();
   }
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     // Skip during IME composition so committing a CJK candidate doesn't send prematurely.
     if (e.nativeEvent.isComposing) return;
+    // Let the autocomplete menu consume navigation/accept keys (Arrow/Enter/Tab/Escape) first.
+    if (ac.handleKeyDown(e)) return;
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       send();
@@ -127,13 +149,32 @@ export function PromptBar({
         <Textarea
           ref={textareaRef}
           value={text}
-          onChange={(e) => setText(e.target.value)}
+          onChange={(e) => {
+            setText(e.target.value);
+            ac.sync(e.target);
+          }}
+          onSelect={(e) => ac.sync(e.currentTarget)}
           onKeyDown={handleKeyDown}
           placeholder={placeholder}
           aria-label={inputLabel}
+          role="combobox"
+          aria-expanded={ac.open}
+          aria-controls={ac.open ? ac.listboxId : undefined}
+          aria-autocomplete="list"
+          aria-activedescendant={ac.activeOptionId}
           disabled={running}
           rows={1}
           className="min-h-0 resize-none rounded-none border-0 bg-transparent p-0 shadow-none outline-none focus:outline-none focus-visible:ring-0 focus-visible:ring-offset-0"
+        />
+        <AutocompletePopover
+          open={ac.open}
+          items={ac.items}
+          activeIndex={ac.activeIndex}
+          query={ac.query}
+          anchorRef={textareaRef}
+          listboxId={ac.listboxId}
+          onHover={ac.setActiveIndex}
+          onSelect={ac.accept}
         />
 
         {continuingExternal && (
