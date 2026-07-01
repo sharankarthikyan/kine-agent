@@ -38,19 +38,25 @@ pub async fn initialize(peer: &RpcPeer) -> Result<bool, RpcError> {
     Ok(result
         .pointer("/agentCapabilities/loadSession")
         .and_then(Value::as_bool)
-        .unwrap_or(false))
+        .unwrap_or_else(|| {
+            eprintln!("acp: initialize response lacks agentCapabilities.loadSession — assuming false");
+            false
+        }))
 }
 
 /// session/new → the agent-minted session id (persisted as external_thread_id).
+/// A response without a sessionId is a hard error: an empty id would poison
+/// every later session/prompt and resume.
 pub async fn session_new(peer: &RpcPeer, cwd: &str) -> Result<String, RpcError> {
     let result = peer
         .request("session/new", serde_json::json!({"cwd": cwd, "mcpServers": []}))
         .await?;
-    Ok(result
+    result
         .get("sessionId")
         .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| RpcError::Protocol("session/new: missing sessionId".into()))
 }
 
 /// session/load for resume. Errors surface to the caller (falls back to session/new).
@@ -81,8 +87,28 @@ pub async fn session_prompt(
     Ok(result
         .get("stopReason")
         .and_then(Value::as_str)
-        .unwrap_or("completed")
+        .unwrap_or_else(|| {
+            eprintln!("acp: session/prompt response lacks stopReason — assuming completed");
+            "completed"
+        })
         .to_string())
+}
+
+/// Answer a session/request_permission request: `Some(option_id)` selects that
+/// option, `None` reports the turn as cancelled. Keeps raw ACP JSON out of the
+/// adapter.
+pub async fn respond_permission(
+    peer: &RpcPeer,
+    id: Value,
+    option_id: Option<&str>,
+) -> Result<(), RpcError> {
+    let outcome = match option_id {
+        Some(option_id) => {
+            serde_json::json!({"outcome": {"outcome": "selected", "optionId": option_id}})
+        }
+        None => serde_json::json!({"outcome": {"outcome": "cancelled"}}),
+    };
+    peer.respond(id, outcome).await
 }
 
 /// Parse a session/update notification's params into the M1 subset.
@@ -159,6 +185,49 @@ pub fn auto_select_option(options: &[PermissionOption], mode: Option<&str>) -> O
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{duplex, AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    /// Split a duplex: `peer` talks over one end; the test scripts the "agent"
+    /// end. An agent task answers the next request with `result` (echoing the id).
+    fn harness_answering(result: Value) -> (RpcPeer, tokio::task::JoinHandle<()>) {
+        let (ours, theirs) = duplex(64 * 1024);
+        let (read_half, write_half) = tokio::io::split(ours);
+        let peer = RpcPeer::start(read_half, write_half);
+        let (agent_read, mut agent_write) = tokio::io::split(theirs);
+        let agent_task = tokio::spawn(async move {
+            let mut lines = BufReader::new(agent_read).lines();
+            let line = lines.next_line().await.unwrap().unwrap();
+            let req: Value = serde_json::from_str(&line).unwrap();
+            let resp = serde_json::json!({"jsonrpc": "2.0", "id": req["id"], "result": result});
+            agent_write
+                .write_all(format!("{resp}\n").as_bytes())
+                .await
+                .unwrap();
+        });
+        (peer, agent_task)
+    }
+
+    #[tokio::test]
+    async fn session_new_errors_on_missing_session_id() {
+        let (peer, agent_task) = harness_answering(serde_json::json!({}));
+        let err = session_new(&peer, "/w").await.unwrap_err();
+        assert!(matches!(err, RpcError::Protocol(_)), "got {err:?}");
+        agent_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn initialize_defaults_load_session_false_on_empty_result() {
+        let (peer, agent_task) = harness_answering(serde_json::json!({}));
+        assert!(!initialize(&peer).await.unwrap());
+        agent_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_prompt_defaults_stop_reason_completed() {
+        let (peer, agent_task) = harness_answering(serde_json::json!({}));
+        assert_eq!(session_prompt(&peer, "s", "hi").await.unwrap(), "completed");
+        agent_task.await.unwrap();
+    }
 
     #[test]
     fn parses_agent_message_chunk_update() {

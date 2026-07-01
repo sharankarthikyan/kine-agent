@@ -22,6 +22,10 @@ pub enum RpcError {
     /// a write hit a broken pipe / unexpected EOF (agent process died).
     #[error("connection closed before response")]
     Closed,
+    /// The agent answered, but the response is missing a field the protocol
+    /// requires (e.g. session/new without a sessionId).
+    #[error("protocol violation: {0}")]
+    Protocol(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }
