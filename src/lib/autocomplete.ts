@@ -110,6 +110,20 @@ export function parsePathQuery(query: string): PathQuery | null {
   return { dirPath: insertPrefix, filter: query.slice(lastSlash + 1), insertPrefix };
 }
 
+/**
+ * The string to actually filter suggestions by (and highlight). For filesystem path queries
+ * it's the name after the last slash; for repo `@` queries a leading `./` is stripped so
+ * `@./src` matches repo files exactly like `@src` (worktree paths have no `./` prefix).
+ */
+export function effectiveFilterQuery(t: TriggerContext): string {
+  if (t.trigger === "@") {
+    const path = parsePathQuery(t.query);
+    if (path) return path.filter;
+    if (t.query.startsWith("./")) return t.query.slice(2);
+  }
+  return t.query;
+}
+
 /** Build `@`-path suggestions from a directory listing, prefixed for the current location. */
 export function entriesToPathSuggestions(insertPrefix: string, entries: DirEntry[]): Suggestion[] {
   return entries.map((e) => ({

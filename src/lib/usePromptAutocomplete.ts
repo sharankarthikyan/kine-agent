@@ -5,6 +5,7 @@ import {
   applySuggestion,
   commandsToSuggestions,
   detectTrigger,
+  effectiveFilterQuery,
   entriesToPathSuggestions,
   filterSuggestions,
   parsePathQuery,
@@ -60,29 +61,28 @@ export function usePromptAutocomplete({ text, setText, textareaRef, sessionId, a
       if (cacheRef.current.sessionId !== sessionId) cacheRef.current = { sessionId };
       if (!sessionId) return [];
 
+      const q = effectiveFilterQuery(t);
+
       if (t.trigger === "/") {
         if (agent !== "claude") return []; // only claude exposes headless-invocable commands
         cacheRef.current.caps ??= listCapabilities(sessionId, agent);
-        return filterSuggestions(commandsToSuggestions(await cacheRef.current.caps), t.query);
+        return filterSuggestions(commandsToSuggestions(await cacheRef.current.caps), q);
       }
 
       // "@/…" or "@~/…" → live filesystem browsing (outside the repo, with caution).
       const pathQuery = parsePathQuery(t.query);
       if (pathQuery) {
         const entries = await listDir(pathQuery.dirPath);
-        return filterSuggestions(
-          entriesToPathSuggestions(pathQuery.insertPrefix, entries),
-          pathQuery.filter,
-        );
+        return filterSuggestions(entriesToPathSuggestions(pathQuery.insertPrefix, entries), q);
       }
 
       // "@" repo files (all agents) + agents (claude only), agents surfaced first.
       cacheRef.current.files ??= worktreeTree(sessionId);
       const files = treeToFileSuggestions(await cacheRef.current.files);
-      if (agent !== "claude") return filterSuggestions(files, t.query);
+      if (agent !== "claude") return filterSuggestions(files, q);
       cacheRef.current.caps ??= listCapabilities(sessionId, agent);
       const agents = agentsToSuggestions(await cacheRef.current.caps);
-      return filterSuggestions([...agents, ...files], t.query);
+      return filterSuggestions([...agents, ...files], q);
     },
     [sessionId, agent],
   );
@@ -205,7 +205,7 @@ export function usePromptAutocomplete({ text, setText, textareaRef, sessionId, a
     open,
     items,
     activeIndex,
-    query: trigger?.query ?? "",
+    query: trigger ? effectiveFilterQuery(trigger) : "",
     listboxId,
     activeOptionId: open && items.length > 0 ? `${listboxId}-opt-${activeIndex}` : undefined,
     /** Caution shown while browsing outside the repo. */

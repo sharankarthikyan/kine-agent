@@ -9,7 +9,9 @@ import {
   treeToFileSuggestions,
   parsePathQuery,
   entriesToPathSuggestions,
+  effectiveFilterQuery,
   type Suggestion,
+  type TriggerContext,
 } from "../autocomplete";
 import type { Capabilities } from "../inspect";
 import type { TreeEntry } from "../conductor";
@@ -125,6 +127,29 @@ describe("parsePathQuery", () => {
       filter: "lo",
       insertPrefix: "/usr/",
     });
+  });
+});
+
+describe("effectiveFilterQuery", () => {
+  const t = (trigger: "@" | "/", query: string): TriggerContext => ({
+    trigger,
+    query,
+    start: 0,
+    end: query.length + 1,
+  });
+  test("strips a leading ./ from repo @ queries so @./src == @src", () => {
+    expect(effectiveFilterQuery(t("@", "./src"))).toBe("src");
+    expect(effectiveFilterQuery(t("@", "src"))).toBe("src");
+  });
+  test("leaves dotfile queries intact", () => {
+    expect(effectiveFilterQuery(t("@", ".claude"))).toBe(".claude");
+  });
+  test("uses the name part for filesystem path queries", () => {
+    expect(effectiveFilterQuery(t("@", "~/docs/re"))).toBe("re");
+    expect(effectiveFilterQuery(t("@", "/usr/lo"))).toBe("lo");
+  });
+  test("passes command queries through unchanged", () => {
+    expect(effectiveFilterQuery(t("/", "dep"))).toBe("dep");
   });
 });
 

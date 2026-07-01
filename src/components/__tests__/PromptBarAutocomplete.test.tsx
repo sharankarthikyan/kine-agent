@@ -75,6 +75,12 @@ test("typing @ opens a file suggestion menu from the worktree", async () => {
   expect(await screen.findByRole("option", { name: /src\/App\.tsx/ })).toBeInTheDocument();
 });
 
+test("@./ is treated as repo-relative (./src matches src files, not scattered subsequences)", async () => {
+  setup();
+  await userEvent.type(screen.getByPlaceholderText(PLACEHOLDER), "@./src");
+  expect(await screen.findByRole("option", { name: /src\/App\.tsx/ })).toBeInTheDocument();
+});
+
 test("selecting a file inserts the @path token and does not send", async () => {
   const { onStart } = setup();
   const ta = screen.getByPlaceholderText(PLACEHOLDER) as HTMLTextAreaElement;
