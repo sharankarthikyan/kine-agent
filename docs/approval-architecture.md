@@ -76,10 +76,13 @@ The whole bridge is now wired; only the live Claude handshake is unverified:
   fail-closed unit tests, no Claude needed. Windows named-pipe is a documented TODO.
 - **Server subprocess** (`approval/mod.rs::run_approval_server` + `main.rs` `--approval-server`):
   runs `run_stdio_server` with a `decide` closure that calls `request_decision`.
-- **Run enablement** (`commands.rs::approval_socket_setup` + `run_persisting`): opt-in via
-  `KINELOOP_APPROVAL` (Claude + Unix). Sets the launch flags on `Prompt`, registers the session
-  emitter, runs `serve` concurrently in the run's `select!` (torn down when the run ends), and
-  cleans up the socket. Off by default, so the normal launch is unchanged.
+- **Run enablement** (`commands.rs::approval_socket_setup` + `run_persisting`): mode-driven.
+  A Claude run in "Ask before edits" (`default`) mode attaches the bridge; "Auto-edit" and
+  "Full access" are deliberate "don't ask" choices and don't. Sets the launch flags on `Prompt`,
+  registers the session emitter, runs `serve` concurrently in the run's `select!` (torn down when
+  the run ends), and cleans up the socket. Unix only. The `KINELOOP_APPROVAL` env var is a
+  temporary SAFETY SWITCH (not product UX) kept until the live handshake is verified; once
+  verified, drop the env check so the permission mode alone drives it.
 - **Claude adapter** (`adapters/claude.rs`): adds `--permission-prompt-tool` + `--mcp-config`
   when `Prompt.approval` is set (merges with the user's MCP config, so their tools keep working).
 

@@ -1,31 +1,55 @@
 import { describe, test, expect, vi } from "vitest";
-import { agentResolvesMentions, buildPromptForAgent, type Mention } from "../mentions";
+import { buildPromptForAgent, needsPromptTransform, type Mention } from "../mentions";
 
-describe("agentResolvesMentions", () => {
-  test("only claude resolves @ natively", () => {
-    expect(agentResolvesMentions("claude")).toBe(true);
-    expect(agentResolvesMentions("codex")).toBe(false);
-    expect(agentResolvesMentions("antigravity")).toBe(false);
+const fileMentions: Mention[] = [
+  { kind: "file", token: "@src/a.ts", path: "src/a.ts" },
+  { kind: "file", token: "@src/b.ts", path: "src/b.ts" },
+];
+const agentMentions: Mention[] = [
+  { kind: "agent", token: "@agent-code-reviewer", name: "code-reviewer" },
+];
+
+describe("needsPromptTransform", () => {
+  test("claude needs a transform only for agent mentions, not files", () => {
+    expect(needsPromptTransform("see @src/a.ts", fileMentions, "claude")).toBe(false);
+    expect(needsPromptTransform("run @agent-code-reviewer", agentMentions, "claude")).toBe(true);
+  });
+  test("codex/agy need a transform for file mentions", () => {
+    expect(needsPromptTransform("see @src/a.ts", fileMentions, "codex")).toBe(true);
+    expect(needsPromptTransform("see @src/a.ts", fileMentions, "antigravity")).toBe(true);
+  });
+  test("no transform when the mention token was edited away", () => {
+    expect(needsPromptTransform("nothing here", fileMentions, "codex")).toBe(false);
+    expect(needsPromptTransform("nothing here", agentMentions, "claude")).toBe(false);
   });
 });
 
-describe("buildPromptForAgent", () => {
-  const mentions: Mention[] = [
-    { token: "@src/a.ts", path: "src/a.ts" },
-    { token: "@src/b.ts", path: "src/b.ts" },
-  ];
-
-  test("claude passes text through unchanged and never reads files", async () => {
+describe("buildPromptForAgent — claude", () => {
+  test("expands an @agent token to the natural-language nudge, never reads files", async () => {
     const readFile = vi.fn();
-    const out = await buildPromptForAgent("see @src/a.ts", mentions, "claude", readFile);
-    expect(out).toBe("see @src/a.ts");
+    const out = await buildPromptForAgent(
+      "review @agent-code-reviewer now",
+      agentMentions,
+      "claude",
+      readFile,
+    );
+    expect(out).toBe('review the "code-reviewer" subagent now');
     expect(readFile).not.toHaveBeenCalled();
   });
 
-  test("codex inlines the contents of mentioned files that still appear in the text", async () => {
+  test("passes @file tokens through unchanged (CLI resolves them)", async () => {
+    const readFile = vi.fn();
+    const out = await buildPromptForAgent("see @src/a.ts", fileMentions, "claude", readFile);
+    expect(out).toBe("see @src/a.ts");
+    expect(readFile).not.toHaveBeenCalled();
+  });
+});
+
+describe("buildPromptForAgent — codex/antigravity", () => {
+  test("inlines the contents of mentioned files still present in the text", async () => {
     const readFile = vi.fn(async (p: string) => `contents of ${p}`);
-    const out = await buildPromptForAgent("check @src/a.ts", mentions, "codex", readFile);
-    expect(readFile).toHaveBeenCalledTimes(1); // only @src/a.ts remains in the text
+    const out = await buildPromptForAgent("check @src/a.ts", fileMentions, "codex", readFile);
+    expect(readFile).toHaveBeenCalledTimes(1);
     expect(readFile).toHaveBeenCalledWith("src/a.ts");
     expect(out).toContain("===== src/a.ts =====");
     expect(out).toContain("contents of src/a.ts");
@@ -33,20 +57,20 @@ describe("buildPromptForAgent", () => {
     expect(out).not.toContain("src/b.ts");
   });
 
-  test("antigravity inlines multiple files, de-duplicated by path", async () => {
+  test("de-duplicates by path", async () => {
     const dupes: Mention[] = [
-      { token: "@src/a.ts", path: "src/a.ts" },
-      { token: "@src/a.ts", path: "src/a.ts" },
+      { kind: "file", token: "@src/a.ts", path: "src/a.ts" },
+      { kind: "file", token: "@src/a.ts", path: "src/a.ts" },
     ];
     const readFile = vi.fn(async (p: string) => `X${p}`);
-    const out = await buildPromptForAgent("@src/a.ts twice @src/a.ts", dupes, "antigravity", readFile);
+    const out = await buildPromptForAgent("@src/a.ts @src/a.ts", dupes, "antigravity", readFile);
     expect(readFile).toHaveBeenCalledTimes(1);
     expect(out.match(/===== src\/a\.ts =====/g)).toHaveLength(1);
   });
 
-  test("returns plain text when no mentions remain in the text", async () => {
+  test("returns plain text when no file mention remains", async () => {
     const readFile = vi.fn();
-    const out = await buildPromptForAgent("no mentions here", mentions, "codex", readFile);
+    const out = await buildPromptForAgent("no mentions here", fileMentions, "codex", readFile);
     expect(out).toBe("no mentions here");
     expect(readFile).not.toHaveBeenCalled();
   });
@@ -55,7 +79,7 @@ describe("buildPromptForAgent", () => {
     const readFile = vi.fn(async () => {
       throw new Error("unreadable");
     });
-    const out = await buildPromptForAgent("look @src/a.ts", mentions, "codex", readFile);
-    expect(out).toBe("look @src/a.ts"); // no inlined block, original text preserved
+    const out = await buildPromptForAgent("look @src/a.ts", fileMentions, "codex", readFile);
+    expect(out).toBe("look @src/a.ts");
   });
 });

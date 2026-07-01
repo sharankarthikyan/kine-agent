@@ -124,14 +124,22 @@ impl EventSink for StoreSink {
 ///
 /// Status is "error" if EITHER the run returned `Err` OR any `AgentEvent::Error`
 /// flowed through the sink — covering in-band agent failures that still return `Ok`.
-/// Turn interactive approval on for this run when opted in (env `KINELOOP_APPROVAL`, Claude,
-/// Unix). Sets the `--permission-prompt-tool` / `--mcp-config` launch flags on `prompt` and
-/// returns the per-session socket path the server listens on; returns None (launch unchanged)
-/// otherwise. Env-gated + off by default because the end-to-end Claude handshake still needs
-/// live verification (see docs/approval-architecture.md).
+/// Turn interactive approval on for this run. Driven by the permission mode the user already
+/// picked: only "Ask before edits" (the `default` mode, or none) surfaces prompts — "Auto-edit"
+/// and "Full access" don't ask, so they never attach the bridge. Claude + Unix only.
+///
+/// The `KINELOOP_APPROVAL` env var is a temporary SAFETY SWITCH, not product UX: it keeps the
+/// bridge off until the end-to-end Claude handshake is verified live (see
+/// docs/approval-architecture.md). Once verified, drop the env check so the mode alone drives it.
+///
+/// When enabled, sets the `--permission-prompt-tool` / `--mcp-config` launch flags on `prompt`
+/// and returns the per-session socket path the server listens on; returns None otherwise.
 #[cfg(unix)]
 fn approval_socket_setup(agent: &str, session_id: &str, prompt: &mut Prompt) -> Option<PathBuf> {
-    if agent != "claude" || std::env::var_os("KINELOOP_APPROVAL").is_none() {
+    // "Ask before edits" is the wire mode `default` (the UI always sends it; `None` is the same
+    // read-only-ask default). Every other mode is a deliberate "don't ask" choice.
+    let mode_asks = matches!(prompt.permission_mode.as_deref(), None | Some("default"));
+    if agent != "claude" || !mode_asks || std::env::var_os("KINELOOP_APPROVAL").is_none() {
         return None;
     }
     let dir = crate::agent_paths::data_dir().join("approvals");
@@ -183,10 +191,11 @@ async fn run_persisting(
         }
     }
 
-    // Interactive approval (opt-in via KINELOOP_APPROVAL; Claude + Unix only for now): stand up
-    // a per-session permission MCP server so Claude routes gated tool calls through the
-    // Approve/Deny UI. `approval_socket_setup` sets the launch flags on `prompt` and returns the
-    // socket path; off by default it returns None and the launch is unchanged.
+    // Interactive approval: for a Claude "Ask before edits" run, stand up a per-session
+    // permission MCP server so gated tool calls route through the Approve/Deny UI.
+    // `approval_socket_setup` decides from the permission mode (gated for now by the
+    // KINELOOP_APPROVAL safety switch until the live handshake is verified), sets the launch
+    // flags on `prompt`, and returns the socket path; otherwise None and the launch is unchanged.
     let approval_socket_path = approval_socket_setup(&agent, &session_id, &mut prompt);
 
     let (tx, mut rx) = mpsc::unbounded_channel::<AgentEvent>();

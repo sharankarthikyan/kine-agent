@@ -5,6 +5,7 @@ import {
   matchRange,
   filterSuggestions,
   commandsToSuggestions,
+  agentsToSuggestions,
   treeToFileSuggestions,
   type Suggestion,
 } from "../autocomplete";
@@ -163,6 +164,28 @@ describe("commandsToSuggestions", () => {
     expect(deploy.description).toBe("Ship it"); // skill won over the same-named command
     expect(deploy.insertText).toBe("/deploy");
     expect(out.some((s) => s.searchText === "planner")).toBe(false);
+  });
+});
+
+describe("agentsToSuggestions", () => {
+  test("maps subagents to @agent- tokens searchable by name or agent-name", () => {
+    const out = agentsToSuggestions({
+      skills: [],
+      commands: [],
+      subagents: [
+        { name: "code-reviewer", description: "Reviews code", source: "user", path: "" },
+      ],
+    });
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({
+      kind: "agent",
+      label: "code-reviewer",
+      insertText: "@agent-code-reviewer",
+      searchText: "agent-code-reviewer",
+      detail: "user",
+    });
+    // matchable by the bare name too
+    expect(filterSuggestions(out, "code")).toHaveLength(1);
   });
 });
 

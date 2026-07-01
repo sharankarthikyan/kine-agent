@@ -24,7 +24,9 @@ vi.mock("@/lib/inspect", async (importOriginal) => {
     listCapabilities: vi.fn(async () => ({
       skills: [{ name: "deploy", description: "Ship it", source: "user", path: "" }],
       commands: [{ name: "review", description: "Review the diff", source: "project", path: "" }],
-      subagents: [],
+      subagents: [
+        { name: "code-reviewer", description: "Reviews code", source: "user", path: "" },
+      ],
     })),
   };
 });

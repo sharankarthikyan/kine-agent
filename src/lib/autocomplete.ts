@@ -19,7 +19,7 @@ export interface TriggerContext {
 export interface Suggestion {
   /** Stable React key. */
   id: string;
-  kind: "command" | "file" | "dir";
+  kind: "command" | "file" | "dir" | "agent";
   /** Primary display text. */
   label: string;
   /** Exact text inserted into the composer on accept (e.g. `/deploy`, `@src/App.tsx`). */
@@ -155,6 +155,23 @@ export function commandsToSuggestions(caps: Capabilities): Suggestion[] {
   for (const s of caps.skills) add(s.name, s.description, s.source, "skill");
   for (const c of caps.commands) add(c.name, c.description, c.source, "command");
   return [...byName.values()];
+}
+
+/**
+ * Build `@agent-<name>` suggestions from a session's subagents. Offered only for Claude (the
+ * only agent whose subagents Kineloop can enumerate); on send the token is expanded to a
+ * natural-language nudge, since the raw `@agent-` token is cosmetic in headless mode.
+ */
+export function agentsToSuggestions(caps: Capabilities): Suggestion[] {
+  return caps.subagents.map((a) => ({
+    id: `agent:${a.name}`,
+    kind: "agent",
+    label: a.name,
+    insertText: `@agent-${a.name}`,
+    description: a.description,
+    detail: a.source,
+    searchText: `agent-${a.name}`,
+  }));
 }
 
 /** Build `@file`/`@dir` suggestions from a worktree file tree. */

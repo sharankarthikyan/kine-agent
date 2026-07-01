@@ -1,22 +1,18 @@
 /**
- * `@file` mentions are resolved differently per agent (verified 2026-07-01):
- * `claude -p` expands `@path` tokens natively (inlines file contents), but `codex exec`
- * and `agy --print` treat `@path` as literal text. So for codex/antigravity Kineloop must
- * inline the referenced files client-side before spawning; for claude it passes through.
+ * `@` mentions are resolved differently per agent (all verified 2026-07-01):
+ *
+ * - `@file`: `claude -p` inlines file contents natively; `codex exec` and `agy --print`
+ *   treat `@path` as literal text, so Kineloop inlines those files client-side before sending.
+ * - `@agent-<name>`: the explicit token is cosmetic in every headless mode (Claude's `-p`
+ *   ignores it — smoke-tested; codex/agy have no subagent selector at all). Agents are only
+ *   offered for Claude, where on send we expand the token to the documented natural-language
+ *   form (`the "<name>" subagent`), which Claude *may* honor via auto-delegation.
  */
 
-/** A file the user tagged via the `@` autocomplete, tracked so we know what to inline. */
-export interface Mention {
-  /** The exact token inserted into the composer, e.g. `@src/App.tsx`. */
-  token: string;
-  /** Repo-relative path used to read the file. */
-  path: string;
-}
-
-/** Agents whose headless mode resolves `@path` natively; others need client-side inlining. */
-export function agentResolvesMentions(agent: string): boolean {
-  return agent === "claude";
-}
+/** A file or agent the user referenced via the `@` autocomplete, tracked for send-time resolution. */
+export type Mention =
+  | { kind: "file"; token: string; path: string }
+  | { kind: "agent"; token: string; name: string };
 
 /** Per-file cap on inlined content (characters); larger files are truncated with a marker. */
 const MAX_INLINE_CHARS = 200_000;
@@ -29,14 +25,28 @@ function fence(path: string, contents: string): string {
   return `===== ${path} =====\n${capped}`;
 }
 
+/** Mentions whose token still appears in `text` (edited-away tokens are ignored). */
+function activeMentions(text: string, mentions: Mention[]): Mention[] {
+  return mentions.filter((m) => text.includes(m.token));
+}
+
 /**
- * Produce the prompt text to send for `agent`, given the composed `text` and the mentions
- * recorded during editing.
+ * Whether sending needs an async prompt transform (file read or agent expansion). Lets the
+ * composer keep the common case (plain text, no mentions) synchronous.
+ */
+export function needsPromptTransform(text: string, mentions: Mention[], agent: string): boolean {
+  const active = activeMentions(text, mentions);
+  if (agent === "claude") return active.some((m) => m.kind === "agent");
+  return active.some((m) => m.kind === "file");
+}
+
+/**
+ * Produce the prompt text to send for `agent`, resolving mentions:
  *
- * - `claude`: returns `text` unchanged (the CLI inlines `@path` itself).
- * - `codex` / `antigravity`: reads each mentioned file whose token still appears in `text`
- *   (de-duplicated by path, order preserved) and prepends a labeled block, then the message.
- *   Files that fail to read are skipped (their `@token` stays as a plain reference).
+ * - `claude`: expand `@agent-<name>` tokens to `the "<name>" subagent` (files pass through —
+ *   the CLI inlines them itself).
+ * - `codex` / `antigravity`: inline the contents of each referenced file (de-duplicated by
+ *   path). Agent mentions never occur for these (the menu doesn't offer them) and are left as-is.
  *
  * `readFile` reads a repo-relative path from the session worktree.
  */
@@ -46,19 +56,31 @@ export async function buildPromptForAgent(
   agent: string,
   readFile: (path: string) => Promise<string>,
 ): Promise<string> {
-  if (agentResolvesMentions(agent)) return text;
+  const active = activeMentions(text, mentions);
 
+  if (agent === "claude") {
+    let out = text;
+    const seen = new Set<string>();
+    for (const m of active) {
+      if (m.kind === "agent" && !seen.has(m.token)) {
+        seen.add(m.token);
+        out = out.split(m.token).join(`the "${m.name}" subagent`);
+      }
+    }
+    return out;
+  }
+
+  // codex / antigravity: inline referenced files.
   const seen = new Set<string>();
-  const active = mentions.filter((m) => {
-    if (seen.has(m.path)) return false;
-    if (!text.includes(m.token)) return false; // token was edited away — don't inline
+  const files = active.filter((m): m is Extract<Mention, { kind: "file" }> => {
+    if (m.kind !== "file" || seen.has(m.path)) return false;
     seen.add(m.path);
     return true;
   });
-  if (active.length === 0) return text;
+  if (files.length === 0) return text;
 
   const blocks: string[] = [];
-  for (const m of active) {
+  for (const m of files) {
     try {
       blocks.push(fence(m.path, await readFile(m.path)));
     } catch {

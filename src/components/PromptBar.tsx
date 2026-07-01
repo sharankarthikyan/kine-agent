@@ -25,7 +25,7 @@ import { type ModelInfo } from "@/lib/models";
 import { AgentLogo } from "./AgentLogo";
 import { AutocompletePopover } from "./AutocompletePopover";
 import { usePromptAutocomplete } from "@/lib/usePromptAutocomplete";
-import { agentResolvesMentions, buildPromptForAgent } from "@/lib/mentions";
+import { buildPromptForAgent, needsPromptTransform } from "@/lib/mentions";
 import { readWorktreeFile } from "@/lib/conductor";
 
 interface PromptBarProps {
@@ -114,10 +114,8 @@ export function PromptBar({
     if (!canSend) return;
     const raw = text.trim();
     const mentions = ac.mentionsRef.current;
-    const needsInline =
-      !agentResolvesMentions(agent) && mentions.some((m) => raw.includes(m.token));
-    if (needsInline) {
-      // codex/antigravity don't resolve `@path` — inline the referenced files first, then send.
+    if (needsPromptTransform(raw, mentions, agent)) {
+      // codex/agy inline @files; claude expands @agent-<name> nudges. Resolve, then send.
       void buildPromptForAgent(raw, mentions, agent, (p) =>
         readWorktreeFile(sessionId ?? "", p),
       ).then((finalText) => onStart(finalText, model));

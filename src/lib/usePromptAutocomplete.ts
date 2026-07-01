@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import type { RefObject } from "react";
 import {
+  agentsToSuggestions,
   applySuggestion,
   commandsToSuggestions,
   detectTrigger,
@@ -9,25 +10,25 @@ import {
   type Suggestion,
   type TriggerContext,
 } from "./autocomplete";
-import { listCapabilities } from "./inspect";
-import { worktreeTree } from "./conductor";
+import { listCapabilities, type Capabilities } from "./inspect";
+import { worktreeTree, type TreeEntry } from "./conductor";
 import type { Mention } from "./mentions";
 
 interface Options {
   text: string;
   setText: (t: string) => void;
   textareaRef: RefObject<HTMLTextAreaElement | null>;
-  /** Active session id — required to fetch files/commands. Absent ⇒ autocomplete is inert. */
+  /** Active session id — required to fetch files/commands/agents. Absent ⇒ autocomplete is inert. */
   sessionId?: string;
-  /** Session agent id; commands only populate for agents that expose them (claude today). */
+  /** Session agent id; commands/agents only populate for agents that expose them (claude today). */
   agent: string;
 }
 
 /**
- * Wires `@file` / `/command` autocomplete onto a plain `<textarea>`. Keeps the composer's
- * `text` as the single source of truth (no rich editor), tracks a mention registry so the
- * caller can inline files for agents that don't resolve `@` natively, and returns the state
- * + handlers the composer and the `AutocompletePopover` need.
+ * Wires `@` (files + agents) and `/` (commands) autocomplete onto a plain `<textarea>`.
+ * Keeps the composer's `text` as the single source of truth (no rich editor), tracks a
+ * mention registry so the caller can resolve mentions per agent on send, and returns the
+ * state + handlers the composer and the `AutocompletePopover` need.
  */
 export function usePromptAutocomplete({ text, setText, textareaRef, sessionId, agent }: Options) {
   const [trigger, setTrigger] = useState<TriggerContext | null>(null);
@@ -38,25 +39,31 @@ export function usePromptAutocomplete({ text, setText, textareaRef, sessionId, a
   const listboxId = useId();
   const mentionsRef = useRef<Mention[]>([]);
   const pendingCaretRef = useRef<number | null>(null);
-  // Per-session cache of the raw (unfiltered) suggestion lists — fetched once per session.
-  const rawRef = useRef<{ sessionId?: string; commands?: Suggestion[]; files?: Suggestion[] }>({});
+  // Per-session cache of the raw source data (as promises, to dedupe concurrent loads).
+  const cacheRef = useRef<{
+    sessionId?: string;
+    caps?: Promise<Capabilities>;
+    files?: Promise<TreeEntry[]>;
+  }>({});
 
-  const ensureRaw = useCallback(
-    async (kind: "command" | "file"): Promise<Suggestion[]> => {
-      if (rawRef.current.sessionId !== sessionId) rawRef.current = { sessionId };
-      if (kind === "command") {
-        if (!rawRef.current.commands) {
-          rawRef.current.commands =
-            sessionId && agent === "claude"
-              ? commandsToSuggestions(await listCapabilities(sessionId, agent))
-              : [];
-        }
-        return rawRef.current.commands;
+  // Resolve the unfiltered suggestion list for a trigger, fetching + caching source data once.
+  const suggestionsFor = useCallback(
+    async (t: "@" | "/"): Promise<Suggestion[]> => {
+      if (cacheRef.current.sessionId !== sessionId) cacheRef.current = { sessionId };
+      if (!sessionId) return [];
+
+      if (t === "/") {
+        if (agent !== "claude") return []; // only claude exposes headless-invocable commands
+        cacheRef.current.caps ??= listCapabilities(sessionId, agent);
+        return commandsToSuggestions(await cacheRef.current.caps);
       }
-      if (!rawRef.current.files) {
-        rawRef.current.files = sessionId ? treeToFileSuggestions(await worktreeTree(sessionId)) : [];
-      }
-      return rawRef.current.files;
+
+      // "@": files (all agents) + agents (claude only), agents surfaced first.
+      cacheRef.current.files ??= worktreeTree(sessionId);
+      const files = treeToFileSuggestions(await cacheRef.current.files);
+      if (agent !== "claude") return files;
+      cacheRef.current.caps ??= listCapabilities(sessionId, agent);
+      return [...agentsToSuggestions(await cacheRef.current.caps), ...files];
     },
     [sessionId, agent],
   );
@@ -69,7 +76,7 @@ export function usePromptAutocomplete({ text, setText, textareaRef, sessionId, a
       return;
     }
     let cancelled = false;
-    ensureRaw(trigger.trigger === "/" ? "command" : "file")
+    suggestionsFor(trigger.trigger)
       .then((raw) => {
         if (cancelled) return;
         const filtered = filterSuggestions(raw, trigger.query);
@@ -85,7 +92,7 @@ export function usePromptAutocomplete({ text, setText, textareaRef, sessionId, a
     return () => {
       cancelled = true;
     };
-  }, [trigger, ensureRaw]);
+  }, [trigger, suggestionsFor]);
 
   // Apply a queued caret position after a programmatic text replacement.
   useLayoutEffect(() => {
@@ -115,7 +122,15 @@ export function usePromptAutocomplete({ text, setText, textareaRef, sessionId, a
       pendingCaretRef.current = next.caret;
       setText(next.text);
       if (item.kind === "file" || item.kind === "dir") {
-        mentionsRef.current = [...mentionsRef.current, { token: item.insertText, path: item.label }];
+        mentionsRef.current = [
+          ...mentionsRef.current,
+          { kind: "file", token: item.insertText, path: item.label },
+        ];
+      } else if (item.kind === "agent") {
+        mentionsRef.current = [
+          ...mentionsRef.current,
+          { kind: "agent", token: item.insertText, name: item.label },
+        ];
       }
       close();
     },
