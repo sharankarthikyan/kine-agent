@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
-import { Bot, Command, File, Folder, TriangleAlert } from "lucide-react";
+import { Bot, File, Folder, Sparkles, TriangleAlert } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { matchRange, type Suggestion } from "@/lib/autocomplete";
 
@@ -23,7 +23,7 @@ interface AutocompletePopoverProps {
 /** Icon per suggestion kind — reuses lucide sizing from the rest of the UI. */
 function KindIcon({ kind }: { kind: Suggestion["kind"] }) {
   const Icon =
-    kind === "command" ? Command : kind === "agent" ? Bot : kind === "dir" ? Folder : File;
+    kind === "command" ? Sparkles : kind === "agent" ? Bot : kind === "dir" ? Folder : File;
   return <Icon className="size-4 shrink-0 text-muted-foreground" aria-hidden />;
 }
 
