@@ -14,10 +14,25 @@
 //! their CLIs, so their runs stay governed by the pre-decided permission mode.
 
 pub mod mcp;
+#[cfg(unix)]
+pub mod socket;
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
+
+use crate::events::AgentEvent;
+
+/// What the Claude adapter adds to its launch when approvals are enabled for a run: the
+/// `--permission-prompt-tool` name and the inline `--mcp-config` JSON that registers the
+/// Kineloop permission MCP server. `None` on a `Prompt` leaves the launch unchanged (the
+/// default), so this is inert unless a run explicitly turns approvals on.
+#[derive(Debug, Clone)]
+pub struct ApprovalLaunch {
+    pub tool: String,
+    pub mcp_config: String,
+}
 
 /// The user's answer to an approval request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,11 +69,26 @@ struct Pending {
 #[derive(Default)]
 pub struct ApprovalRegistry {
     pending: Mutex<HashMap<String, Pending>>,
+    counter: AtomicU64,
 }
 
 impl ApprovalRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Mint a process-unique request id. Cheap and dependency-free (an atomic counter),
+    /// which is enough because the registry only needs uniqueness within one process.
+    pub fn next_request_id(&self) -> String {
+        format!("ar-{}", self.counter.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// Drop a pending request without resolving it (e.g. when its surfacing failed). The
+    /// awaiter observes a closed channel, which the bridge treats as a deny.
+    pub fn forget(&self, request_id: &str) {
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.remove(request_id);
+        }
     }
 
     /// Register a pending request and return the receiver to await the user's decision.
@@ -117,6 +147,105 @@ impl ApprovalRegistry {
     }
 }
 
+/// Surfaces one event into a running session's live stream + persisted history. `run_persisting`
+/// registers one per active session so out-of-band code (the MCP approval bridge, running on a
+/// socket task) can raise `ApprovalNeeded` for the right session.
+pub type SessionEmit = Arc<dyn Fn(AgentEvent) + Send + Sync>;
+
+/// The live event emitters for currently-running sessions, keyed by session id. Managed as
+/// Tauri state; entries live only for the duration of a run.
+#[derive(Default)]
+pub struct SessionEmitters {
+    map: Mutex<HashMap<String, SessionEmit>>,
+}
+
+impl SessionEmitters {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Attach a session's emitter for the lifetime of its run.
+    pub fn register(&self, session_id: &str, emit: SessionEmit) {
+        if let Ok(mut map) = self.map.lock() {
+            map.insert(session_id.to_string(), emit);
+        }
+    }
+
+    /// Detach a session's emitter when its run ends.
+    pub fn deregister(&self, session_id: &str) {
+        if let Ok(mut map) = self.map.lock() {
+            map.remove(session_id);
+        }
+    }
+
+    /// Emit into a session's stream. Returns false when no live emitter is registered (no UI
+    /// attached), so the caller can fail closed rather than surface an unanswerable request.
+    pub fn emit(&self, session_id: &str, event: AgentEvent) -> bool {
+        let emit = self.map.lock().ok().and_then(|m| m.get(session_id).cloned());
+        match emit {
+            Some(emit) => {
+                emit(event);
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+/// Register a gated tool call, surface it to the session's UI as `ApprovalNeeded`, and await
+/// the user's decision. This is the agent-agnostic entry point the MCP approval bridge calls.
+///
+/// Fails closed (deny) when the session has no live emitter (no UI to answer) or the run ends
+/// before the user responds, so a gated tool never hangs and never runs unapproved.
+pub async fn request_approval(
+    registry: &ApprovalRegistry,
+    emitters: &SessionEmitters,
+    session_id: &str,
+    tool: &str,
+    input: &serde_json::Value,
+) -> ApprovalDecision {
+    let request_id = registry.next_request_id();
+    let event = AgentEvent::ApprovalNeeded {
+        request_id: request_id.clone(),
+        tool: tool.to_string(),
+        input: input.to_string(),
+        prompt: mcp::describe(tool, input),
+    };
+    let rx = registry.register(&request_id, session_id);
+    if !emitters.emit(session_id, event) {
+        registry.forget(&request_id);
+        return ApprovalDecision::deny("no interactive approver attached");
+    }
+    match rx.await {
+        Ok(decision) => decision,
+        Err(_) => ApprovalDecision::deny("run ended before approval"),
+    }
+}
+
+/// Entry point for the MCP approval-server subprocess (spawned by Claude via `--mcp-config`).
+/// Speaks MCP over stdio (with Claude), forwarding each gated tool call to the running app
+/// over the Unix socket at `socket_path` and returning the user's decision. Blocks until
+/// Claude closes stdin. Unix only; the app enables it only when approvals are turned on.
+#[cfg(unix)]
+pub fn run_approval_server(
+    session_id: String,
+    socket_path: std::path::PathBuf,
+) -> std::io::Result<()> {
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async move {
+        mcp::transport::run_stdio_server(
+            tokio::io::stdin(),
+            tokio::io::stdout(),
+            move |call| {
+                let path = socket_path.clone();
+                let sid = session_id.clone();
+                async move { socket::request_decision(&path, &sid, &call).await }
+            },
+        )
+        .await
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,5 +297,76 @@ mod tests {
         assert_eq!(reg.pending_count(), 1);
         assert!(reg.resolve("sess-2", "req-b", ApprovalDecision::allow()));
         assert!(rx_b.await.is_ok());
+    }
+
+    #[test]
+    fn next_request_id_is_process_unique() {
+        let reg = ApprovalRegistry::new();
+        assert_ne!(reg.next_request_id(), reg.next_request_id());
+    }
+
+    #[test]
+    fn emitters_register_emit_and_deregister() {
+        let emitters = SessionEmitters::new();
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let c = count.clone();
+        emitters.register(
+            "s1",
+            Arc::new(move |_ev| {
+                c.fetch_add(1, Ordering::Relaxed);
+            }),
+        );
+        assert!(emitters.emit("s1", AgentEvent::Done { summary: String::new() }));
+        // Unknown session: no emitter, returns false so the caller can fail closed.
+        assert!(!emitters.emit("unknown", AgentEvent::Done { summary: String::new() }));
+        assert_eq!(count.load(Ordering::Relaxed), 1);
+
+        emitters.deregister("s1");
+        assert!(!emitters.emit("s1", AgentEvent::Done { summary: String::new() }));
+    }
+
+    #[tokio::test]
+    async fn request_approval_surfaces_the_event_then_returns_the_decision() {
+        let registry = Arc::new(ApprovalRegistry::new());
+        let emitters = Arc::new(SessionEmitters::new());
+        let captured: Arc<Mutex<Option<AgentEvent>>> = Arc::new(Mutex::new(None));
+        let cap = captured.clone();
+        emitters.register(
+            "s1",
+            Arc::new(move |ev| {
+                *cap.lock().unwrap() = Some(ev);
+            }),
+        );
+
+        let reg = registry.clone();
+        let emit = emitters.clone();
+        let handle = tokio::spawn(async move {
+            request_approval(&reg, &emit, "s1", "Bash", &serde_json::json!({ "command": "ls" }))
+                .await
+        });
+
+        // Wait for the request to be surfaced, then answer it by its minted request id.
+        let request_id = loop {
+            if let Some(AgentEvent::ApprovalNeeded {
+                request_id, tool, ..
+            }) = captured.lock().unwrap().clone()
+            {
+                assert_eq!(tool, "Bash");
+                break request_id;
+            }
+            tokio::task::yield_now().await;
+        };
+        assert!(registry.resolve("s1", &request_id, ApprovalDecision::allow()));
+        assert!(handle.await.unwrap().allow);
+    }
+
+    #[tokio::test]
+    async fn request_approval_denies_and_forgets_when_no_emitter_is_attached() {
+        let registry = ApprovalRegistry::new();
+        let emitters = SessionEmitters::new();
+        let decision =
+            request_approval(&registry, &emitters, "s1", "Bash", &serde_json::json!({})).await;
+        assert!(!decision.allow, "fails closed with no UI to answer");
+        assert_eq!(registry.pending_count(), 0, "the unanswerable request is forgotten");
     }
 }

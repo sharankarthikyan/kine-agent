@@ -124,13 +124,46 @@ impl EventSink for StoreSink {
 ///
 /// Status is "error" if EITHER the run returned `Err` OR any `AgentEvent::Error`
 /// flowed through the sink — covering in-band agent failures that still return `Ok`.
+/// Turn interactive approval on for this run when opted in (env `KINELOOP_APPROVAL`, Claude,
+/// Unix). Sets the `--permission-prompt-tool` / `--mcp-config` launch flags on `prompt` and
+/// returns the per-session socket path the server listens on; returns None (launch unchanged)
+/// otherwise. Env-gated + off by default because the end-to-end Claude handshake still needs
+/// live verification (see docs/approval-architecture.md).
+#[cfg(unix)]
+fn approval_socket_setup(agent: &str, session_id: &str, prompt: &mut Prompt) -> Option<PathBuf> {
+    if agent != "claude" || std::env::var_os("KINELOOP_APPROVAL").is_none() {
+        return None;
+    }
+    let dir = crate::agent_paths::data_dir().join("approvals");
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join(format!("{session_id}.sock"));
+    let program = std::env::current_exe().ok()?.to_string_lossy().into_owned();
+    let args = vec![
+        "--approval-server".to_string(),
+        "--session".to_string(),
+        session_id.to_string(),
+        "--socket".to_string(),
+        path.to_string_lossy().into_owned(),
+    ];
+    prompt.approval = Some(crate::approval::ApprovalLaunch {
+        tool: crate::approval::mcp::permission_prompt_tool(),
+        mcp_config: crate::approval::mcp::mcp_config_json(&program, &args),
+    });
+    Some(path)
+}
+
+#[cfg(not(unix))]
+fn approval_socket_setup(_agent: &str, _session_id: &str, _prompt: &mut Prompt) -> Option<PathBuf> {
+    None
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_persisting(
     store: &SessionStore,
     approvals: &ApprovalRegistry,
     session_id: String,
     agent: String,
-    prompt: Prompt,
+    mut prompt: Prompt,
     cwd: PathBuf,
     resume: bool,
     external_thread_id: Option<String>,
@@ -150,7 +183,27 @@ async fn run_persisting(
         }
     }
 
+    // Interactive approval (opt-in via KINELOOP_APPROVAL; Claude + Unix only for now): stand up
+    // a per-session permission MCP server so Claude routes gated tool calls through the
+    // Approve/Deny UI. `approval_socket_setup` sets the launch flags on `prompt` and returns the
+    // socket path; off by default it returns None and the launch is unchanged.
+    let approval_socket_path = approval_socket_setup(&agent, &session_id, &mut prompt);
+
     let (tx, mut rx) = mpsc::unbounded_channel::<AgentEvent>();
+    // When approvals are on, register a per-session emitter so the socket bridge can surface
+    // ApprovalNeeded into this run's live stream (same fan-out as StoreSink: UI + persistence).
+    let emitters = crate::approval::SessionEmitters::new();
+    if approval_socket_path.is_some() {
+        let emit_channel = on_event.clone();
+        let emit_tx = tx.clone();
+        emitters.register(
+            &session_id,
+            Arc::new(move |ev: AgentEvent| {
+                let _ = emit_channel.send(ev.clone());
+                let _ = emit_tx.send(ev);
+            }),
+        );
+    }
     let saw_error = Arc::new(AtomicBool::new(false));
     let sink = Box::new(StoreSink {
         channel: on_event,
@@ -200,6 +253,21 @@ async fn run_persisting(
         }
     };
 
+    // The approval socket server runs concurrently with the run (Unix only, and only when a
+    // socket path was set up). It loops forever accepting approval requests; the `select!`
+    // drops it as soon as the run finishes or is cancelled, tearing the listener down cleanly.
+    #[cfg(unix)]
+    let serve_fut = async {
+        match approval_socket_path.as_ref() {
+            Some(path) => {
+                let _ = crate::approval::socket::serve(path.clone(), approvals, &emitters).await;
+            }
+            None => std::future::pending::<()>().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let serve_fut = std::future::pending::<()>();
+
     // Race the run against a cancel signal from `stop_session`. On cancel, dropping
     // `run_future` drops the adapter future, killing its child process via `kill_on_drop`
     // and dropping the sink (whose tx end terminates the drain task below).
@@ -210,6 +278,7 @@ async fn run_persisting(
             cancelled = true;
             Ok(())
         }
+        _ = serve_fut => Ok(()),
     };
     let _ = drain.await; // flush all persisted events before stamping status
 
@@ -235,6 +304,12 @@ async fn run_persisting(
     // Release any approval requests this session was still blocking on, so a gated tool
     // can't hang past the run (the awaiting bridge sees a closed channel and denies).
     approvals.cancel_session(&session_id);
+    // Remove the per-session approval socket (the server task was already torn down by the
+    // `select!` completing). Best-effort; `serve` also clears a stale socket on next bind.
+    #[cfg(unix)]
+    if let Some(path) = approval_socket_path.as_ref() {
+        let _ = std::fs::remove_file(path);
+    }
     result.map_err(|e| e.to_string())
 }
 
@@ -604,6 +679,7 @@ async fn create_session_and_run(
             model,
             permission_mode,
             sandbox_terminal,
+            approval: None,
         },
         wt.path,
         false,
@@ -843,6 +919,7 @@ pub async fn send_message(
             model,
             permission_mode,
             sandbox_terminal,
+            approval: None,
         },
         wt_path,
         true,

@@ -159,6 +159,16 @@ pub async fn spawn_and_stream(
     if let Some(mode) = permission_mode {
         command.arg("--permission-mode").arg(mode.claude_flag());
     }
+    // Interactive approval (opt-in): route gated tool calls through Kineloop's permission
+    // MCP server. `--mcp-config` merges our server with the user's own MCP config, so their
+    // tools keep working. Absent by default, leaving the launch unchanged.
+    if let Some(approval) = prompt.approval.as_ref() {
+        command
+            .arg("--permission-prompt-tool")
+            .arg(&approval.tool)
+            .arg("--mcp-config")
+            .arg(&approval.mcp_config);
+    }
     let stdin_cfg = if prompt_via_stdin {
         // The prompt is written to stdin below, then stdin is closed (EOF).
         std::process::Stdio::piped()

@@ -64,21 +64,30 @@ Flow:
   decide)` drives initialize / tools/list / tools/call / ping / notifications over
   newline-delimited JSON-RPC, generic over an async `decide` closure. 4 tests with in-memory IO.
 
-### Remaining live seam (needs a live Claude login to finish and verify)
+### Transport hosting (built + tested on the Kineloop side)
 
-Only the OS transport hosting is left; the protocol above is done:
+The whole bridge is now wired; only the live Claude handshake is unverified:
 
-- A `main.rs` subcommand that runs `run_stdio_server` as the MCP server process, with a `decide`
-  closure that forwards the gated call to the running app.
-- The subprocess-to-app bridge (Unix domain socket / Windows named pipe) and the app-side
-  listener that calls into the core: `register` -> emit `ApprovalNeeded` -> await -> reply.
-- A per-session event-emitter registry so the listener can emit into a running session's
-  `StoreSink` (register on run start, deregister on end).
-- Attaching the launch flags in the Claude adapter behind an off-by-default `Prompt` field.
-- Confirming the exact tool-result envelope Claude expects (isolated in `tool_call_result` /
-  `permission_tool_response`; a one-line change if the live run shows a different shape).
+- **App-side glue** (`approval/mod.rs`): `SessionEmitters` (per-session emitter registry) +
+  `request_approval` (mint id -> `register` -> emit `ApprovalNeeded` -> await, fail-closed with
+  no UI). Unit-tested.
+- **Socket bridge** (`approval/socket.rs`, Unix): `serve` (app-side listener) + `request_decision`
+  (subprocess client) over a Unix domain socket, one connection per gated call. Round-trip +
+  fail-closed unit tests, no Claude needed. Windows named-pipe is a documented TODO.
+- **Server subprocess** (`approval/mod.rs::run_approval_server` + `main.rs` `--approval-server`):
+  runs `run_stdio_server` with a `decide` closure that calls `request_decision`.
+- **Run enablement** (`commands.rs::approval_socket_setup` + `run_persisting`): opt-in via
+  `KINELOOP_APPROVAL` (Claude + Unix). Sets the launch flags on `Prompt`, registers the session
+  emitter, runs `serve` concurrently in the run's `select!` (torn down when the run ends), and
+  cleans up the socket. Off by default, so the normal launch is unchanged.
+- **Claude adapter** (`adapters/claude.rs`): adds `--permission-prompt-tool` + `--mcp-config`
+  when `Prompt.approval` is set (merges with the user's MCP config, so their tools keep working).
 
-### Verification checklist (live env)
+Only unverified: whether Claude spawns the server, calls `approve`, blocks, and honors the
+decision under `-p` (needs a live login). The exact tool-result envelope is isolated in
+`tool_call_result` / `permission_tool_response` — a one-line change if the live run differs.
+
+### Verification checklist (live env, `KINELOOP_APPROVAL=1`)
 
 - [ ] `claude -p --permission-prompt-tool ... --mcp-config ... --strict-mcp-config` spawns the server and calls `approve` before a gated action.
 - [ ] The tool call blocks Claude until the handler returns.

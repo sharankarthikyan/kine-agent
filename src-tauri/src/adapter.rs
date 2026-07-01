@@ -14,12 +14,17 @@ use std::path::PathBuf;
 /// `sandbox_terminal` is an Antigravity-only orthogonal control: when true it passes
 /// `agy --sandbox` to restrict terminal commands' network/disk access. Other adapters
 /// ignore it. Defaults to false.
+///
+/// `approval` (Claude-only) attaches the `--permission-prompt-tool` MCP bridge for
+/// interactive tool approval. `None` (the default) leaves the launch unchanged; other
+/// adapters ignore it.
 #[derive(Debug, Clone, Default)]
 pub struct Prompt {
     pub text: String,
     pub model: Option<String>,
     pub permission_mode: Option<String>,
     pub sandbox_terminal: bool,
+    pub approval: Option<crate::approval::ApprovalLaunch>,
 }
 
 /// Fatal session-level failure (the agent never ran or died). In-band errors the
