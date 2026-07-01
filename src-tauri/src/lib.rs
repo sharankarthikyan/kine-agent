@@ -21,9 +21,16 @@ pub fn run() {
 
     // Open the session store before building (block on the async connect once).
     let store = tauri::async_runtime::block_on(async {
-        store::SessionStore::connect(&store::default_db_path())
+        let store = store::SessionStore::connect(&store::default_db_path())
             .await
-            .expect("failed to open session store")
+            .expect("failed to open session store");
+        // Crash recovery: the in-memory run registry starts empty, so any session still
+        // marked "running" from a previous process is from a run that died with the app.
+        // Reconcile it to "error" so it isn't stranded "running" forever. Best-effort.
+        if let Err(e) = store.reset_running_sessions().await {
+            eprintln!("failed to reconcile stale running sessions on startup: {e}");
+        }
+        store
     });
 
     tauri::Builder::default()
@@ -46,6 +53,7 @@ pub fn run() {
             commands::start_session,
             commands::continue_external_session,
             commands::cleanup_session,
+            commands::stop_session,
             commands::review_session,
             commands::send_message,
             commands::list_sessions,

@@ -4,8 +4,14 @@ use sqlx::sqlite::{
     SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions, SqliteSynchronous,
 };
 use sqlx::Row;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Safety cap on the non-paged [`SessionStore::session_events`] query. Far beyond any
+/// real session's transcript; the UI uses the paged path, so this only bounds the
+/// convenience method against a runaway result set.
+const SESSION_EVENTS_CAP: i64 = 50_000;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -145,10 +151,19 @@ impl SessionStore {
         .await?;
         // Resume key for agents that mint their own conversation id (Codex thread id,
         // Antigravity conversation id). Added via ALTER for DBs created before this
-        // column existed; the duplicate-column error on re-run is expected and ignored.
-        let _ = sqlx::query("ALTER TABLE sessions ADD COLUMN external_thread_id TEXT")
+        // column existed. The duplicate-column error is expected on every run after the
+        // first and is ignored; ANY other error (disk full, locked/corrupt DB) is
+        // surfaced so a half-applied schema fails loudly here instead of as a confusing
+        // "no such column" at query time later.
+        if let Err(e) = sqlx::query("ALTER TABLE sessions ADD COLUMN external_thread_id TEXT")
             .execute(&self.pool)
-            .await;
+            .await
+        {
+            let msg = e.to_string().to_lowercase();
+            if !msg.contains("duplicate column") {
+                return Err(e.into());
+            }
+        }
         Ok(())
     }
 
@@ -272,6 +287,41 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Permanently delete a Kineloop session: its row, all of its events, and any title
+    /// override — in one transaction so a torn-down session never leaves orphan rows.
+    /// Used by `cleanup_session`. Returns the number of session rows removed (0 when the
+    /// id was unknown).
+    pub async fn delete_session(&self, id: &str) -> Result<u64, StoreError> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM events WHERE session_id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM session_title_overrides WHERE id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        let result = sqlx::query("DELETE FROM sessions WHERE id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(result.rows_affected())
+    }
+
+    /// Mark every session still recorded as "running" as "error". Called once at startup:
+    /// the in-memory run registry starts empty, so any row left "running" by a previous
+    /// process is from a run that died with the app and would otherwise be stranded
+    /// "running" forever (blocking nothing, but misreporting state). Returns rows updated.
+    pub async fn reset_running_sessions(&self) -> Result<u64, StoreError> {
+        let result =
+            sqlx::query("UPDATE sessions SET status = 'error', updated_at = ? WHERE status = 'running'")
+                .bind(now_ms())
+                .execute(&self.pool)
+                .await?;
+        Ok(result.rows_affected())
+    }
+
     /// Append one event to a session (auto-assigning the next per-session `seq`).
     pub async fn append_event(
         &self,
@@ -333,32 +383,69 @@ impl SessionStore {
         )
         .fetch_all(&self.pool)
         .await?;
+
+        // One grouped pass over the events table yields per-session activity counts so
+        // Kineloop rows read the same way as external CLI history (turns · tools · files):
+        //   - turns: `prompt` events (user turn boundaries)
+        //   - tools: `toolCall` events
+        //   - files: distinct `fileWrite` payloads. The FileWrite payload is always
+        //     exactly `{"path":"…"}`, so DISTINCT over the raw JSON counts distinct files
+        //     without depending on SQLite's JSON1 extension.
+        let count_rows = sqlx::query(
+            "SELECT session_id,
+                    COUNT(CASE WHEN kind = 'prompt' THEN 1 END) AS turns,
+                    COUNT(CASE WHEN kind = 'toolCall' THEN 1 END) AS tools,
+                    COUNT(DISTINCT CASE WHEN kind = 'fileWrite' THEN payload_json END) AS files
+             FROM events
+             GROUP BY session_id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let mut counts: HashMap<String, (i64, i64, i64)> = HashMap::new();
+        for r in &count_rows {
+            counts.insert(
+                r.get("session_id"),
+                (r.get("turns"), r.get("tools"), r.get("files")),
+            );
+        }
+
         Ok(rows
             .iter()
-            .map(|r| SessionSummary {
-                id: r.get("id"),
-                agent: r.get("agent"),
-                repo: r.get("repo"),
-                branch: r.get("branch"),
-                title: r.get("title"),
-                status: r.get("status"),
-                source: "kineloop".to_string(),
-                turn_count: None,
-                tool_call_count: None,
-                file_action_count: None,
-                created_at: r.get("created_at"),
-                updated_at: r.get("updated_at"),
+            .map(|r| {
+                let id: String = r.get("id");
+                // Every Kineloop session reports counts (0 when it has no events yet) so
+                // the sidebar meta line is consistent with external CLI sessions.
+                let (turns, tools, files) = counts.get(&id).copied().unwrap_or((0, 0, 0));
+                SessionSummary {
+                    agent: r.get("agent"),
+                    repo: r.get("repo"),
+                    branch: r.get("branch"),
+                    title: r.get("title"),
+                    status: r.get("status"),
+                    source: "kineloop".to_string(),
+                    turn_count: Some(turns as u32),
+                    tool_call_count: Some(tools as u32),
+                    file_action_count: Some(files as u32),
+                    created_at: r.get("created_at"),
+                    updated_at: r.get("updated_at"),
+                    id,
+                }
             })
             .collect())
     }
 
     /// All events for one session, in `seq` order (powers turn rehydration).
+    ///
+    /// Bounded by [`SESSION_EVENTS_CAP`] so a pathological session can't materialize an
+    /// unbounded result set over IPC. The UI lazy-loads via [`session_events_recent_page`];
+    /// this convenience path only needs the cap as a safety net.
     pub async fn session_events(&self, session_id: &str) -> Result<Vec<StoredEvent>, StoreError> {
         let rows = sqlx::query(
             "SELECT seq, kind, payload_json, ts FROM events
-             WHERE session_id = ? ORDER BY seq ASC",
+             WHERE session_id = ? ORDER BY seq ASC LIMIT ?",
         )
         .bind(session_id)
+        .bind(SESSION_EVENTS_CAP)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows
@@ -589,6 +676,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_sessions_counts_turns_tools_and_distinct_files() {
+        let store = SessionStore::connect_in_memory().await.unwrap();
+        store
+            .create_session("s1", "claude", "/repo", "/wt/s1", "agent/s1", "t")
+            .await
+            .unwrap();
+        // Two user turns.
+        store.append_event("s1", "prompt", r#"{"text":"one"}"#).await.unwrap();
+        store.append_event("s1", "prompt", r#"{"text":"two"}"#).await.unwrap();
+        // Three tool calls.
+        for _ in 0..3 {
+            store
+                .append_event("s1", "toolCall", r#"{"name":"Bash","input":"{}"}"#)
+                .await
+                .unwrap();
+        }
+        // Two distinct files across three writes (a.rs written twice, b.rs once).
+        store.append_event("s1", "fileWrite", r#"{"path":"a.rs"}"#).await.unwrap();
+        store.append_event("s1", "fileWrite", r#"{"path":"a.rs"}"#).await.unwrap();
+        store.append_event("s1", "fileWrite", r#"{"path":"b.rs"}"#).await.unwrap();
+        // Non-counted kinds must not inflate any tally.
+        store.append_event("s1", "token", r#"{"text":"hi"}"#).await.unwrap();
+        store.append_event("s1", "done", r#"{"summary":"ok"}"#).await.unwrap();
+
+        let sessions = store.list_sessions().await.unwrap();
+        let s1 = sessions.iter().find(|s| s.id == "s1").unwrap();
+        assert_eq!(s1.turn_count, Some(2));
+        assert_eq!(s1.tool_call_count, Some(3));
+        assert_eq!(s1.file_action_count, Some(2));
+    }
+
+    #[tokio::test]
+    async fn list_sessions_reports_zero_counts_for_session_without_events() {
+        let store = SessionStore::connect_in_memory().await.unwrap();
+        store
+            .create_session("s1", "claude", "/repo", "/wt/s1", "agent/s1", "t")
+            .await
+            .unwrap();
+        let sessions = store.list_sessions().await.unwrap();
+        let s1 = sessions.iter().find(|s| s.id == "s1").unwrap();
+        // Fresh Kineloop sessions report 0 (not null) so the sidebar stays consistent
+        // with external CLI rows, which always carry counts.
+        assert_eq!(s1.turn_count, Some(0));
+        assert_eq!(s1.tool_call_count, Some(0));
+        assert_eq!(s1.file_action_count, Some(0));
+    }
+
+    #[tokio::test]
     async fn set_status_updates_and_orders_by_updated_at() {
         let store = SessionStore::connect_in_memory().await.unwrap();
         store
@@ -622,6 +757,65 @@ mod tests {
             .unwrap();
         assert_eq!(store.session_events("a").await.unwrap().len(), 1);
         assert!(store.session_events("b").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn delete_session_removes_row_events_and_override() {
+        let store = SessionStore::connect_in_memory().await.unwrap();
+        store
+            .create_session("s1", "claude", "/repo", "/wt/s1", "agent/s1", "doomed")
+            .await
+            .unwrap();
+        store
+            .create_session("s2", "claude", "/repo", "/wt/s2", "agent/s2", "kept")
+            .await
+            .unwrap();
+        store.append_event("s1", "token", r#"{"text":"x"}"#).await.unwrap();
+        store.set_title_override("s1", "renamed").await.unwrap();
+
+        let removed = store.delete_session("s1").await.unwrap();
+        assert_eq!(removed, 1, "exactly the target session row is deleted");
+
+        let sessions = store.list_sessions().await.unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "s2", "untargeted session survives");
+        assert!(
+            store.session_events("s1").await.unwrap().is_empty(),
+            "deleted session's events are gone"
+        );
+        assert!(
+            !store.title_overrides().await.unwrap().contains_key("s1"),
+            "deleted session's title override is gone"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_session_reports_zero_for_unknown_id() {
+        let store = SessionStore::connect_in_memory().await.unwrap();
+        assert_eq!(store.delete_session("ghost").await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn reset_running_sessions_marks_only_running_as_error() {
+        let store = SessionStore::connect_in_memory().await.unwrap();
+        store
+            .create_session("running1", "claude", "/r", "/wt/r1", "agent/r1", "t")
+            .await
+            .unwrap(); // create_session inserts status "running"
+        store
+            .create_session("idle1", "claude", "/r", "/wt/i1", "agent/i1", "t")
+            .await
+            .unwrap();
+        store.set_status("idle1", "idle").await.unwrap();
+
+        let reset = store.reset_running_sessions().await.unwrap();
+        assert_eq!(reset, 1, "only the still-running session is reset");
+
+        let sessions = store.list_sessions().await.unwrap();
+        let running1 = sessions.iter().find(|s| s.id == "running1").unwrap();
+        let idle1 = sessions.iter().find(|s| s.id == "idle1").unwrap();
+        assert_eq!(running1.status, "error", "stale running → error");
+        assert_eq!(idle1.status, "idle", "already-idle session untouched");
     }
 
     #[tokio::test]

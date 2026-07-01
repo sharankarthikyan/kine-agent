@@ -10,7 +10,7 @@ use crate::review::{self, Diffstat, SessionDiff};
 use crate::store::{self, SessionStore, SessionSummary, StoredEvent};
 use crate::worktree;
 use serde::Serialize;
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -18,11 +18,14 @@ use tauri::ipc::Channel;
 use tauri::AppHandle;
 use tauri::State;
 use tauri_plugin_dialog::DialogExt;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
+/// Tracks in-flight runs. A session id present in `active` means a run is in progress;
+/// the mapped `watch::Sender` lets `stop_session` cancel it. The presence test also gates
+/// destructive operations (e.g. `cleanup_session`) from racing a live run.
 #[derive(Default)]
 pub struct RunRegistry {
-    active: Mutex<HashSet<String>>,
+    active: Mutex<HashMap<String, watch::Sender<bool>>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -39,18 +42,47 @@ struct RunGuard<'a> {
 }
 
 impl RunRegistry {
-    fn acquire(&self, session_id: &str) -> Result<RunGuard<'_>, String> {
+    /// Reserve `session_id` for a run. Returns a guard that releases the reservation on
+    /// drop, plus a cancel receiver the run races against; `Err` if a run is already in
+    /// flight for this id.
+    fn acquire(&self, session_id: &str) -> Result<(RunGuard<'_>, watch::Receiver<bool>), String> {
         let mut active = self
             .active
             .lock()
             .map_err(|_| "session lock registry is poisoned".to_string())?;
-        if !active.insert(session_id.to_string()) {
+        if active.contains_key(session_id) {
             return Err("session is already running".to_string());
         }
-        Ok(RunGuard {
-            registry: self,
-            session_id: session_id.to_string(),
-        })
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        active.insert(session_id.to_string(), cancel_tx);
+        Ok((
+            RunGuard {
+                registry: self,
+                session_id: session_id.to_string(),
+            },
+            cancel_rx,
+        ))
+    }
+
+    /// Signal an in-flight run to stop. Returns true if a run was signalled, false if
+    /// nothing was running. A send error means the run already ended — an equally fine
+    /// outcome for a stop request — so it's ignored.
+    fn cancel(&self, session_id: &str) -> bool {
+        if let Ok(active) = self.active.lock() {
+            if let Some(cancel_tx) = active.get(session_id) {
+                let _ = cancel_tx.send(true);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Whether a run is currently in flight for `session_id`.
+    fn is_active(&self, session_id: &str) -> bool {
+        self.active
+            .lock()
+            .map(|active| active.contains_key(session_id))
+            .unwrap_or(false)
     }
 }
 
@@ -100,6 +132,7 @@ async fn run_persisting(
     cwd: PathBuf,
     resume: bool,
     external_thread_id: Option<String>,
+    mut cancel_rx: watch::Receiver<bool>,
     on_event: Channel<AgentEvent>,
 ) -> Result<(), String> {
     let (tx, mut rx) = mpsc::unbounded_channel::<AgentEvent>();
@@ -128,25 +161,39 @@ async fn run_persisting(
     // resume. On resume those adapters take the previously-captured id (not the
     // Kineloop session id); Claude always uses the Kineloop session id directly.
     let captured: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-    let result = match agent.as_str() {
-        "codex" => {
-            let (adapter_id, do_resume) =
-                resume_target(&session_id, resume, external_thread_id.as_deref());
-            crate::adapters::codex::CodexAdapter::new(captured.clone())
-                .run(prompt, cwd, adapter_id, do_resume, sink)
-                .await
+    let run_future = async {
+        match agent.as_str() {
+            "codex" => {
+                let (adapter_id, do_resume) =
+                    resume_target(&session_id, resume, external_thread_id.as_deref());
+                crate::adapters::codex::CodexAdapter::new(captured.clone())
+                    .run(prompt, cwd, adapter_id, do_resume, sink)
+                    .await
+            }
+            "antigravity" => {
+                let (adapter_id, do_resume) =
+                    resume_target(&session_id, resume, external_thread_id.as_deref());
+                crate::adapters::antigravity::AntigravityAdapter::new(captured.clone())
+                    .run(prompt, cwd, adapter_id, do_resume, sink)
+                    .await
+            }
+            _ => {
+                ClaudeAdapter
+                    .run(prompt, cwd, session_id.clone(), resume, sink)
+                    .await
+            }
         }
-        "antigravity" => {
-            let (adapter_id, do_resume) =
-                resume_target(&session_id, resume, external_thread_id.as_deref());
-            crate::adapters::antigravity::AntigravityAdapter::new(captured.clone())
-                .run(prompt, cwd, adapter_id, do_resume, sink)
-                .await
-        }
-        _ => {
-            ClaudeAdapter
-                .run(prompt, cwd, session_id.clone(), resume, sink)
-                .await
+    };
+
+    // Race the run against a cancel signal from `stop_session`. On cancel, dropping
+    // `run_future` drops the adapter future, killing its child process via `kill_on_drop`
+    // and dropping the sink (whose tx end terminates the drain task below).
+    let mut cancelled = false;
+    let result = tokio::select! {
+        r = run_future => r,
+        _ = cancel_rx.changed() => {
+            cancelled = true;
+            Ok(())
         }
     };
     let _ = drain.await; // flush all persisted events before stamping status
@@ -157,17 +204,61 @@ async fn run_persisting(
             eprintln!("failed to persist external thread id for {session_id}: {e}");
         }
     }
-    let status = if result.is_ok() && !saw_error.load(Ordering::Acquire) {
-        "idle"
-    } else {
+    // A user-initiated stop is not a failure: mark the session idle (stopped, resumable).
+    // Otherwise "error" iff the run returned Err OR an in-band Error event flowed through.
+    let status = if !cancelled && (result.is_err() || saw_error.load(Ordering::Acquire)) {
         "error"
+    } else {
+        "idle"
     };
     if let Err(e) = store.set_status(&session_id, status).await {
         // A failed status write leaves the row stuck on its previous value (e.g.
-        // "running"). Log it so the stuck state is diagnosable rather than silent.
+        // "running"). Log it so the stuck state is diagnosable rather than silent; the
+        // startup `reset_running_sessions` sweep is the backstop that un-sticks it.
         eprintln!("failed to set status '{status}' for session {session_id}: {e}");
     }
     result.map_err(|e| e.to_string())
+}
+
+/// Upper bound on a single user prompt forwarded to an agent CLI. The prompt is passed as
+/// a process argument, so an unbounded value can exceed the OS argv limit (`E2BIG`) and
+/// surface only as a cryptic spawn failure. 256 KiB dwarfs any hand-written prompt while
+/// staying well under ARG_MAX.
+const MAX_PROMPT_BYTES: usize = 256 * 1024;
+
+/// Budget for the imported-transcript portion of a continuation prompt. The assembled
+/// prompt is one process argument, so a multi-MB external session would otherwise blow
+/// ARG_MAX. We keep the most recent tail (the most relevant context) within this budget.
+const MAX_TRANSCRIPT_BYTES: usize = 192 * 1024;
+
+/// Reject a user prompt that is too large to pass safely as a process argument.
+fn validate_prompt(prompt: &str) -> Result<(), String> {
+    if prompt.len() > MAX_PROMPT_BYTES {
+        return Err(format!(
+            "prompt is too long ({} bytes; limit is {} bytes)",
+            prompt.len(),
+            MAX_PROMPT_BYTES
+        ));
+    }
+    Ok(())
+}
+
+/// Keep an imported transcript within [`MAX_TRANSCRIPT_BYTES`] when embedding it in a
+/// continuation prompt. Retains the most recent tail and prepends a note when older
+/// entries are dropped, so the assembled single-argument prompt can't exceed ARG_MAX for
+/// very large external sessions. Cuts on a UTF-8 char boundary so no sequence is split.
+fn truncate_transcript_tail(transcript: String) -> String {
+    if transcript.len() <= MAX_TRANSCRIPT_BYTES {
+        return transcript;
+    }
+    let cut = transcript.len() - MAX_TRANSCRIPT_BYTES;
+    let cut = (cut..=transcript.len())
+        .find(|i| transcript.is_char_boundary(*i))
+        .unwrap_or(transcript.len());
+    format!(
+        "[Older transcript entries were truncated to fit the context budget.]\n\n{}",
+        &transcript[cut..]
+    )
 }
 
 /// A session's display title: first non-empty line of the prompt, trimmed to 60 chars.
@@ -226,11 +317,13 @@ fn build_external_continuation_prompt(
     prompt: &str,
     events: &[StoredEvent],
 ) -> String {
-    let transcript = events
-        .iter()
-        .filter_map(external_event_excerpt)
-        .collect::<Vec<_>>()
-        .join("\n\n");
+    let transcript = truncate_transcript_tail(
+        events
+            .iter()
+            .filter_map(external_event_excerpt)
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+    );
     format!(
         "You are continuing an imported CLI history session inside Kineloop.\n\
          External session id: {external_session_id}\n\
@@ -431,6 +524,8 @@ async fn create_session_and_run(
     agent_prompt: String,
     model: Option<String>,
     permission_mode: Option<String>,
+    title_override: Option<String>,
+    cancel_rx: watch::Receiver<bool>,
     on_event: Channel<AgentEvent>,
 ) -> Result<(), String> {
     let root = worktrees_root();
@@ -441,6 +536,9 @@ async fn create_session_and_run(
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())?;
 
+    // A title override (e.g. a renamed CLI-history session being continued) wins over the
+    // prompt-derived title so the user's chosen name carries into the new session.
+    let title = title_override.unwrap_or_else(|| title_from_prompt(&display_prompt));
     if let Err(e) = store
         .create_session(
             &session_id,
@@ -448,7 +546,7 @@ async fn create_session_and_run(
             &repo,
             &wt.path.display().to_string(),
             &wt.branch,
-            &title_from_prompt(&display_prompt),
+            &title,
         )
         .await
     {
@@ -479,6 +577,7 @@ async fn create_session_and_run(
         wt.path,
         false,
         None,
+        cancel_rx,
         on_event,
     )
     .await
@@ -508,7 +607,8 @@ pub async fn start_session(
     store: State<'_, SessionStore>,
     runs: State<'_, RunRegistry>,
 ) -> Result<(), String> {
-    let _guard = runs.acquire(&session_id)?;
+    validate_prompt(&prompt)?;
+    let (_guard, cancel_rx) = runs.acquire(&session_id)?;
     let agent = validate_agent(agent)?;
     let permission_mode = validate_permission_mode(permission_mode)?;
     let model = validate_model(model)?;
@@ -530,6 +630,8 @@ pub async fn start_session(
         prompt,
         model,
         permission_mode,
+        None,
+        cancel_rx,
         on_event,
     )
     .await
@@ -544,11 +646,16 @@ pub async fn continue_external_session(
     agent: Option<String>,
     model: Option<String>,
     permission_mode: Option<String>,
+    // The originating CLI-history session's display title (as shown in the list, already
+    // reflecting any rename override). The writable continuation inherits it so it reads
+    // as a continuation of that session instead of being titled by the first follow-up.
+    title: Option<String>,
     on_event: Channel<AgentEvent>,
     store: State<'_, SessionStore>,
     runs: State<'_, RunRegistry>,
 ) -> Result<(), String> {
-    let _guard = runs.acquire(&session_id)?;
+    validate_prompt(&prompt)?;
+    let (_guard, cancel_rx) = runs.acquire(&session_id)?;
     let original_agent = original_agent_from_external_session_id(&external_session_id)?;
     let default_agent = SPAWNABLE_AGENTS
         .contains(&original_agent.as_str())
@@ -567,7 +674,14 @@ pub async fn continue_external_session(
     let repo_path = tokio::task::spawn_blocking(move || canonical_repo_path(repo_path))
         .await
         .map_err(|e| e.to_string())??;
-    let repo = ensure_trusted_repo(&store, &repo_path).await?;
+    // The repo here is NOT arbitrary WebView input: it's read from the user's own on-disk
+    // CLI transcript and validated as a real git repository by `canonical_repo_path`.
+    // Choosing to continue that session is itself the trust gesture, so persist the repo
+    // as trusted rather than demanding a separate native-folder-picker step (which an
+    // imported session can never have gone through). `start_session`, whose repo IS
+    // WebView-supplied, keeps the stricter `ensure_trusted_repo` gate.
+    let repo = repo_path.display().to_string();
+    store.trust_repo(&repo).await.map_err(|e| e.to_string())?;
 
     let events_lookup_id = external_session_id.clone();
     let external_events = tokio::task::spawn_blocking(move || {
@@ -586,6 +700,20 @@ pub async fn continue_external_session(
         &external_events,
     );
 
+    // Inherit the originating session's title (trimmed + capped) so the continuation is
+    // recognizable as such. The frontend-supplied title already reflects any rename
+    // override; if none was passed, fall back to a stored override for this id, and
+    // finally (in create_session_and_run) to a prompt-derived title.
+    let passed_title = title.and_then(|t| normalize_title(&t).ok());
+    let title_override = match passed_title {
+        Some(t) => Some(t),
+        None => store
+            .title_overrides()
+            .await
+            .map_err(|e| e.to_string())?
+            .remove(&external_session_id),
+    };
+
     create_session_and_run(
         &store,
         session_id,
@@ -596,6 +724,8 @@ pub async fn continue_external_session(
         agent_prompt,
         model,
         permission_mode,
+        title_override,
+        cancel_rx,
         on_event,
     )
     .await
@@ -616,7 +746,8 @@ pub async fn send_message(
     store: State<'_, SessionStore>,
     runs: State<'_, RunRegistry>,
 ) -> Result<(), String> {
-    let _guard = runs.acquire(&session_id)?;
+    validate_prompt(&prompt)?;
+    let (_guard, cancel_rx) = runs.acquire(&session_id)?;
     let permission_mode = validate_permission_mode(permission_mode)?;
     let model = validate_model(model)?;
     // Resume uses the session's own agent + its captured CLI-native conversation id.
@@ -668,17 +799,36 @@ pub async fn send_message(
         wt_path,
         true,
         external_thread_id,
+        cancel_rx,
         on_event,
     )
     .await
 }
 
-/// Remove the worktree (and branch) for a finished session.
+/// Request cancellation of an in-flight run for `session_id`. Returns true when a run was
+/// signalled to stop, false when nothing was running. The run's child process is killed
+/// and the session is marked idle (a user stop is not a failure).
+#[tauri::command]
+pub async fn stop_session(
+    session_id: String,
+    runs: State<'_, RunRegistry>,
+) -> Result<bool, String> {
+    Ok(runs.cancel(&session_id))
+}
+
+/// Remove the worktree (and branch) for a finished session, then delete its persisted
+/// rows (session, events, title override) so it doesn't linger as a ghost pointing at a
+/// path that no longer exists. Refuses to run while the session is still active — stop it
+/// first — so cleanup can't yank the worktree out from under a live agent process.
 #[tauri::command]
 pub async fn cleanup_session(
     session_id: String,
     store: State<'_, SessionStore>,
+    runs: State<'_, RunRegistry>,
 ) -> Result<(), String> {
+    if runs.is_active(&session_id) {
+        return Err("Stop the running session before cleaning up its worktree.".to_string());
+    }
     let repo = store
         .session_repo(&session_id)
         .await
@@ -686,14 +836,24 @@ pub async fn cleanup_session(
         .ok_or_else(|| "session not found".to_string())?;
     let repo_path = canonical_repo_path(repo)?;
     let root = worktrees_root();
+    let cleanup_id = session_id.clone();
     // Resolve+validate the session→worktree mapping, then remove off the async runtime.
+    // `worktree::remove` is idempotent (a missing worktree is treated as already removed),
+    // so a prior partial cleanup or a manual deletion still succeeds here.
     tokio::task::spawn_blocking(move || {
-        let wt = worktree::worktree_for(&root, &session_id)?;
+        let wt = worktree::worktree_for(&root, &cleanup_id)?;
         worktree::remove(&repo_path, &wt)
     })
     .await
     .map_err(|e| e.to_string())?
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    // Worktree gone — drop the DB rows last, so a removal failure above leaves the session
+    // intact for the user to retry rather than orphaning a half-cleaned session.
+    store
+        .delete_session(&session_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// Compute the diff of a session's worktree for review.
@@ -1174,7 +1334,61 @@ pub async fn commit_session(session_id: String, message: String) -> Result<Commi
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_title;
+    use super::{
+        normalize_title, truncate_transcript_tail, validate_prompt, MAX_PROMPT_BYTES,
+        MAX_TRANSCRIPT_BYTES,
+    };
+
+    // Guards the cancellation mechanism in `run_persisting`: a freshly-created watch
+    // receiver must NOT report a change until `send` is called, otherwise the select would
+    // take the cancel branch immediately and no agent would ever run.
+    #[tokio::test]
+    async fn watch_changed_only_fires_after_send() {
+        let (tx, mut rx) = tokio::sync::watch::channel(false);
+        tokio::select! {
+            biased;
+            _ = rx.changed() => panic!("changed() fired before any send"),
+            _ = std::future::ready(()) => {}
+        }
+        tx.send(true).unwrap();
+        rx.changed().await.unwrap();
+        assert!(*rx.borrow());
+    }
+
+    #[test]
+    fn validate_prompt_accepts_normal_and_rejects_oversized() {
+        assert!(validate_prompt("write a function").is_ok());
+        assert!(validate_prompt(&"a".repeat(MAX_PROMPT_BYTES)).is_ok());
+        assert!(validate_prompt(&"a".repeat(MAX_PROMPT_BYTES + 1)).is_err());
+    }
+
+    #[test]
+    fn truncate_transcript_tail_keeps_small_transcripts_verbatim() {
+        let small = "User: hi\n\nAssistant: hello".to_string();
+        assert_eq!(truncate_transcript_tail(small.clone()), small);
+    }
+
+    #[test]
+    fn truncate_transcript_tail_caps_large_transcripts_to_the_tail() {
+        // Build a transcript larger than the budget; the tail (with the newest marker)
+        // must survive and the result must stay within budget + the prepended note.
+        let mut transcript = "OLDEST_MARKER\n".to_string();
+        transcript.push_str(&"x".repeat(MAX_TRANSCRIPT_BYTES));
+        transcript.push_str("\nNEWEST_MARKER");
+        let out = truncate_transcript_tail(transcript);
+        assert!(out.contains("truncated"), "a truncation note is prepended");
+        assert!(out.contains("NEWEST_MARKER"), "the newest tail is retained");
+        assert!(!out.contains("OLDEST_MARKER"), "the oldest head is dropped");
+    }
+
+    #[test]
+    fn truncate_transcript_tail_cuts_on_char_boundary() {
+        // A transcript of multi-byte chars must not panic or split a UTF-8 sequence.
+        let transcript = "é".repeat(MAX_TRANSCRIPT_BYTES); // 2 bytes each → over budget
+        let out = truncate_transcript_tail(transcript);
+        // Round-trips as valid UTF-8 (no split sequence) and stays bounded.
+        assert!(out.len() <= MAX_TRANSCRIPT_BYTES + 128);
+    }
 
     #[test]
     fn normalize_title_trims_surrounding_whitespace() {

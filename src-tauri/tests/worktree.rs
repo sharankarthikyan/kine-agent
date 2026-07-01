@@ -97,6 +97,37 @@ fn remove_deletes_worktree_and_unregisters_it() {
 }
 
 #[test]
+fn remove_is_idempotent_when_worktree_dir_already_gone() {
+    let root = temp_dir("remove-idempotent");
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    init_repo(&repo);
+    let wt_root = root.join("worktrees");
+
+    let wt = create(&repo, &wt_root, "sess3").unwrap();
+    // Simulate a crash / manual deletion: the worktree directory vanishes but git's
+    // admin entry and the branch remain.
+    std::fs::remove_dir_all(&wt.path).unwrap();
+    assert!(!wt.path.exists());
+
+    // remove() must succeed (prune the stale entry + delete the branch), not error.
+    remove(&repo, &wt).unwrap();
+
+    let list = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["worktree", "list"])
+        .output()
+        .unwrap();
+    assert!(
+        !String::from_utf8_lossy(&list.stdout).contains("sess3"),
+        "stale worktree admin entry should be pruned"
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
 fn create_errors_on_non_repo() {
     let root = temp_dir("nonrepo");
     let not_repo = root.join("plain");

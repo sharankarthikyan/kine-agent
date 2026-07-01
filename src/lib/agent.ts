@@ -65,6 +65,16 @@ export async function cleanupSession(sessionId: string): Promise<void> {
   await invoke("cleanup_session", { sessionId });
 }
 
+/**
+ * Request cancellation of an in-flight run. Resolves to true if a run was signalled to
+ * stop, false if nothing was running. The backend kills the agent's child process and
+ * marks the session idle (a user stop is not a failure).
+ */
+export async function stopSession(sessionId: string): Promise<boolean> {
+  assertDesktop();
+  return invoke<boolean>("stop_session", { sessionId });
+}
+
 export interface SendMessageArgs {
   sessionId: string;
   prompt: string;
@@ -85,6 +95,8 @@ export interface ContinueExternalSessionArgs {
   model?: string;
   /** Permission mode forwarded to the adopted session's agent CLI. */
   permissionMode?: string;
+  /** The originating CLI-history session's title, so the continuation inherits it. */
+  title?: string;
   onEvent: (event: AgentEvent) => void;
 }
 
@@ -116,6 +128,7 @@ export async function continueExternalSession({
   agent,
   model,
   permissionMode,
+  title,
   onEvent,
 }: ContinueExternalSessionArgs): Promise<void> {
   assertDesktop();
@@ -128,6 +141,7 @@ export async function continueExternalSession({
     agent,
     model,
     permissionMode,
+    title,
     onEvent: channel,
   });
 }

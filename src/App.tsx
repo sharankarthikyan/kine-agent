@@ -43,6 +43,7 @@ import {
   pickRepository,
   startSession,
   sendMessage,
+  stopSession,
   type AgentEvent,
 } from "./lib/agent";
 import {
@@ -57,7 +58,6 @@ import { reviewSession, type SessionDiff } from "./lib/review";
 import {
   listSessions,
   renameSession,
-  sessionEvents,
   sessionEventsPage,
   type SessionSummary,
   type StoredEvent,
@@ -77,7 +77,6 @@ import {
   worktreeTree as fetchWorktreeTree,
   commitSession,
   customizationsCounts,
-  sessionDiffstat,
   openInEditor,
   openTerminal,
   listHooks,
@@ -85,7 +84,6 @@ import {
   listPlugins,
   type BranchChanges,
   type CustomizationCounts,
-  type Diffstat,
   type HookEntry,
   type McpServerEntry,
   type PluginEntry,
@@ -185,6 +183,7 @@ export default function App() {
   } | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [selectedModel, setSelectedModel] = useState<ModelInfo | null>(null);
+  const [sessionModelValues, setSessionModelValues] = useState<Record<string, string>>({});
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [selectedAgent, setSelectedAgent] = useState<AgentInfo | null>(null);
   const [selectedRepo, setSelectedRepo] = useState<string | null>(null);
@@ -228,8 +227,6 @@ export default function App() {
   const [custDialogOpen, setCustDialogOpen] = useState(false);
   const [custSection, setCustSection] =
     useState<CustomizationSection>("overview");
-  // Per-session diffstats, fetched opportunistically and retained across session switches.
-  const [diffstats, setDiffstats] = useState<Record<string, Diffstat>>({});
   // Changes tab state.
   const [branchChanges, setBranchChanges] = useState<BranchChanges | null>(
     null,
@@ -260,6 +257,20 @@ export default function App() {
       prev.map((pane) =>
         pane.id === focusedPaneId ? { ...pane, sessionId } : pane,
       ),
+    );
+  }
+
+  function paneExists(paneId: string | null | undefined): boolean {
+    return paneId === undefined || paneId === null || panes.some((pane) => pane.id === paneId);
+  }
+
+  function updatePaneSession(paneId: string | null | undefined, sessionId: string | null) {
+    if (!paneId) {
+      updateFocusedPaneSession(sessionId);
+      return;
+    }
+    setPanes((prev) =>
+      prev.map((pane) => (pane.id === paneId ? { ...pane, sessionId } : pane)),
     );
   }
 
@@ -299,7 +310,39 @@ export default function App() {
     });
   }
 
-  async function loadSessionEvents(sessionId: string) {
+  function hasEventCache(sessionId: string): boolean {
+    return Object.prototype.hasOwnProperty.call(eventsBySession, sessionId);
+  }
+
+  function hydrateSessionFromCache(sessionId: string): boolean {
+    if (!hasEventCache(sessionId)) return false;
+    const events = eventsBySession[sessionId] ?? [];
+    setSessionTurns(sessionId, turnsFromEvents(events));
+    if (activeSessionIdRef.current === sessionId) setStoredEvents(events);
+    return true;
+  }
+
+  function appendStoredEvent(
+    sessionId: string,
+    kind: string,
+    payload: Record<string, unknown>,
+  ) {
+    setEventsBySession((prev) => {
+      const current = prev[sessionId] ?? [];
+      const nextEvent: StoredEvent = {
+        seq: current.length,
+        kind,
+        payloadJson: JSON.stringify(payload),
+        ts: Date.now(),
+      };
+      const next = [...current, nextEvent];
+      if (activeSessionIdRef.current === sessionId) setStoredEvents(next);
+      return { ...prev, [sessionId]: next };
+    });
+  }
+
+  async function loadSessionEvents(sessionId: string, opts?: { force?: boolean }) {
+    if (!opts?.force && hydrateSessionFromCache(sessionId)) return;
     setSessionLoading(sessionId, true);
     try {
       const page = await sessionEventsPage(sessionId, 0, EXTERNAL_EVENT_PAGE_SIZE);
@@ -361,42 +404,15 @@ export default function App() {
     }
   }
 
-  // Ref that tracks sidebarCollapsed for reading inside async callbacks without
-  // stale-closure issues (same pattern as activeSessionIdRef above).
-  const sidebarCollapsedRef = useRef(sidebarCollapsed);
+  // Mirror of runningSessionIds for reading inside the closePane state-updater without a
+  // stale closure. Used to avoid evicting the event/turn cache of a session that is still
+  // streaming (its in-flight onEvent would immediately recreate the entry, churning).
+  const runningSessionIdsRef = useRef(runningSessionIds);
   useEffect(() => {
-    sidebarCollapsedRef.current = sidebarCollapsed;
-  }, [sidebarCollapsed]);
+    runningSessionIdsRef.current = runningSessionIds;
+  }, [runningSessionIds]);
 
-  // Fetch diffstat for a single session and merge into the diffstats record.
-  // Best-effort — silently ignores IPC failures (e.g. browser preview, no worktree yet).
-  const fetchDiffstat = useCallback(async (sessionId: string) => {
-    try {
-      const stat = await sessionDiffstat(sessionId);
-      setDiffstats((prev) => ({ ...prev, [sessionId]: stat }));
-    } catch {
-      /* best-effort */
-    }
-  }, []);
-
-  // Fetch diffstats for all sessions in one Promise.allSettled, then merge
-  // into a SINGLE setDiffstats call — avoids N separate re-renders and N subprocess
-  // spawns. Skipped entirely when the sidebar is collapsed (rows aren't rendered).
-  const refreshAllDiffstats = useCallback(async (list: SessionSummary[]) => {
-    const reviewable = list.filter((s) => s.source !== "external");
-    if (sidebarCollapsedRef.current || reviewable.length === 0) return;
-    const results = await Promise.allSettled(
-      reviewable.map((s) => sessionDiffstat(s.id)),
-    );
-    const updates: Record<string, Diffstat> = {};
-    reviewable.forEach((s, i) => {
-      const r = results[i];
-      if (r.status === "fulfilled") updates[s.id] = r.value;
-    });
-    setDiffstats((prev) => ({ ...prev, ...updates }));
-  }, []);
-
-  // Returns the session list so callers can pipe it into refreshAllDiffstats.
+  // Returns the session list so callers can chain follow-up work off it.
   // Best-effort — no-op in a plain browser preview (assertDesktop throws).
   const refreshSessions = useCallback(async (): Promise<SessionSummary[]> => {
     try {
@@ -409,18 +425,31 @@ export default function App() {
     }
   }, []);
 
+  // Per-id rename token. Each rename bumps the id's counter; only the most recent
+  // rename's async result is allowed to reconcile state. This prevents an earlier
+  // rename whose IPC resolves LATER (out-of-order under backend lock contention) from
+  // clobbering a newer title the user already committed.
+  const renameSeqRef = useRef<Map<string, number>>(new Map());
+
   // Rename a session: optimistically update the row, then reconcile with the
   // canonical (trimmed/capped) title the backend stores. On failure, revert by
-  // re-fetching the list and surface the error.
+  // re-fetching the list and surface the error. Stale (superseded) results are ignored.
   const handleRenameSession = useCallback(
     async (id: string, title: string) => {
+      const seq = (renameSeqRef.current.get(id) ?? 0) + 1;
+      renameSeqRef.current.set(id, seq);
+      const isLatest = () => renameSeqRef.current.get(id) === seq;
       setSessions((prev) => prev.map((s) => (s.id === id ? { ...s, title } : s)));
       try {
         const stored = await renameSession(id, title);
-        setSessions((prev) => prev.map((s) => (s.id === id ? { ...s, title: stored } : s)));
+        if (isLatest()) {
+          setSessions((prev) => prev.map((s) => (s.id === id ? { ...s, title: stored } : s)));
+        }
       } catch (e) {
-        toast.error(typeof e === "string" ? e : "Failed to rename session.");
-        void refreshSessions();
+        if (isLatest()) {
+          toast.error(typeof e === "string" ? e : "Failed to rename session.");
+          void refreshSessions();
+        }
       }
     },
     [refreshSessions],
@@ -517,6 +546,27 @@ export default function App() {
     () => models.filter((m) => m.agent === (selectedAgent?.id ?? "claude")),
     [models, selectedAgent?.id],
   );
+
+  function modelForAgent(agentId: string, preferredValue?: string): ModelInfo | null {
+    const agentModels = models.filter((m) => m.agent === agentId);
+    if (preferredValue) {
+      const preferred = agentModels.find((m) => m.value === preferredValue);
+      if (preferred) return preferred;
+    }
+    return agentModels[0] ?? null;
+  }
+
+  function modelForSession(session: SessionSummary | null): ModelInfo | null {
+    if (session === null) return selectedModel;
+    const agentId = isAgentSpawnable(session.agent)
+      ? session.agent
+      : (selectedModel?.agent ?? models[0]?.agent ?? "claude");
+    return modelForAgent(agentId, sessionModelValues[session.id]);
+  }
+
+  function handleSessionModelChange(sessionId: string, model: ModelInfo) {
+    setSessionModelValues((prev) => ({ ...prev, [sessionId]: model.value }));
+  }
 
   // Sidebar toggle — persists the new value to localStorage immediately.
   function toggleSidebar() {
@@ -696,7 +746,15 @@ export default function App() {
         closeRight();
         if (replacement.sessionId !== null) void loadSessionEvents(replacement.sessionId);
       }
-      if (closing?.sessionId && !next.some((pane) => pane.sessionId === closing.sessionId)) {
+      // Evict the closed session's caches — but NOT while it is still streaming. A
+      // running session's in-flight onEvent would immediately recreate the entry (churn),
+      // and the session is still live + reachable from the list, so its cache is
+      // legitimately retained until the run ends or the session is reopened.
+      if (
+        closing?.sessionId &&
+        !next.some((pane) => pane.sessionId === closing.sessionId) &&
+        !runningSessionIdsRef.current.has(closing.sessionId)
+      ) {
         setTurnsBySession((cache) => {
           const { [closing.sessionId!]: _removed, ...rest } = cache;
           return rest;
@@ -754,13 +812,10 @@ export default function App() {
     }
   }
 
-  // On mount: load sessions then batch-refresh all diffstats in one shot.
+  // On mount: load sessions.
   useEffect(() => {
-    (async () => {
-      const list = await refreshSessions();
-      void refreshAllDiffstats(list);
-    })();
-  }, [refreshSessions, refreshAllDiffstats]);
+    void refreshSessions();
+  }, [refreshSessions]);
 
   useEffect(() => {
     void loadModels();
@@ -825,13 +880,6 @@ export default function App() {
     })();
   }, [activeSessionId]);
 
-  // Fetch diffstat for the active session whenever it changes (new session start
-  // or session switch) — keeps the SessionHeader diffstat current without a full refresh.
-  useEffect(() => {
-    if (!activeSessionId) return;
-    void fetchDiffstat(activeSessionId);
-  }, [activeSessionId, fetchDiffstat]);
-
   // closeRight keeps the "reset both flags together" invariant structural.
   const closeRight = () => {
     setRightTab(null);
@@ -866,16 +914,15 @@ export default function App() {
         if (activeSessionIdRef.current === sessionId) setRules([]);
       }
       try {
-        const c = await listCapabilities(
-          sessionId,
-          selectedModel?.agent ?? "claude",
-        );
+        const session = sessions.find((s) => s.id === sessionId) ?? null;
+        const agentId = session?.agent ?? selectedModel?.agent ?? "claude";
+        const c = await listCapabilities(sessionId, agentId);
         if (activeSessionIdRef.current === sessionId) setCapabilities(c);
       } catch {
         if (activeSessionIdRef.current === sessionId) setCapabilities(null);
       }
     })();
-  }, [rightTab, activeSessionId, selectedModel?.agent]);
+  }, [rightTab, activeSessionId, selectedModel?.agent, sessions]);
 
   // Fetch rules, capabilities, hooks, MCP servers, and plugins when the Customizations
   // dialog opens. With an active session this is the worktree (project + user) scope;
@@ -893,10 +940,9 @@ export default function App() {
         /* best-effort */
       }
       try {
-        const c = await listCapabilities(
-          sessionId,
-          selectedModel?.agent ?? "claude",
-        );
+        const session = sessions.find((s) => s.id === sessionId) ?? null;
+        const agentId = session?.agent ?? selectedModel?.agent ?? "claude";
+        const c = await listCapabilities(sessionId, agentId);
         if (activeSessionIdRef.current === sessionId) setCapabilities(c);
       } catch {
         /* best-effort */
@@ -921,7 +967,7 @@ export default function App() {
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [custDialogOpen, activeSessionId, selectedModel?.agent]);
+  }, [custDialogOpen, activeSessionId, selectedModel?.agent, sessions]);
 
   // Fetch branch-level changes when the Changes tab becomes active.
   useEffect(() => {
@@ -950,6 +996,7 @@ export default function App() {
   }, [rightTab, activeSessionId, sessions]);
 
   function appendToLastTurn(sessionId: string, event: AgentEvent) {
+    appendStoredEvent(sessionId, event.kind, event.data);
     setSessionTurns(sessionId, (prev) => {
       if (prev.length === 0) return prev;
       const next = prev.slice();
@@ -960,7 +1007,7 @@ export default function App() {
   }
 
   // Commit the session's worktree changes. Shows toast feedback and refreshes
-  // the Changes tab data + the session's diffstat after a successful commit.
+  // the Changes tab data after a successful commit.
   // Returns true on a successful commit so the composer can close itself; false on
   // failure (or a no-op guard) so the user keeps their typed message to retry.
   async function handleCommit(message: string): Promise<boolean> {
@@ -971,15 +1018,11 @@ export default function App() {
     try {
       const result = await commitSession(sessionId, message);
       toast.success(`Committed ${result.sha.slice(0, 7)}`);
-      // Refresh changes, diff, sessions list, and all diffstats after a successful commit.
-      // Sessions + diffstats are chained (need the list) while branch + diff run in parallel.
+      // Refresh the Changes tab data, diff, and sessions list after a successful commit.
       await Promise.allSettled([
         refreshBranchChanges(sessionId),
         refreshDiff(sessionId),
-        (async () => {
-          const list = await refreshSessions();
-          await refreshAllDiffstats(list);
-        })(),
+        refreshSessions(),
       ]);
       return true;
     } catch (err) {
@@ -1013,11 +1056,23 @@ export default function App() {
   async function handleSend(
     text: string,
     model: ModelInfo | null,
-    opts?: { repo?: string; permissionMode?: string; agent?: string },
+    opts?: {
+      repo?: string;
+      permissionMode?: string;
+      agent?: string;
+      sessionId?: string | null;
+      paneId?: string;
+    },
   ) {
-    const currentSessionId = activeSessionIdRef.current;
+    if (opts?.paneId && !paneExists(opts.paneId)) return;
+    const currentSessionId = opts?.sessionId ?? activeSessionIdRef.current;
     const currentSession =
       sessions.find((session) => session.id === currentSessionId) ?? null;
+    if (currentSessionId !== null && currentSession === null) {
+      toast.error("Session is no longer available.");
+      return;
+    }
+    const targetPaneId = opts?.paneId;
     const isExternalContinuation = currentSession?.source === "external";
     const isNew = currentSessionId === null || isExternalContinuation;
     const sessionId = isNew ? crypto.randomUUID() : currentSessionId;
@@ -1030,7 +1085,8 @@ export default function App() {
     // Set the ref synchronously before the first await so the cross-session guard
     // is exact for new sessions (id now known up front, not after startSession resolves).
     setActive(sessionId);
-    updateFocusedPaneSession(sessionId);
+    if (targetPaneId) setFocusedPaneId(targetPaneId);
+    updatePaneSession(targetPaneId, sessionId);
     // Optimistically upsert a "running" row at the top of the list immediately —
     // refreshSessions() in finally reconciles the real title/status from the backend.
     setSessions((prev) => {
@@ -1043,7 +1099,13 @@ export default function App() {
             agent: startAgent,
             repo,
             branch: `agent/${sessionId}`,
-            title: titleFromPrompt(text),
+            // Continuing a renamed CLI-history session keeps the user's chosen title
+            // (the backend carries the override into the new session); otherwise derive
+            // it from the prompt.
+            title:
+              isExternalContinuation && currentSession
+                ? currentSession.title
+                : titleFromPrompt(text),
             status: "running",
             source: "kineloop",
             turnCount: null,
@@ -1055,8 +1117,12 @@ export default function App() {
       return [row, ...prev.filter((s) => s.id !== sessionId)];
     });
     closeRight();
+    if (modelArg) {
+      setSessionModelValues((prev) => ({ ...prev, [sessionId]: modelArg }));
+    }
     setRunningSessionIds((prev) => new Set(prev).add(sessionId));
     setSessionTurns(sessionId, (prev) => [...prev, { prompt: text, events: [] }]);
+    appendStoredEvent(sessionId, "prompt", { text });
     // Streaming output is scoped to the session cache so panes can update in parallel
     // even when focus moves to another visible session.
     const onEvent = (event: AgentEvent) => {
@@ -1076,6 +1142,9 @@ export default function App() {
           agent: startAgent,
           model: modelArg,
           permissionMode: opts?.permissionMode ?? (autoEdit ? "acceptEdits" : "default"),
+          // Inherit the CLI-history session's displayed title so the continuation reads
+          // as a continuation of it, not a new session named after the first message.
+          title: currentSession?.title,
           onEvent,
         });
       } else if (isNew) {
@@ -1111,32 +1180,24 @@ export default function App() {
         const fallbackSessionId =
           isExternalContinuation && currentSessionId ? currentSessionId : null;
         setActive(fallbackSessionId);
-        updateFocusedPaneSession(fallbackSessionId);
+        updatePaneSession(targetPaneId, fallbackSessionId);
       }
       if (persisted && activeSessionIdRef.current === sessionId) {
-        // Refresh this session's diffstat so the sidebar row + SessionHeader stay
-        // current after files are edited — one targeted call, not a fan-out.
-        void fetchDiffstat(sessionId);
         await refreshDiff(sessionId);
-        try {
-          const ev = await sessionEvents(sessionId);
-          setEventsBySession((prev) => ({ ...prev, [sessionId]: ev }));
-          setSessionTurns(sessionId, turnsFromEvents(ev));
-          if (activeSessionIdRef.current === sessionId) setStoredEvents(ev);
-        } catch {
-          /* ignore */
-        }
+        await loadSessionEvents(sessionId, { force: true });
       }
     }
   }
 
   // Start a brand-new session from the NewSession composer, threading repo,
   // permissionMode, and the currently selected model into the shared send path.
-  function handleStartNewSession(text: string) {
+  function handleStartNewSession(text: string, paneId?: string) {
     return handleSend(text, selectedModel, {
       repo: selectedRepo ?? ".",
       permissionMode: autoEdit ? "acceptEdits" : "default",
       agent: selectedAgent?.id ?? selectedModel?.agent ?? "claude",
+      sessionId: null,
+      paneId,
     });
   }
 
@@ -1164,20 +1225,41 @@ export default function App() {
     closeRight();
   }
 
-  async function handleCleanupSession() {
-    if (!activeSessionId || activeSession?.source === "external") return;
-    const session = activeSession;
+  // Clean up a SPECIFIC session's worktree (pane-scoped, not the globally-active one) so
+  // the Trash button in a non-focused split pane acts on that pane's session. Cleanup now
+  // also deletes the session, so any pane showing it is reset to the New Session view.
+  async function handleCleanupSession(sessionId: string) {
+    const session = sessions.find((s) => s.id === sessionId) ?? null;
+    if (!session || session.source === "external") return;
     const confirmed = window.confirm(
-      `Remove the worktree and branch for "${session?.title ?? "this session"}"? This does not touch the original repository.`,
+      `Remove the worktree and branch for "${session.title}"? This does not touch the original repository.`,
     );
     if (!confirmed) return;
-    const sessionId = activeSessionId;
     try {
       await cleanupSession(sessionId);
       toast.success("Session worktree cleaned up");
-      handleNewSession();
-      const list = await refreshSessions();
-      await refreshAllDiffstats(list);
+      // Blank every pane that was showing the now-deleted session.
+      setPanes((prev) =>
+        prev.map((pane) =>
+          pane.sessionId === sessionId ? { ...pane, sessionId: null } : pane,
+        ),
+      );
+      if (activeSessionIdRef.current === sessionId) {
+        setActive(null);
+        resetFocusedSessionState();
+        closeRight();
+      }
+      await refreshSessions();
+    } catch (err) {
+      toast.error(safeErrorMessage(err));
+    }
+  }
+
+  // Stop a specific in-flight run. The backend kills the agent process and marks the
+  // session idle; refreshSessions in handleSend's finally reconciles the row.
+  async function handleStopSession(sessionId: string) {
+    try {
+      await stopSession(sessionId);
     } catch (err) {
       toast.error(safeErrorMessage(err));
     }
@@ -1212,6 +1294,7 @@ export default function App() {
     ? (activeSession.repo.split("/").pop() ?? null)
     : null;
   const activeIsExternal = activeSession?.source === "external";
+  const activePanelModel = modelForSession(activeSession);
 
   // Search + status + source filters applied before grouping. Search is a
   // case-insensitive substring match on title; status/source are exact matches.
@@ -1282,7 +1365,6 @@ export default function App() {
                 onSelect={handleSelectSession}
                 onNew={handleNewSession}
                 counts={counts}
-                diffstats={diffstats}
                 search={sessionSearch}
                 onSearchChange={setSessionSearch}
                 statusFilter={statusFilter}
@@ -1357,8 +1439,9 @@ export default function App() {
                   ? importedAgent
                   : (selectedModel?.agent ?? models[0]?.agent ?? "claude");
                 const paneModels = models.filter((m) => m.agent === paneAgent);
-                const paneModel =
-                  selectedModel?.agent === paneAgent
+                const paneModel = paneSession
+                  ? modelForSession(paneSession)
+                  : selectedModel?.agent === paneAgent
                     ? selectedModel
                     : (paneModels[0] ?? null);
                 return (
@@ -1416,7 +1499,7 @@ export default function App() {
                             onAgentChange={handleAgentChange}
                             onModelChange={handleModelChange}
                             onAutoEditChange={setAutoEdit}
-                            onStart={handleStartNewSession}
+                            onStart={(text) => handleStartNewSession(text, pane.id)}
                           />
                         </div>
                       </>
@@ -1428,9 +1511,8 @@ export default function App() {
                           repo={paneRepo}
                           status={paneSession?.status ?? "idle"}
                           source={paneSession?.source ?? "kineloop"}
-                          diffstat={diffstats[pane.sessionId] ?? null}
                           onClose={() => closePane(pane.id)}
-                          onCleanup={() => void handleCleanupSession()}
+                          onCleanup={() => void handleCleanupSession(pane.sessionId!)}
                           onRename={
                             paneSession
                               ? (t) => void handleRenameSession(paneSession.id, t)
@@ -1478,13 +1560,34 @@ export default function App() {
                           </div>
                         </div>
                         <PromptBar
-                          onStart={handleSend}
+                          onStart={(text, sendModel) =>
+                            handleSend(text, sendModel, {
+                              sessionId: pane.sessionId,
+                              paneId: pane.id,
+                            })
+                          }
                           running={paneRunning}
+                          onStop={
+                            pane.sessionId !== null
+                              ? () => void handleStopSession(pane.sessionId!)
+                              : undefined
+                          }
                           models={paneModels}
                           model={paneModel}
-                          onModelChange={handleModelChange}
+                          onModelChange={(model) => {
+                            if (pane.sessionId !== null) {
+                              handleSessionModelChange(pane.sessionId, model);
+                            } else {
+                              handleModelChange(model);
+                            }
+                          }}
                           autoEdit={autoEdit}
                           onAutoEditChange={setAutoEdit}
+                          mode={
+                            paneSession?.source === "external"
+                              ? "external-continuation"
+                              : "default"
+                          }
                         />
                       </>
                     )}
@@ -1579,7 +1682,7 @@ export default function App() {
                     files={files}
                     rules={rules}
                     capabilities={capabilities}
-                    model={selectedModel}
+                    model={activePanelModel}
                     onOpenRule={handleOpenRule}
                     onOpenFile={(path) => void handleOpenFile(path)}
                   />

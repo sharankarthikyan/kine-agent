@@ -2,7 +2,7 @@ import { render, screen, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { SessionList } from "../SessionList";
 import type { SessionSummary } from "../../lib/sessions";
-import type { CustomizationCounts, Diffstat } from "../../lib/conductor";
+import type { CustomizationCounts } from "../../lib/conductor";
 
 const sessions: SessionSummary[] = [
   {
@@ -37,10 +37,6 @@ const sessions: SessionSummary[] = [
 
 const groups = [{ workspace: "my-app", sessions }];
 
-const diffstats: Record<string, Diffstat> = {
-  a: { additions: 12, deletions: 3, filesChanged: 2 },
-};
-
 const counts: CustomizationCounts = {
   agents: 2,
   skills: 5,
@@ -55,7 +51,6 @@ const defaultProps = {
   onSelect: () => {},
   onNew: () => {},
   counts: null as CustomizationCounts | null,
-  diffstats: {} as Record<string, Diffstat>,
   search: "",
   onSearchChange: () => {},
   statusFilter: "all" as const,
@@ -77,18 +72,11 @@ test("renders each session title", () => {
   expect(screen.getByText("fix bug")).toBeInTheDocument();
 });
 
-test("shows diffstat additions and deletions for a session", () => {
-  render(<SessionList {...defaultProps} diffstats={diffstats} />);
-  // additions and deletions are now separate colored spans
-  expect(screen.getByText("+12")).toBeInTheDocument();
-  expect(screen.getByText("−3")).toBeInTheDocument();
-});
-
-test("shows +0 −0 for sessions without diffstat data", () => {
-  render(<SessionList {...defaultProps} diffstats={{}} />);
-  // each session row renders a +0 additions span
-  const addZeros = screen.getAllByText("+0");
-  expect(addZeros.length).toBeGreaterThan(0);
+test("does not render a git diffstat on Kineloop session rows", () => {
+  // The live diff moved to the Changes tab; sidebar rows show only a relative time.
+  render(<SessionList {...defaultProps} />);
+  expect(screen.queryByText(/^\+\d/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/^−\d/)).not.toBeInTheDocument();
 });
 
 test("shows relative time for each session row", () => {
@@ -96,6 +84,25 @@ test("shows relative time for each session row", () => {
   // Sidebar rows use compact timestamps so metadata survives narrow panel widths.
   const timeLabels = screen.getAllByText(/\d+d|\d+h|\d+m|now/i);
   expect(timeLabels.length).toBeGreaterThan(0);
+});
+
+test("shows turns · tools · files on Kineloop rows, like CLI rows", () => {
+  render(
+    <SessionList
+      {...defaultProps}
+      groups={[
+        {
+          workspace: "my-app",
+          sessions: [
+            { ...sessions[0], turnCount: 2, toolCallCount: 3, fileActionCount: 2 },
+          ],
+        },
+      ]}
+    />,
+  );
+  expect(screen.getByText(/2t · 3 tools · 2f/)).toBeInTheDocument();
+  // Still no git diffstat — that lives in the Changes tab.
+  expect(screen.queryByText(/^\+\d/)).not.toBeInTheDocument();
 });
 
 test("calls onSelect with the session id when a row is clicked", () => {

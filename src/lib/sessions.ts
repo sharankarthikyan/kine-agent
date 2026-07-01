@@ -38,8 +38,10 @@ export async function listSessions(): Promise<SessionSummary[]> {
 }
 
 /**
- * Rename a Kineloop session. The backend trims and caps the title at 60 chars and
- * returns the canonical stored form. Rejects external CLI sessions and empty titles.
+ * Rename a session. The backend trims and caps the title at 60 chars and returns the
+ * canonical stored form; empty titles are rejected. Kineloop sessions are renamed in
+ * place; external CLI-history sessions get a stored title override (their on-disk
+ * transcript is never modified), so both kinds are renameable.
  */
 export async function renameSession(sessionId: string, title: string): Promise<string> {
   assertDesktop();

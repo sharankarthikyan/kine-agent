@@ -1,9 +1,10 @@
 use crate::adapter::{AgentAdapter, EventSink, Prompt, SessionError};
 use crate::events::AgentEvent;
+use crate::adapters::{read_capped_line, CappedLine, MAX_LINE_BYTES};
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use tokio::io::{AsyncReadExt, BufReader};
 use tokio::process::Command;
 
 /// Adapter that drives the `codex` CLI via `codex exec --json`.
@@ -66,7 +67,11 @@ pub fn parse_line(line: &str) -> Vec<AgentEvent> {
         Err(_) => return vec![],
     };
     match v.get("type").and_then(Value::as_str) {
-        Some("item.completed") | Some("item.updated") => parse_item(v.get("item")),
+        // Only the terminal `item.completed` is surfaced. `item.updated` carries the
+        // same item in an in-progress form; emitting both would duplicate (and, for
+        // incrementally-streamed text, repeatedly re-append) the item's content. The
+        // completed form is authoritative, so updates are intentionally ignored.
+        Some("item.completed") => parse_item(v.get("item")),
         Some("turn.completed") => parse_usage(v.get("usage")).into_iter().collect(),
         Some("turn.failed") | Some("error") => {
             let message = v
@@ -235,24 +240,23 @@ pub async fn spawn_and_stream(
     });
 
     let mut reader = BufReader::new(stdout);
-    let mut buf = Vec::new();
     loop {
-        buf.clear();
-        let read = reader.read_until(b'\n', &mut buf).await?;
-        if read == 0 {
-            break;
-        }
-        while matches!(buf.last(), Some(b'\n' | b'\r')) {
-            buf.pop();
-        }
-        let line = String::from_utf8_lossy(&buf);
-        if let Some(thread_id) = thread_id_from_line(&line) {
-            if let Ok(mut slot) = captured_thread.lock() {
-                *slot = Some(thread_id);
+        match read_capped_line(&mut reader, MAX_LINE_BYTES).await? {
+            CappedLine::Eof => break,
+            CappedLine::Skipped(bytes) => {
+                eprintln!("codex: skipped an oversized stdout line ({bytes} bytes)");
             }
-        }
-        for event in parse_line(&line) {
-            sink.emit(event);
+            CappedLine::Line(buf) => {
+                let line = String::from_utf8_lossy(&buf);
+                if let Some(thread_id) = thread_id_from_line(&line) {
+                    if let Ok(mut slot) = captured_thread.lock() {
+                        *slot = Some(thread_id);
+                    }
+                }
+                for event in parse_line(&line) {
+                    sink.emit(event);
+                }
+            }
         }
     }
 
@@ -265,6 +269,8 @@ pub async fn spawn_and_stream(
             format!("codex exited with {status}: {}", stderr_tail.trim())
         };
         sink.emit(AgentEvent::Error { message });
+    } else if !stderr_tail.trim().is_empty() {
+        eprintln!("codex exited 0 with stderr: {}", stderr_tail.trim());
     }
     Ok(())
 }
@@ -286,6 +292,21 @@ mod tests {
         let events = parse_line(line);
         assert_eq!(events.len(), 1);
         assert!(matches!(&events[0], AgentEvent::Token { text } if text == "pong"));
+    }
+
+    #[test]
+    fn parse_item_updated_is_ignored_to_avoid_duplicate_text() {
+        // The in-progress `item.updated` form must NOT emit — only the terminal
+        // `item.completed` does — otherwise incrementally-streamed text duplicates.
+        let updated = r#"{"type":"item.updated","item":{"type":"agent_message","text":"par"}}"#;
+        assert!(parse_line(updated).is_empty());
+        let completed =
+            r#"{"type":"item.completed","item":{"type":"agent_message","text":"partial then full"}}"#;
+        let events = parse_line(completed);
+        assert_eq!(events.len(), 1);
+        assert!(
+            matches!(&events[0], AgentEvent::Token { text } if text == "partial then full")
+        );
     }
 
     #[test]

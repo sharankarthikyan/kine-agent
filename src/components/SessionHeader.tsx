@@ -2,7 +2,6 @@ import { useRef, useState } from "react";
 import { PanelRight, Trash2, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
-import type { Diffstat } from "@/lib/conductor";
 import type { SessionStatus } from "@/lib/sessions";
 import { AgentLogo } from "./AgentLogo";
 
@@ -25,7 +24,6 @@ export interface SessionHeaderProps {
   repo: string | null;
   status: string;
   source: "kineloop" | "external";
-  diffstat: Diffstat | null;
   onClose: () => void;
   onCleanup: () => void;
   onTogglePanel: () => void;
@@ -40,7 +38,6 @@ export function SessionHeader({
   repo,
   status,
   source,
-  diffstat,
   onClose,
   onCleanup,
   onTogglePanel,
@@ -138,19 +135,13 @@ export function SessionHeader({
           )}
         </span>
 
-        {/* Secondary line: repo and/or diffstat — omitted when both are null */}
-        {(repo !== null || diffstat !== null || source === "external") && (
+        {/* Secondary line: repo and/or CLI-history label — omitted when both are absent.
+            The live diffstat lives in the Changes tab, not here, to keep the header clean. */}
+        {(repo !== null || source === "external") && (
           <span className="text-xs text-muted-foreground tabular-nums pl-4 flex items-center gap-1">
             {source === "external" && <span>CLI history</span>}
             {source === "external" && repo !== null && <span aria-hidden>·</span>}
             {repo !== null && <span>{repo}</span>}
-            {repo !== null && diffstat !== null && <span aria-hidden>·</span>}
-            {diffstat !== null && (
-              <>
-                <span style={{ color: "var(--status-success)" }}>+{diffstat.additions}</span>
-                <span style={{ color: "var(--status-error)" }}>−{diffstat.deletions}</span>
-              </>
-            )}
           </span>
         )}
       </div>

@@ -1,9 +1,10 @@
 use crate::adapter::{AgentAdapter, EventSink, Prompt, SessionError};
 use crate::events::AgentEvent;
+use crate::adapters::{read_capped_line, CappedLine, MAX_LINE_BYTES};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use tokio::io::{AsyncReadExt, BufReader};
 use tokio::process::Command;
 
 /// Adapter that drives the Antigravity CLI (`agy`).
@@ -105,20 +106,22 @@ pub async fn spawn_and_stream(
     });
 
     // Stream stdout line-by-line as Token events, re-adding the newline so multi-line
-    // responses keep their formatting when concatenated in the UI.
+    // responses keep their formatting when concatenated in the UI. A per-line size cap
+    // bounds memory against a pathological huge line.
     let mut reader = BufReader::new(stdout);
-    let mut buf = Vec::new();
     let mut emitted_any = false;
     loop {
-        buf.clear();
-        let read = reader.read_until(b'\n', &mut buf).await?;
-        if read == 0 {
-            break;
-        }
-        let text = String::from_utf8_lossy(&buf).to_string();
-        if !text.is_empty() {
-            emitted_any = true;
-            sink.emit(AgentEvent::Token { text });
+        match read_capped_line(&mut reader, MAX_LINE_BYTES).await? {
+            CappedLine::Eof => break,
+            CappedLine::Skipped(bytes) => {
+                eprintln!("agy: skipped an oversized stdout line ({bytes} bytes)");
+            }
+            CappedLine::Line(buf) => {
+                let mut text = String::from_utf8_lossy(&buf).into_owned();
+                text.push('\n');
+                emitted_any = true;
+                sink.emit(AgentEvent::Token { text });
+            }
         }
     }
 
@@ -133,6 +136,8 @@ pub async fn spawn_and_stream(
         };
         sink.emit(AgentEvent::Error { message });
         return Ok(());
+    } else if !stderr_tail.trim().is_empty() {
+        eprintln!("agy exited 0 with stderr: {}", stderr_tail.trim());
     }
 
     // Recover the conversation id agy just wrote so follow-up turns can resume it.

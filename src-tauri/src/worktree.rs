@@ -23,12 +23,20 @@ pub fn branch_name(session_id: &str) -> String {
     format!("agent/{session_id}")
 }
 
+/// Upper bound on a session id's length. Generated ids are UUIDs (36 chars); this
+/// guards against a WebView-supplied id long enough to overflow a path component
+/// (commonly 255 bytes) or produce an unwieldy git ref.
+const MAX_SESSION_ID_LEN: usize = 128;
+
 /// Reject session ids that aren't a safe, flat token. The id is interpolated into
 /// a filesystem path and a git ref, so anything outside `[A-Za-z0-9_-]` (notably
 /// `/`, `.`, `..`) is refused — defense-in-depth against path traversal / ref
-/// injection from WebView-supplied input, even though ids are generated UUIDs.
+/// injection from WebView-supplied input, even though ids are generated UUIDs. The
+/// length is bounded too, so an over-long id fails fast with a clear error rather
+/// than a cryptic filesystem/git failure deeper in `create`.
 fn validate_session_id(session_id: &str) -> Result<(), WorktreeError> {
     let ok = !session_id.is_empty()
+        && session_id.len() <= MAX_SESSION_ID_LEN
         && session_id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
@@ -60,6 +68,17 @@ pub fn create(
     let Worktree { path, branch } = worktree_for(worktrees_root, session_id)?;
     std::fs::create_dir_all(worktrees_root)?;
 
+    // Self-heal stale worktree administrative entries left by a crash or a worktree
+    // directory the user deleted by hand. Without this, `git worktree add` for a path
+    // git still has registered (but whose directory is gone) fails with "already
+    // registered". Prune is safe — it only removes entries whose working tree is
+    // missing — and best-effort, so its own failure never blocks the add.
+    let _ = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["worktree", "prune"])
+        .output();
+
     let output = Command::new("git")
         .arg("-C")
         .arg(repo)
@@ -77,21 +96,33 @@ pub fn create(
     Ok(Worktree { path, branch })
 }
 
-/// Remove a worktree and delete its branch. NOT idempotent: removing an
-/// already-removed worktree returns a `WorktreeError::Git` (callers needing
-/// idempotency should check existence first).
+/// Remove a worktree and delete its branch. Idempotent: when the worktree directory is
+/// already gone (a prior partial cleanup or a manual `rm`), this prunes the stale git
+/// admin entry instead of failing, so callers can always reach a clean state. A genuine
+/// `git worktree remove` failure on an existing worktree (e.g. a Windows sharing
+/// violation) is still surfaced so the caller can keep the session and retry.
 pub fn remove(repo: &Path, wt: &Worktree) -> Result<(), WorktreeError> {
-    let rm = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(["worktree", "remove", "--force"])
-        .arg(&wt.path)
-        .output()?;
-    if !rm.status.success() {
-        return Err(WorktreeError::Git {
-            op: "worktree remove",
-            stderr: String::from_utf8_lossy(&rm.stderr).trim().to_string(),
-        });
+    if wt.path.exists() {
+        let rm = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["worktree", "remove", "--force"])
+            .arg(&wt.path)
+            .output()?;
+        if !rm.status.success() {
+            return Err(WorktreeError::Git {
+                op: "worktree remove",
+                stderr: String::from_utf8_lossy(&rm.stderr).trim().to_string(),
+            });
+        }
+    } else {
+        // Directory already gone — reconcile the leftover `.git/worktrees/<id>` admin
+        // entry so the slot is reusable. Best-effort: a prune failure isn't fatal here.
+        let _ = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["worktree", "prune"])
+            .output();
     }
     // Best-effort branch delete — ignore ALL failures (spawn error or non-zero exit):
     // the branch may be checked out elsewhere, and the worktree is already gone.
@@ -127,6 +158,12 @@ mod tests {
                 "session id {bad:?} should be rejected"
             );
         }
+        // Over-long ids are rejected before they reach the filesystem/git.
+        let too_long = "a".repeat(MAX_SESSION_ID_LEN + 1);
+        assert!(
+            worktree_for(Path::new("/tmp/roots"), &too_long).is_err(),
+            "an over-long session id should be rejected"
+        );
         assert!(worktree_for(Path::new("/tmp/roots"), "Valid-9_id").is_ok());
     }
 }

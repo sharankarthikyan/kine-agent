@@ -1,5 +1,14 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowUp, ChevronDown, Check, Lock, LockOpen, Paperclip } from "lucide-react";
+import {
+  ArrowUp,
+  ChevronDown,
+  Check,
+  GitBranchPlus,
+  Lock,
+  LockOpen,
+  Paperclip,
+  Square,
+} from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -26,6 +35,10 @@ interface PromptBarProps {
   autoEdit?: boolean;
   /** Called when the user toggles the "Edit automatically" switch. */
   onAutoEditChange?: (v: boolean) => void;
+  /** Stop the in-flight run. When provided, a Stop button replaces Send while running. */
+  onStop?: () => void;
+  /** External CLI history is read-only; sending forks it into a writable continuation. */
+  mode?: "default" | "external-continuation";
 }
 
 /** Capitalize the first letter of an agent id for use as a group label. */
@@ -52,10 +65,20 @@ export function PromptBar({
   onModelChange,
   autoEdit = false,
   onAutoEditChange = () => {},
+  onStop,
+  mode = "default",
 }: PromptBarProps) {
   const [text, setText] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const canSend = !running && text.trim().length > 0;
+  const continuingExternal = mode === "external-continuation";
+  const placeholder = continuingExternal
+    ? "Continue this CLI history…"
+    : "Message the agent…";
+  const inputLabel = continuingExternal
+    ? "Continue this CLI history"
+    : "Message the agent";
+  const sendLabel = continuingExternal ? "Continue in Kineloop" : "Send";
 
   // Auto-grow the textarea up to 240px, then scroll.
   useEffect(() => {
@@ -99,12 +122,21 @@ export function PromptBar({
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={handleKeyDown}
-	          placeholder="Message the agent…"
-          aria-label="Message the agent"
+          placeholder={placeholder}
+          aria-label={inputLabel}
           disabled={running}
           rows={1}
           className="min-h-0 resize-none rounded-none border-0 bg-transparent p-0 shadow-none outline-none focus:outline-none focus-visible:ring-0 focus-visible:ring-offset-0"
         />
+
+        {continuingExternal && (
+          <div className="flex items-center gap-2 rounded-md bg-muted/50 px-2 py-1.5 text-xs text-muted-foreground">
+            <GitBranchPlus className="size-3.5 shrink-0" aria-hidden />
+            <span className="min-w-0 truncate">
+              Replies start a writable Kineloop continuation.
+            </span>
+          </div>
+        )}
 
         {/* Edit automatically — controls autonomy for follow-up messages */}
         <div className="flex items-center gap-2 px-1">
@@ -183,15 +215,27 @@ export function PromptBar({
             <Button variant="ghost" size="icon" aria-label="Attach" className="size-9" disabled>
               <Paperclip data-icon />
             </Button>
-            <Button
-              size="icon"
-              aria-label="Send"
-              disabled={!canSend}
-              onClick={send}
-	              className="size-9 rounded-full"
-            >
-              <ArrowUp data-icon />
-            </Button>
+            {running && onStop ? (
+              <Button
+                size="icon"
+                variant="destructive"
+                aria-label="Stop"
+                onClick={onStop}
+                className="size-9 rounded-full"
+              >
+                <Square data-icon />
+              </Button>
+            ) : (
+              <Button
+                size="icon"
+                aria-label={sendLabel}
+                disabled={!canSend}
+                onClick={send}
+                className="size-9 rounded-full"
+              >
+                <ArrowUp data-icon />
+              </Button>
+            )}
           </div>
         </div>
       </div>

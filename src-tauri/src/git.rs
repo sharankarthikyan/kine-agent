@@ -132,7 +132,29 @@ pub fn default_base(worktree: &Path) -> String {
             return candidate.to_string();
         }
     }
+    // No origin/HEAD and no main/master: fall back to the first local branch that isn't
+    // one of our per-session `agent/<id>` branches (e.g. a repo whose default is `trunk`
+    // or `develop`), so we diff against a real ref instead of a nonexistent "main". Only
+    // as an absolute last resort do we return the literal "main".
+    if let Some(branch) = first_non_agent_branch(worktree) {
+        return branch;
+    }
     "main".to_string()
+}
+
+/// First local branch that isn't a Kineloop `agent/<id>` session branch (branches are
+/// shared across a repo's worktrees, so the session worktree can still see the repo's real
+/// base branch). Sorted by name; rejects names starting with `-` as an argument-injection
+/// guard, mirroring the rest of this module. `None` when no such branch exists.
+fn first_non_agent_branch(worktree: &Path) -> Option<String> {
+    git_stdout(
+        worktree,
+        &["for-each-ref", "--format=%(refname:short)", "refs/heads/"],
+    )
+    .lines()
+    .map(str::trim)
+    .find(|b| !b.is_empty() && !b.starts_with('-') && !b.starts_with("agent/"))
+    .map(str::to_string)
 }
 
 /// True when `branch` resolves to a local ref in `worktree`. Uses the fully-qualified
@@ -395,6 +417,29 @@ mod tests {
         let dir = init_repo("default-base-no-remote");
         // No remote configured → origin/HEAD cannot resolve → fallback to "main".
         assert_eq!(default_base(&dir), "main");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn default_base_uses_real_branch_when_no_main_or_master() {
+        let dir = init_repo("default-base-trunk");
+        let git = |args: &[&str]| {
+            Cmd::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        // Rename the default branch to `trunk` so neither main nor master exists, and add
+        // an `agent/*` session branch that must be ignored as a base candidate.
+        git(&["branch", "-m", "main", "trunk"]);
+        git(&["branch", "agent/some-session"]);
+
+        // No remote + no main/master → fall back to the real branch (`trunk`), never the
+        // `agent/*` session branch, and never a literal nonexistent "main".
+        assert_eq!(default_base(&dir), "trunk");
 
         let _ = fs::remove_dir_all(&dir);
     }

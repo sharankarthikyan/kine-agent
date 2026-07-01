@@ -59,6 +59,17 @@ test("renders the composer placeholder", () => {
   expect(screen.getByPlaceholderText(PLACEHOLDER)).toBeInTheDocument();
 });
 
+test("renders external CLI continuation mode distinctly", () => {
+  setup({ mode: "external-continuation" });
+  expect(screen.getByPlaceholderText("Continue this CLI history…")).toBeInTheDocument();
+  expect(
+    screen.getByText("Replies start a writable Kineloop continuation."),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByRole("button", { name: "Continue in Kineloop" }),
+  ).toBeDisabled();
+});
+
 test("calls onStart with the typed text and the current model on Send click", async () => {
   const { onStart } = setup();
   await userEvent.type(screen.getByPlaceholderText(PLACEHOLDER), "fix the bug");
@@ -111,6 +122,27 @@ test("does not call onStart when the textarea is empty", async () => {
 test("textarea is disabled while running", () => {
   setup({ running: true });
   expect(screen.getByPlaceholderText(PLACEHOLDER)).toBeDisabled();
+});
+
+// ── Stop button ─────────────────────────────────────────────────────────────────
+
+test("shows a Stop button instead of Send while running when onStop is provided", () => {
+  setup({ running: true, onStop: vi.fn() });
+  expect(screen.getByRole("button", { name: "Stop" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Send" })).not.toBeInTheDocument();
+});
+
+test("clicking Stop calls onStop", async () => {
+  const onStop = vi.fn();
+  setup({ running: true, onStop });
+  await userEvent.click(screen.getByRole("button", { name: "Stop" }));
+  expect(onStop).toHaveBeenCalledTimes(1);
+});
+
+test("shows Send (not Stop) when idle even if onStop is provided", () => {
+  setup({ running: false, onStop: vi.fn() });
+  expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Stop" })).not.toBeInTheDocument();
 });
 
 // ── Model selector trigger ─────────────────────────────────────────────────────

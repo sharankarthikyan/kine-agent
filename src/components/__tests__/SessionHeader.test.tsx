@@ -1,8 +1,5 @@
 import { render, screen, fireEvent } from "@testing-library/react";
 import { SessionHeader } from "../SessionHeader";
-import type { Diffstat } from "../../lib/conductor";
-
-const DIFFSTAT: Diffstat = { additions: 12, deletions: 3, filesChanged: 5 };
 
 function setup(overrides: Partial<React.ComponentProps<typeof SessionHeader>> = {}) {
   const onClose = vi.fn();
@@ -15,7 +12,6 @@ function setup(overrides: Partial<React.ComponentProps<typeof SessionHeader>> = 
       repo="my-repo"
       status="idle"
       source="kineloop"
-      diffstat={DIFFSTAT}
       onClose={onClose}
       onCleanup={onCleanup}
       onTogglePanel={onTogglePanel}
@@ -84,31 +80,20 @@ test("the title is not editable when onRename is omitted", () => {
   expect(screen.queryByRole("textbox", { name: /session title/i })).not.toBeInTheDocument();
 });
 
-// ── Diffstat ──────────────────────────────────────────────────────────────────
+// ── Diffstat is not shown in the header ─────────────────────────────────────────
+// The live diff moved to the Changes tab; the header stays a clean identity line.
 
-test("renders diffstat additions and deletions", () => {
+test("never renders diff additions/deletions in the header", () => {
   setup();
-  expect(screen.getByText("+12")).toBeInTheDocument();
-  expect(screen.getByText("−3")).toBeInTheDocument();
-});
-
-test("omits additions/deletions when diffstat is null", () => {
-  setup({ diffstat: null });
   expect(screen.queryByText(/^\+\d/)).not.toBeInTheDocument();
   expect(screen.queryByText(/^−\d/)).not.toBeInTheDocument();
 });
 
-test("renders gracefully when both repo and diffstat are null", () => {
-  setup({ repo: null, diffstat: null });
+test("renders gracefully with no secondary line when repo is null", () => {
+  setup({ repo: null });
   expect(screen.getByText("Fix the login bug")).toBeInTheDocument();
   // No secondary line rendered
   expect(screen.queryByText("my-repo")).not.toBeInTheDocument();
-});
-
-test("renders repo without diffstat when diffstat is null", () => {
-  setup({ diffstat: null });
-  expect(screen.getByText("my-repo")).toBeInTheDocument();
-  expect(screen.queryByText(/^\+\d/)).not.toBeInTheDocument();
 });
 
 // ── Close button ──────────────────────────────────────────────────────────────

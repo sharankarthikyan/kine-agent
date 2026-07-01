@@ -290,7 +290,9 @@ fn summarize_claude(path: &Path) -> Option<SessionSummary> {
     let mut tool_call_count = 0_u32;
     let mut file_actions = BTreeSet::new();
 
-    for value in read_json_lines(path) {
+    // Stream the transcript (no full Vec<Value> in memory) so even a multi-GB session
+    // summarizes with bounded memory.
+    visit_json_lines(path, |value| {
         let typ = value.get("type").and_then(Value::as_str);
         if repo.is_none() {
             repo = value
@@ -352,7 +354,8 @@ fn summarize_claude(path: &Path) -> Option<SessionSummary> {
             }
             _ => {}
         }
-    }
+        true
+    });
 
     if !has_conversation {
         return None;
@@ -386,15 +389,19 @@ fn summarize_codex(path: &Path) -> Option<SessionSummary> {
     let mut turn_count = 0_u32;
     let mut tool_call_count = 0_u32;
     let mut file_actions = BTreeSet::new();
+    // `is_subagent` lets a `session_meta` subagent marker abort the summary even though
+    // streaming can't early-return out of the closure.
+    let mut is_subagent = false;
 
-    for value in read_json_lines(path) {
+    visit_json_lines(path, |value| {
         match value.get("type").and_then(Value::as_str) {
             Some("session_meta") => {
                 let payload = value.get("payload").unwrap_or(&Value::Null);
                 if payload.get("thread_source").and_then(Value::as_str) == Some("subagent")
                     || payload.get("source").is_some_and(Value::is_object)
                 {
-                    return None;
+                    is_subagent = true;
+                    return false; // stop reading; this transcript is skipped entirely
                 }
                 repo = payload
                     .get("cwd")
@@ -441,9 +448,10 @@ fn summarize_codex(path: &Path) -> Option<SessionSummary> {
             }
             _ => {}
         }
-    }
+        true
+    });
 
-    if !has_conversation {
+    if is_subagent || !has_conversation {
         return None;
     }
     let updated_at = modified_ms(path);
@@ -589,7 +597,7 @@ fn codex_event_pairs(value: &Value) -> Vec<(String, Value)> {
                         Value::String(s) => s.clone(),
                         other => compact_json(other),
                     })
-                    .unwrap_or_else(|| "".to_string());
+                    .unwrap_or_default();
                 events.push((
                     "toolCall".to_string(),
                     serde_json::json!({ "name": name, "input": input }),
@@ -787,7 +795,7 @@ fn summarize_antigravity(path: &Path) -> Option<SessionSummary> {
     let mut tool_call_count = 0_u32;
     let mut file_actions = BTreeSet::new();
 
-    for value in read_json_lines(path) {
+    visit_json_lines(path, |value| {
         match value.get("type").and_then(Value::as_str) {
             Some("USER_INPUT") => {
                 if let Some(text) = antigravity_user_text(&value) {
@@ -810,7 +818,8 @@ fn summarize_antigravity(path: &Path) -> Option<SessionSummary> {
                 }
             }
         }
-    }
+        true
+    });
 
     if !has_conversation {
         return None;
@@ -980,13 +989,28 @@ fn visit_json_lines(path: &Path, mut visit: impl FnMut(Value) -> bool) {
         return;
     };
     // Stream line-by-line instead of applying a byte/event budget. Individual malformed
-    // or non-UTF-8 lines are skipped, but later valid lines are still parsed.
-    for value in BufReader::new(file)
-        .split(b'\n')
-        .filter_map(Result::ok)
-        .filter_map(|line| String::from_utf8(line).ok())
-        .filter_map(|line| serde_json::from_str::<Value>(&line).ok())
-    {
+    // or non-UTF-8 lines are skipped, but later valid lines are still parsed. A read
+    // error stops iteration rather than spinning: `BufReader::split(..).filter_map(ok)`
+    // would silently drop a persistent `Err` and re-poll the same failing position
+    // forever, so we drive `read_until` directly and break on error.
+    let mut reader = BufReader::new(file);
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        match reader.read_until(b'\n', &mut buf) {
+            Ok(0) => break,  // EOF
+            Ok(_) => {}
+            Err(_) => break, // stop on read error instead of looping on it
+        }
+        while matches!(buf.last(), Some(b'\n' | b'\r')) {
+            buf.pop();
+        }
+        let Ok(line) = std::str::from_utf8(&buf) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
         if !visit(value) {
             break;
         }
@@ -1195,8 +1219,33 @@ fn title_from_text(text: &str) -> String {
 }
 
 fn external_id(agent: &str, path: &Path) -> String {
-    let identity = format!("{agent}\0{}", path.to_string_lossy());
-    format!("external:{agent}:{:016x}", stable_hash(identity.as_bytes()))
+    // Hash the path's raw OS bytes, NOT a lossy UTF-8 string. `to_string_lossy` replaces
+    // invalid byte sequences with U+FFFD, so two distinct paths differing only in
+    // non-UTF-8 bytes (legal on Unix/macOS) could collapse to the same id and resolve to
+    // the wrong transcript. Raw bytes are collision-free, and for the common valid-UTF-8
+    // path they equal the previous hash input, so existing ids are preserved.
+    let mut identity = Vec::with_capacity(agent.len() + 1 + 96);
+    identity.extend_from_slice(agent.as_bytes());
+    identity.push(0);
+    identity.extend_from_slice(&os_path_bytes(path));
+    format!("external:{agent}:{:016x}", stable_hash(&identity))
+}
+
+/// The path's native OS bytes, losslessly. On Unix these are the raw path bytes; on
+/// Windows the UTF-16 code units encoded little-endian. Used for collision-free hashing.
+#[cfg(unix)]
+fn os_path_bytes(path: &Path) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+    path.as_os_str().as_bytes().to_vec()
+}
+
+#[cfg(windows)]
+fn os_path_bytes(path: &Path) -> Vec<u8> {
+    use std::os::windows::ffi::OsStrExt;
+    path.as_os_str()
+        .encode_wide()
+        .flat_map(|unit| unit.to_le_bytes())
+        .collect()
 }
 
 fn stable_hash(bytes: &[u8]) -> u64 {

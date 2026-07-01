@@ -1,8 +1,9 @@
 use crate::adapter::{AgentAdapter, EventSink, Prompt, SessionError};
 use crate::events::AgentEvent;
+use crate::adapters::{read_capped_line, CappedLine, MAX_LINE_BYTES};
 use serde_json::Value;
 use std::path::PathBuf;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use tokio::io::{AsyncReadExt, BufReader};
 use tokio::process::Command;
 
 /// Concrete adapter that drives the `claude` CLI.
@@ -177,25 +178,25 @@ pub async fn spawn_and_stream(
         lines[start..].join("\n")
     });
 
-    // Read newline-delimited stream-json by bytes and decode each line lossily, rather
-    // than `lines()`/`next_line()` which return Err on invalid UTF-8 — a single bad byte
-    // would otherwise abort the whole session via `?`. Genuine IO errors still propagate.
+    // Read newline-delimited stream-json with a per-line size cap and lossy UTF-8 decode.
+    // `read_capped_line` bounds memory against a pathological huge line and never aborts
+    // on invalid UTF-8 (a single bad byte would otherwise kill the session); genuine IO
+    // errors still propagate.
     let mut reader = BufReader::new(stdout);
-    let mut buf = Vec::new();
     loop {
-        buf.clear();
-        let read = reader.read_until(b'\n', &mut buf).await?;
-        if read == 0 {
-            break; // EOF
+        match read_capped_line(&mut reader, MAX_LINE_BYTES).await? {
+            CappedLine::Eof => break,
+            CappedLine::Skipped(bytes) => {
+                eprintln!("claude: skipped an oversized stdout line ({bytes} bytes)");
+            }
+            CappedLine::Line(buf) => {
+                let line = String::from_utf8_lossy(&buf);
+                for event in parse_line(&line) {
+                    sink.emit(event);
+                }
+                // Unparsed lines are intentionally skipped (logged by caller if needed).
+            }
         }
-        while matches!(buf.last(), Some(b'\n' | b'\r')) {
-            buf.pop();
-        }
-        let line = String::from_utf8_lossy(&buf);
-        for event in parse_line(&line) {
-            sink.emit(event);
-        }
-        // Unparsed lines are intentionally skipped (logged by caller if needed).
     }
 
     // Collect stderr tail before waiting on the child so the pipe is fully drained.
@@ -209,6 +210,10 @@ pub async fn spawn_and_stream(
             format!("claude exited with {status}: {}", stderr_tail.trim())
         };
         sink.emit(AgentEvent::Error { message });
+    } else if !stderr_tail.trim().is_empty() {
+        // Exited cleanly but wrote to stderr (deprecations, auth-refresh notices, …).
+        // Not an error event, but log it so a silently-misbehaving run is diagnosable.
+        eprintln!("claude exited 0 with stderr: {}", stderr_tail.trim());
     }
     Ok(())
 }

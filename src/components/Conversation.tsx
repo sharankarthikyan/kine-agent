@@ -56,6 +56,8 @@ export function Conversation({
     );
   }
 
+  const runningEvents = turns.length > 0 ? turns[turns.length - 1].events : [];
+
   return (
     // More space between turns than within a single turn (no divider lines).
     <div className="flex flex-col gap-6 p-4">
@@ -101,7 +103,7 @@ export function Conversation({
           )}
         </div>
       ))}
-      {running && <RunningIndicator />}
+      {running && <RunningIndicator events={runningEvents} />}
       <div ref={bottomRef} />
     </div>
   );

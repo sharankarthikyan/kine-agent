@@ -22,5 +22,24 @@ test("renders multiple turns with their prompts and events", () => {
 test("shows the running indicator while working", () => {
   const turns: Turn[] = [{ prompt: "x", events: [] }];
   render(<Conversation turns={turns} running={true} />);
-  expect(screen.getByRole("status")).toHaveTextContent(/working/i);
+  expect(screen.getByRole("status")).toHaveTextContent(/starting agent/i);
+  expect(screen.getByRole("status")).toHaveTextContent(/waiting for the first response/i);
+});
+
+test("running indicator summarizes latest activity", () => {
+  const turns: Turn[] = [
+    {
+      prompt: "x",
+      events: [
+        {
+          kind: "toolCall",
+          data: { name: "Bash", input: '{"command":"npm test"}' },
+        },
+      ],
+    },
+  ];
+  render(<Conversation turns={turns} running={true} />);
+  expect(screen.getByRole("status")).toHaveTextContent(/running bash/i);
+  expect(screen.getByRole("status")).toHaveTextContent(/npm test/i);
+  expect(screen.getByRole("status")).toHaveTextContent(/1 tool/i);
 });

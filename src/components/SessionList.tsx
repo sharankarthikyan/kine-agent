@@ -23,7 +23,7 @@ import {
   EmptyTitle,
 } from "@/components/ui/empty";
 import type { SessionSummary, SessionStatus } from "../lib/sessions";
-import type { CustomizationCounts, Diffstat } from "../lib/conductor";
+import type { CustomizationCounts } from "../lib/conductor";
 import type { CustomizationSection } from "./CustomizationsDialog";
 import { relativeTime } from "../lib/relativeTime";
 import { AgentLogo } from "./AgentLogo";
@@ -39,7 +39,6 @@ interface SessionListProps {
   onSelect: (id: string) => void;
   onNew: () => void;
   counts: CustomizationCounts | null;
-  diffstats: Record<string, Diffstat>;
   search: string;
   onSearchChange: (s: string) => void;
   statusFilter: StatusFilter;
@@ -92,7 +91,6 @@ export function SessionList({
   onSelect,
   onNew,
   counts,
-  diffstats,
   search,
   onSearchChange,
   statusFilter,
@@ -337,47 +335,59 @@ export function SessionList({
                   {group.sessions.map((session) => {
                     const active = session.id === activeId;
                     const config = STATUS_CONFIG[session.status] ?? FALLBACK_CONFIG;
-                    const stat = diffstats[session.id];
-                    const additions = stat?.additions ?? 0;
-                    const deletions = stat?.deletions ?? 0;
-                    const externalMeta = [
+                    // Activity meta (turns · tools · files) is rendered the same way for
+                    // Kineloop and external CLI sessions — both carry these counts now.
+                    const metaParts = [
                       session.turnCount !== null ? `${session.turnCount}t` : null,
                       session.toolCallCount !== null ? `${session.toolCallCount} tools` : null,
                       session.fileActionCount !== null ? `${session.fileActionCount}f` : null,
                     ].filter(Boolean);
-                    const fullExternalMeta = [
+                    const fullMetaParts = [
                       session.turnCount !== null ? `${session.turnCount} turns` : null,
                       session.toolCallCount !== null ? `${session.toolCallCount} tools` : null,
                       session.fileActionCount !== null ? `${session.fileActionCount} files` : null,
                     ].filter(Boolean);
                     const fullTime = relativeTime(session.updatedAt, now);
                     const shortTime = compactRelativeTime(session.updatedAt, now);
-                    const secondaryTitle =
-                      session.source === "external"
-                        ? `${fullExternalMeta.length > 0 ? fullExternalMeta.join(" · ") : "CLI history"} · ${fullTime}`
-                        : `+${additions} −${deletions} · ${fullTime}`;
+                    // Fallback when a session reports no counts at all: external history
+                    // reads "CLI history"; a countless Kineloop row shows only its time.
+                    const metaLabel =
+                      metaParts.length > 0
+                        ? metaParts.join(" · ")
+                        : session.source === "external"
+                          ? "CLI history"
+                          : null;
+                    const fullMetaLabel =
+                      fullMetaParts.length > 0
+                        ? fullMetaParts.join(" · ")
+                        : session.source === "external"
+                          ? "CLI history"
+                          : null;
+                    const secondaryTitle = fullMetaLabel
+                      ? `${fullMetaLabel} · ${fullTime}`
+                      : fullTime;
                     // Every session is renameable: Kineloop rows update their DB title in
                     // place; external CLI rows get a stored title override (their on-disk
                     // transcript is never touched).
                     const editable = true;
                     const editing = editingId === session.id;
-                    // Bottom row (diffstat / external meta + relative time) is identical
-                    // in both display and edit modes, so it's built once and reused.
+                    // Bottom row (activity meta + relative time) is identical in display and
+                    // edit modes, so it's built once and reused. The live git diff lives in
+                    // the Changes tab.
                     const metaRow = (
                       <span
                         className="block w-full min-w-0 truncate text-xs text-muted-foreground tabular-nums pl-4"
                         title={secondaryTitle}
                       >
-                        {session.source === "external" ? (
-                          <span>{externalMeta.length > 0 ? externalMeta.join(" · ") : "CLI history"}</span>
-                        ) : (
+                        {metaLabel ? (
                           <>
-                            <span style={{ color: "var(--status-success)" }}>+{additions}</span>{" "}
-                            <span style={{ color: "var(--status-error)" }}>−{deletions}</span>
+                            <span>{metaLabel}</span>
+                            {" · "}
+                            {shortTime}
                           </>
+                        ) : (
+                          shortTime
                         )}
-                        {" · "}
-                        {shortTime}
                       </span>
                     );
                     return (
