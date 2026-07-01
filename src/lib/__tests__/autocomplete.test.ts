@@ -7,6 +7,8 @@ import {
   commandsToSuggestions,
   agentsToSuggestions,
   treeToFileSuggestions,
+  parsePathQuery,
+  entriesToPathSuggestions,
   type Suggestion,
 } from "../autocomplete";
 import type { Capabilities } from "../inspect";
@@ -90,6 +92,50 @@ describe("applySuggestion", () => {
   test("keeps surrounding text intact", () => {
     const ctx = detectTrigger("/de and more", 3)!;
     expect(applySuggestion("/de and more", ctx, "/deploy").text).toBe("/deploy and more");
+  });
+
+  test("omits the trailing space for directory descent", () => {
+    const ctx = detectTrigger("@~/Do", 5)!;
+    const out = applySuggestion("@~/Do", ctx, "@~/Documents/", { trailingSpace: false });
+    expect(out.text).toBe("@~/Documents/");
+    expect(out.caret).toBe("@~/Documents/".length);
+  });
+});
+
+// ── parsePathQuery ─────────────────────────────────────────────────────────────
+
+describe("parsePathQuery", () => {
+  test("returns null for repo-relative queries", () => {
+    expect(parsePathQuery("src/App")).toBeNull();
+    expect(parsePathQuery("App")).toBeNull();
+  });
+  test("parses a bare ~ as the home root", () => {
+    expect(parsePathQuery("~")).toEqual({ dirPath: "~/", filter: "", insertPrefix: "~/" });
+  });
+  test("splits home and absolute paths into dir + filter", () => {
+    expect(parsePathQuery("~/Doc")).toEqual({ dirPath: "~/", filter: "Doc", insertPrefix: "~/" });
+    expect(parsePathQuery("~/docs/re")).toEqual({
+      dirPath: "~/docs/",
+      filter: "re",
+      insertPrefix: "~/docs/",
+    });
+    expect(parsePathQuery("/")).toEqual({ dirPath: "/", filter: "", insertPrefix: "/" });
+    expect(parsePathQuery("/usr/lo")).toEqual({
+      dirPath: "/usr/",
+      filter: "lo",
+      insertPrefix: "/usr/",
+    });
+  });
+});
+
+describe("entriesToPathSuggestions", () => {
+  test("prefixes children and marks directories with a trailing slash", () => {
+    const out = entriesToPathSuggestions("~/", [
+      { name: "docs", isDir: true },
+      { name: "a.txt", isDir: false },
+    ]);
+    expect(out[0]).toMatchObject({ kind: "dir", label: "docs/", insertText: "@~/docs/" });
+    expect(out[1]).toMatchObject({ kind: "file", label: "a.txt", insertText: "@~/a.txt" });
   });
 });
 

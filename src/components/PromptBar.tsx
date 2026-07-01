@@ -26,7 +26,7 @@ import { AgentLogo } from "./AgentLogo";
 import { AutocompletePopover } from "./AutocompletePopover";
 import { usePromptAutocomplete } from "@/lib/usePromptAutocomplete";
 import { buildPromptForAgent, needsPromptTransform } from "@/lib/mentions";
-import { readWorktreeFile } from "@/lib/conductor";
+import { readAnyFile, readWorktreeFile } from "@/lib/conductor";
 
 interface PromptBarProps {
   onStart: (text: string, model: ModelInfo | null) => void;
@@ -116,8 +116,11 @@ export function PromptBar({
     const mentions = ac.mentionsRef.current;
     if (needsPromptTransform(raw, mentions, agent)) {
       // codex/agy inline @files; claude expands @agent-<name> nudges. Resolve, then send.
+      // Global (`~`/absolute) paths read via the filesystem browser; repo paths via the worktree.
       void buildPromptForAgent(raw, mentions, agent, (p) =>
-        readWorktreeFile(sessionId ?? "", p),
+        p.startsWith("~") || p.startsWith("/")
+          ? readAnyFile(p)
+          : readWorktreeFile(sessionId ?? "", p),
       ).then((finalText) => onStart(finalText, model));
     } else {
       onStart(raw, model);
@@ -171,6 +174,7 @@ export function PromptBar({
           query={ac.query}
           anchorRef={textareaRef}
           listboxId={ac.listboxId}
+          notice={ac.notice}
           onHover={ac.setActiveIndex}
           onSelect={ac.accept}
         />

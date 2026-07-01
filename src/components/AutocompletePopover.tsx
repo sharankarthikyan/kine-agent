@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
-import { Bot, Command, File, Folder } from "lucide-react";
+import { Bot, Command, File, Folder, TriangleAlert } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { matchRange, type Suggestion } from "@/lib/autocomplete";
 
@@ -14,6 +14,8 @@ interface AutocompletePopoverProps {
   anchorRef: RefObject<HTMLElement | null>;
   /** Shared id so the textarea can point `aria-controls`/`aria-activedescendant` here. */
   listboxId: string;
+  /** Optional caution shown as a header (e.g. when browsing outside the repo). */
+  notice?: string;
   onHover: (index: number) => void;
   onSelect: (item: Suggestion) => void;
 }
@@ -52,6 +54,7 @@ export function AutocompletePopover({
   query,
   anchorRef,
   listboxId,
+  notice,
   onHover,
   onSelect,
 }: AutocompletePopoverProps) {
@@ -73,7 +76,7 @@ export function AutocompletePopover({
 
   // Keep the active row visible as the user arrows through.
   useEffect(() => {
-    activeRef.current?.scrollIntoView({ block: "nearest" });
+    activeRef.current?.scrollIntoView?.({ block: "nearest" });
   }, [activeIndex]);
 
   if (!open || !rect || items.length === 0) return null;
@@ -93,6 +96,15 @@ export function AutocompletePopover({
         width,
       }}
     >
+      {notice && (
+        <div
+          className="flex items-center gap-1.5 px-2 py-1.5 text-xs text-muted-foreground"
+          aria-hidden
+        >
+          <TriangleAlert className="size-3.5 shrink-0" />
+          <span className="truncate">{notice}</span>
+        </div>
+      )}
       {items.map((item, i) => {
         const active = i === activeIndex;
         return (

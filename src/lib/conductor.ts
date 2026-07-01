@@ -112,6 +112,26 @@ export async function readWorktreeFile(sessionId: string, path: string): Promise
   return invoke<string>("read_worktree_file", { sessionId, path });
 }
 
+/** One immediate child of a browsed directory (for `@/` and `@~/` filesystem mentions). */
+export interface DirEntry {
+  name: string;
+  isDir: boolean;
+}
+
+/** List a directory's immediate children for filesystem `@` browsing. `~` expands to home.
+ *  Read-only, non-recursive, capped. Reaches outside the repo — user-initiated only. */
+export async function listDir(path: string): Promise<DirEntry[]> {
+  assertDesktop();
+  return invoke<DirEntry[]>("list_dir", { path });
+}
+
+/** Read a text file at an absolute or `~`-expanded path, for inlining a global `@` mention.
+ *  Regular files only; content over 512 KiB is truncated. */
+export async function readAnyFile(path: string): Promise<string> {
+  assertDesktop();
+  return invoke<string>("read_any_file", { path });
+}
+
 /** Return the changed files and ahead-count for the session's branch relative to its base. */
 export async function branchChanges(sessionId: string): Promise<BranchChanges> {
   assertDesktop();

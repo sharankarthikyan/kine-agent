@@ -5,13 +5,15 @@ import {
   applySuggestion,
   commandsToSuggestions,
   detectTrigger,
+  entriesToPathSuggestions,
   filterSuggestions,
+  parsePathQuery,
   treeToFileSuggestions,
   type Suggestion,
   type TriggerContext,
 } from "./autocomplete";
 import { listCapabilities, type Capabilities } from "./inspect";
-import { worktreeTree, type TreeEntry } from "./conductor";
+import { listDir, worktreeTree, type TreeEntry } from "./conductor";
 import type { Mention } from "./mentions";
 
 interface Options {
@@ -24,11 +26,16 @@ interface Options {
   agent: string;
 }
 
+/** True when an `@` query addresses the filesystem (`@/…` or `@~/…`) rather than the repo. */
+function isFilesystemQuery(trigger: TriggerContext | null): boolean {
+  return !!trigger && trigger.trigger === "@" && parsePathQuery(trigger.query) !== null;
+}
+
 /**
- * Wires `@` (files + agents) and `/` (commands) autocomplete onto a plain `<textarea>`.
- * Keeps the composer's `text` as the single source of truth (no rich editor), tracks a
- * mention registry so the caller can resolve mentions per agent on send, and returns the
- * state + handlers the composer and the `AutocompletePopover` need.
+ * Wires `@` (repo files + filesystem browse + agents) and `/` (commands) autocomplete onto a
+ * plain `<textarea>`. Keeps the composer's `text` as the single source of truth, tracks a
+ * mention registry for per-agent resolution on send, and returns the state + handlers the
+ * composer and the `AutocompletePopover` need.
  */
 export function usePromptAutocomplete({ text, setText, textareaRef, sessionId, agent }: Options) {
   const [trigger, setTrigger] = useState<TriggerContext | null>(null);
@@ -39,36 +46,48 @@ export function usePromptAutocomplete({ text, setText, textareaRef, sessionId, a
   const listboxId = useId();
   const mentionsRef = useRef<Mention[]>([]);
   const pendingCaretRef = useRef<number | null>(null);
-  // Per-session cache of the raw source data (as promises, to dedupe concurrent loads).
+  // Per-session cache of repo-scoped source data (as promises, to dedupe concurrent loads).
+  // Filesystem listings are NOT cached — the directory changes as the user navigates.
   const cacheRef = useRef<{
     sessionId?: string;
     caps?: Promise<Capabilities>;
     files?: Promise<TreeEntry[]>;
   }>({});
 
-  // Resolve the unfiltered suggestion list for a trigger, fetching + caching source data once.
+  // Resolve the FILTERED suggestion list for the active trigger, fetching source data as needed.
   const suggestionsFor = useCallback(
-    async (t: "@" | "/"): Promise<Suggestion[]> => {
+    async (t: TriggerContext): Promise<Suggestion[]> => {
       if (cacheRef.current.sessionId !== sessionId) cacheRef.current = { sessionId };
       if (!sessionId) return [];
 
-      if (t === "/") {
+      if (t.trigger === "/") {
         if (agent !== "claude") return []; // only claude exposes headless-invocable commands
         cacheRef.current.caps ??= listCapabilities(sessionId, agent);
-        return commandsToSuggestions(await cacheRef.current.caps);
+        return filterSuggestions(commandsToSuggestions(await cacheRef.current.caps), t.query);
       }
 
-      // "@": files (all agents) + agents (claude only), agents surfaced first.
+      // "@/…" or "@~/…" → live filesystem browsing (outside the repo, with caution).
+      const pathQuery = parsePathQuery(t.query);
+      if (pathQuery) {
+        const entries = await listDir(pathQuery.dirPath);
+        return filterSuggestions(
+          entriesToPathSuggestions(pathQuery.insertPrefix, entries),
+          pathQuery.filter,
+        );
+      }
+
+      // "@" repo files (all agents) + agents (claude only), agents surfaced first.
       cacheRef.current.files ??= worktreeTree(sessionId);
       const files = treeToFileSuggestions(await cacheRef.current.files);
-      if (agent !== "claude") return files;
+      if (agent !== "claude") return filterSuggestions(files, t.query);
       cacheRef.current.caps ??= listCapabilities(sessionId, agent);
-      return [...agentsToSuggestions(await cacheRef.current.caps), ...files];
+      const agents = agentsToSuggestions(await cacheRef.current.caps);
+      return filterSuggestions([...agents, ...files], t.query);
     },
     [sessionId, agent],
   );
 
-  // Load + filter suggestions whenever the active trigger token changes.
+  // Load + set suggestions whenever the active trigger token changes.
   useEffect(() => {
     if (!trigger) {
       setOpen(false);
@@ -76,10 +95,9 @@ export function usePromptAutocomplete({ text, setText, textareaRef, sessionId, a
       return;
     }
     let cancelled = false;
-    suggestionsFor(trigger.trigger)
-      .then((raw) => {
+    suggestionsFor(trigger)
+      .then((filtered) => {
         if (cancelled) return;
-        const filtered = filterSuggestions(raw, trigger.query);
         setItems(filtered);
         setActiveIndex(0);
         setOpen(filtered.length > 0);
@@ -118,21 +136,32 @@ export function usePromptAutocomplete({ text, setText, textareaRef, sessionId, a
   const accept = useCallback(
     (item: Suggestion) => {
       if (!trigger) return;
-      const next = applySuggestion(text, trigger, item.insertText);
+      const pathMode = isFilesystemQuery(trigger);
+      // In filesystem mode, selecting a directory descends into it (no trailing space, menu stays open).
+      const descend = pathMode && item.kind === "dir";
+      const next = applySuggestion(text, trigger, item.insertText, { trailingSpace: !descend });
       pendingCaretRef.current = next.caret;
       setText(next.text);
-      if (item.kind === "file" || item.kind === "dir") {
-        mentionsRef.current = [
-          ...mentionsRef.current,
-          { kind: "file", token: item.insertText, path: item.label },
-        ];
+
+      if (item.kind === "file") {
+        // Filesystem file path is the token minus the leading `@`; repo file path is the label.
+        const path = pathMode ? item.insertText.slice(1) : item.label;
+        mentionsRef.current = [...mentionsRef.current, { kind: "file", token: item.insertText, path }];
       } else if (item.kind === "agent") {
         mentionsRef.current = [
           ...mentionsRef.current,
           { kind: "agent", token: item.insertText, name: item.label },
         ];
+      } else if (item.kind === "dir" && !descend) {
+        // Repo directory selected as context (not a descent).
+        mentionsRef.current = [...mentionsRef.current, { kind: "file", token: item.insertText, path: item.label }];
       }
-      close();
+
+      if (descend) {
+        setTrigger(detectTrigger(next.text, next.caret)); // re-list the entered directory
+      } else {
+        close();
+      }
     },
     [trigger, text, setText, close],
   );
@@ -179,6 +208,8 @@ export function usePromptAutocomplete({ text, setText, textareaRef, sessionId, a
     query: trigger?.query ?? "",
     listboxId,
     activeOptionId: open && items.length > 0 ? `${listboxId}-opt-${activeIndex}` : undefined,
+    /** Caution shown while browsing outside the repo. */
+    notice: open && isFilesystemQuery(trigger) ? "Filesystem — outside the repo" : undefined,
     mentionsRef,
     sync,
     accept,

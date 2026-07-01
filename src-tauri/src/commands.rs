@@ -1274,6 +1274,25 @@ pub async fn read_worktree_file(session_id: String, path: String) -> Result<Stri
     .map_err(|e| e.to_string())?
 }
 
+/// List a directory's immediate children for `@/` and `@~/` filesystem browsing in the
+/// composer. Read-only, non-recursive, capped; `~` expands to home. Deliberately reaches
+/// outside the worktree — it is user-initiated and never writes.
+#[tauri::command]
+pub async fn list_dir(path: String) -> Result<Vec<crate::fsbrowse::DirEntry>, String> {
+    tokio::task::spawn_blocking(move || crate::fsbrowse::list_dir(&path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Read a text file at an absolute or `~`-expanded path, for inlining a global `@` mention
+/// into codex/antigravity prompts. Regular files only; content over 512 KiB is truncated.
+#[tauri::command]
+pub async fn read_any_file(path: String) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || crate::fsbrowse::read_file(&path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 /// Discover an agent's available skills/subagents/commands for a session's worktree.
 ///
 /// Returns the three capability categories (`skills`, `subagents`, `commands`) as

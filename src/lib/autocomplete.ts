@@ -1,5 +1,5 @@
 import type { Capabilities } from "./inspect";
-import type { TreeEntry } from "./conductor";
+import type { TreeEntry, DirEntry } from "./conductor";
 
 /** The two trigger characters the composer autocompletes. */
 export type TriggerChar = "@" | "/";
@@ -64,16 +64,62 @@ export function detectTrigger(text: string, caret: number): TriggerContext | nul
   return { trigger: ch, query: text.slice(start + 1, caret), start, end: caret };
 }
 
-/** Replace the trigger token with `insertText`, adding a single trailing space. */
+/**
+ * Replace the trigger token with `insertText`. Adds a single trailing space by default;
+ * pass `trailingSpace: false` for directory-descent (keep typing the path).
+ */
 export function applySuggestion(
   text: string,
   ctx: TriggerContext,
   insertText: string,
+  opts: { trailingSpace?: boolean } = {},
 ): { text: string; caret: number } {
+  const trailingSpace = opts.trailingSpace ?? true;
   const before = text.slice(0, ctx.start);
   const after = text.slice(ctx.end);
-  const inserted = after.startsWith(" ") ? insertText : `${insertText} `;
+  const inserted = !trailingSpace
+    ? insertText
+    : after.startsWith(" ")
+      ? insertText
+      : `${insertText} `;
   return { text: before + inserted + after, caret: before.length + inserted.length };
+}
+
+/** A parsed filesystem path query (`@/…` or `@~/…`): the dir to list + the name filter. */
+export interface PathQuery {
+  /** Directory to list (may contain a leading `~`), e.g. `~/`, `~/docs/`, `/`, `/usr/`. */
+  dirPath: string;
+  /** The partial name after the last slash, used to filter the listing. */
+  filter: string;
+  /** The `@`-token prefix to prepend to a selected child, e.g. `~/docs/`. */
+  insertPrefix: string;
+}
+
+/**
+ * Parse an `@` query as a filesystem path when it starts with `/` (absolute) or `~` (home).
+ * Repo-relative queries (no leading `/` or `~`) return null and use fuzzy file search instead.
+ */
+export function parsePathQuery(query: string): PathQuery | null {
+  if (!query.startsWith("/") && !query.startsWith("~")) return null;
+  const lastSlash = query.lastIndexOf("/");
+  if (lastSlash === -1) {
+    // "~" typed with no slash yet → list the home root.
+    return { dirPath: "~/", filter: query.slice(1), insertPrefix: "~/" };
+  }
+  const insertPrefix = query.slice(0, lastSlash + 1);
+  return { dirPath: insertPrefix, filter: query.slice(lastSlash + 1), insertPrefix };
+}
+
+/** Build `@`-path suggestions from a directory listing, prefixed for the current location. */
+export function entriesToPathSuggestions(insertPrefix: string, entries: DirEntry[]): Suggestion[] {
+  return entries.map((e) => ({
+    id: `fs:${insertPrefix}${e.name}`,
+    kind: e.isDir ? "dir" : "file",
+    label: e.isDir ? `${e.name}/` : e.name,
+    insertText: `@${insertPrefix}${e.name}${e.isDir ? "/" : ""}`,
+    detail: null,
+    searchText: e.name,
+  }));
 }
 
 /** Case-insensitive substring match span of `query` in `hay`, or null. Empty query → null. */

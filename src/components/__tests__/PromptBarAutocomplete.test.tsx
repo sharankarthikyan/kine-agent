@@ -14,6 +14,12 @@ vi.mock("@/lib/conductor", async (importOriginal) => {
       { path: "README.md", isDir: false, status: null },
     ]),
     readWorktreeFile: vi.fn(async (_sessionId: string, path: string) => `body of ${path}`),
+    listDir: vi.fn(async (path: string) => {
+      if (path === "~/") return [{ name: "docs", isDir: true }, { name: "notes.md", isDir: false }];
+      if (path === "~/docs/") return [{ name: "spec.md", isDir: false }];
+      return [];
+    }),
+    readAnyFile: vi.fn(async (p: string) => `global body of ${p}`),
   };
 });
 
@@ -113,6 +119,60 @@ test("does not open the command menu for a / typed mid-line", async () => {
   // brief settle; no options should appear for a mid-line slash
   await new Promise((r) => setTimeout(r, 0));
   expect(screen.queryByRole("option")).not.toBeInTheDocument();
+});
+
+// ── @agent mentions (claude) ──────────────────────────────────────────────────────
+
+test("typing @ surfaces claude subagents alongside files", async () => {
+  setup({ agent: "claude" });
+  await userEvent.type(screen.getByPlaceholderText(PLACEHOLDER), "@code");
+  expect(await screen.findByRole("option", { name: /code-reviewer/ })).toBeInTheDocument();
+});
+
+test("claude send expands an @agent token to the natural-language nudge", async () => {
+  const { onStart } = setup({ agent: "claude" });
+  const ta = screen.getByPlaceholderText(PLACEHOLDER);
+  await userEvent.type(ta, "review @code");
+  await userEvent.click(await screen.findByRole("option", { name: /code-reviewer/ }));
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() => expect(onStart).toHaveBeenCalled());
+  expect(onStart.mock.calls[0][0]).toBe('review the "code-reviewer" subagent');
+});
+
+// ── @ filesystem browsing (@~/ , @/) ────────────────────────────────────────────
+
+test("@~/ browses the home directory and shows a caution notice", async () => {
+  setup();
+  await userEvent.type(screen.getByPlaceholderText(PLACEHOLDER), "@~/");
+  expect(await screen.findByRole("option", { name: /docs/ })).toBeInTheDocument();
+  expect(screen.getByRole("option", { name: /notes\.md/ })).toBeInTheDocument();
+  expect(screen.getByText(/Filesystem — outside the repo/)).toBeInTheDocument();
+});
+
+test("selecting a directory descends into it (keeps the menu open)", async () => {
+  const { onStart } = setup({ agent: "claude" });
+  const ta = screen.getByPlaceholderText(PLACEHOLDER) as HTMLTextAreaElement;
+  await userEvent.type(ta, "@~/");
+  await userEvent.click(await screen.findByRole("option", { name: /docs\// }));
+  expect(ta.value).toContain("@~/docs/");
+  // menu re-lists the entered directory
+  await userEvent.click(await screen.findByRole("option", { name: /spec\.md/ }));
+  expect(ta.value).toContain("@~/docs/spec.md ");
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+  // claude resolves absolute/home paths itself → passed through unchanged
+  expect(onStart).toHaveBeenCalledWith("@~/docs/spec.md", opus);
+});
+
+test("codex inlines a global @~/ file via the filesystem reader", async () => {
+  const { onStart } = setup({ agent: "codex" });
+  const ta = screen.getByPlaceholderText(PLACEHOLDER);
+  await userEvent.type(ta, "@~/");
+  await userEvent.click(await screen.findByRole("option", { name: /notes\.md/ }));
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() => expect(onStart).toHaveBeenCalled());
+  const [sent] = onStart.mock.calls[0];
+  expect(sent).toContain("===== ~/notes.md =====");
+  expect(sent).toContain("global body of ~/notes.md");
 });
 
 // ── per-agent send semantics ──────────────────────────────────────────────────────

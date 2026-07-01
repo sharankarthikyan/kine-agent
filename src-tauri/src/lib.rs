@@ -5,6 +5,7 @@ pub mod approval;
 mod commands;
 pub mod events;
 pub mod external_sessions;
+pub mod fsbrowse;
 pub mod git;
 pub mod inspect;
 pub mod models;
@@ -71,6 +72,8 @@ pub fn run() {
             commands::read_text_file,
             commands::write_text_file,
             commands::read_worktree_file,
+            commands::list_dir,
+            commands::read_any_file,
             commands::list_capabilities,
             commands::customizations_counts,
             commands::session_diffstat,
