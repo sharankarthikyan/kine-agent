@@ -118,13 +118,17 @@ pub async fn spawn_and_stream(
     resume: bool,
     sink: Box<dyn EventSink>,
 ) -> Result<(), SessionError> {
-    // Extract model and permission_mode before building the command so borrows on prompt
-    // fields don't conflict with each other. Both are forwarded verbatim; None omits the flag.
-    // Valid model values: short aliases (e.g. "opus", "sonnet", "haiku", "fable") or a full
-    // model id (e.g. "claude-opus-4-5"). Valid permission_mode values are checked
-    // in the command layer before this adapter is invoked.
+    // Extract model and permission mode before building the command so borrows on prompt
+    // fields don't conflict. Valid model values: short aliases (e.g. "opus", "sonnet",
+    // "haiku", "fable") or a full model id (e.g. "claude-opus-4-5"). The permission mode
+    // was validated in the command layer; Claude supports every unified mode natively, so
+    // it maps 1:1 to `--permission-mode` (`full` ⇒ `bypassPermissions`). An unrecognized
+    // value maps to None, omitting the flag and deferring to the CLI default.
     let model = prompt.model.as_deref();
-    let permission_mode = prompt.permission_mode.as_deref();
+    let permission_mode = prompt
+        .permission_mode
+        .as_deref()
+        .and_then(crate::permission::PermissionMode::from_wire);
 
     // Resolve via PATHEXT so the Windows npm shim (`claude.cmd`) is found, not just
     // `claude.exe`; on Unix this resolves the absolute path (or falls back to the name).
@@ -143,8 +147,8 @@ pub async fn spawn_and_stream(
     if let Some(m) = model {
         command.arg("--model").arg(m);
     }
-    if let Some(pm) = permission_mode {
-        command.arg("--permission-mode").arg(pm);
+    if let Some(mode) = permission_mode {
+        command.arg("--permission-mode").arg(mode.claude_flag());
     }
     let mut child = command
         .current_dir(&cwd)
@@ -317,7 +321,7 @@ mod tests {
         let p = Prompt {
             text: "build it".into(),
             model: Some("opus".into()),
-            permission_mode: None,
+            ..Default::default()
         };
         assert_eq!(p.model.as_deref(), Some("opus"));
     }
@@ -326,8 +330,7 @@ mod tests {
     fn prompt_model_none_is_absent() {
         let p = Prompt {
             text: "build it".into(),
-            model: None,
-            permission_mode: None,
+            ..Default::default()
         };
         assert!(p.model.is_none());
     }
@@ -338,8 +341,8 @@ mod tests {
     fn prompt_permission_mode_some_carries_through() {
         let p = Prompt {
             text: "build it".into(),
-            model: None,
             permission_mode: Some("acceptEdits".into()),
+            ..Default::default()
         };
         assert_eq!(p.permission_mode.as_deref(), Some("acceptEdits"));
     }
@@ -348,9 +351,20 @@ mod tests {
     fn prompt_permission_mode_none_is_absent() {
         let p = Prompt {
             text: "build it".into(),
-            model: None,
-            permission_mode: None,
+            ..Default::default()
         };
         assert!(p.permission_mode.is_none());
+    }
+
+    // ---- claude flag mapping ----
+
+    #[test]
+    fn claude_permission_flag_maps_full_to_bypass() {
+        use crate::permission::PermissionMode;
+        // The claude adapter forwards `mode.claude_flag()`; `full` must become the CLI's
+        // `bypassPermissions` spelling, and the advanced modes pass through unchanged.
+        assert_eq!(PermissionMode::Full.claude_flag(), "bypassPermissions");
+        assert_eq!(PermissionMode::Plan.claude_flag(), "plan");
+        assert_eq!(PermissionMode::DontAsk.claude_flag(), "dontAsk");
     }
 }

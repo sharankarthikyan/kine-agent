@@ -4,14 +4,13 @@ import {
   Check,
   ChevronDown,
   FolderOpen,
-  Lock,
-  LockOpen,
   Paperclip,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { Switch } from "@/components/ui/switch";
+import { PermissionModeSelect } from "@/components/PermissionModeSelect";
+import { type PermissionMode } from "@/lib/permissions";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -31,13 +30,15 @@ interface NewSessionProps {
   agent: AgentInfo | null;
   models: ModelInfo[];
   model: ModelInfo | null;
-  autoEdit: boolean;
+  permissionMode: PermissionMode;
+  sandboxTerminal: boolean;
   running: boolean;
   onPickRepo: () => void;
   onPickRecent: (path: string) => void;
   onAgentChange: (a: AgentInfo) => void;
   onModelChange: (m: ModelInfo) => void;
-  onAutoEditChange: (v: boolean) => void;
+  onPermissionModeChange: (mode: PermissionMode) => void;
+  onSandboxTerminalChange: (v: boolean) => void;
   onStart: (text: string) => void;
 }
 
@@ -69,13 +70,15 @@ export function NewSession({
   agent,
   models,
   model,
-  autoEdit,
+  permissionMode,
+  sandboxTerminal,
   running,
   onPickRepo,
   onPickRecent,
   onAgentChange,
   onModelChange,
-  onAutoEditChange,
+  onPermissionModeChange,
+  onSandboxTerminalChange,
   onStart,
 }: NewSessionProps) {
   const [text, setText] = useState("");
@@ -225,8 +228,9 @@ export function NewSession({
           />
 
           {/* Bottom action row */}
-          <div className="flex items-center justify-between">
-            {/* LEFT: model selector — same pattern as PromptBar */}
+          <div className="flex items-center justify-between gap-2">
+            {/* LEFT: model + permission selectors, side by side */}
+            <div className="flex min-w-0 items-center gap-1">
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button
@@ -281,8 +285,17 @@ export function NewSession({
               </DropdownMenuContent>
             </DropdownMenu>
 
+              <PermissionModeSelect
+                agent={agent?.id ?? "claude"}
+                value={permissionMode}
+                onChange={onPermissionModeChange}
+                sandboxTerminal={sandboxTerminal}
+                onSandboxTerminalChange={onSandboxTerminalChange}
+              />
+            </div>
+
             {/* RIGHT: attach (inert stub) + send */}
-            <div className="flex items-center gap-1">
+            <div className="flex shrink-0 items-center gap-1">
               <Button
                 variant="ghost"
                 size="icon"
@@ -303,24 +316,6 @@ export function NewSession({
               </Button>
             </div>
           </div>
-        </div>
-
-        {/* Edit automatically */}
-        <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          <Switch
-            id="auto-edit"
-            checked={autoEdit}
-            onCheckedChange={onAutoEditChange}
-            aria-label="Edit automatically"
-          />
-          {autoEdit ? (
-            <LockOpen className="size-4" />
-          ) : (
-            <Lock className="size-4" />
-          )}
-          <label htmlFor="auto-edit" className="cursor-pointer select-none">
-            Edit automatically
-          </label>
         </div>
       </div>
     </div>

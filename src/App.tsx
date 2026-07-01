@@ -63,6 +63,12 @@ import {
   type StoredEvent,
 } from "./lib/sessions";
 import { groupByWorkspace } from "./lib/workspaces";
+import {
+  coercePermissionMode,
+  permissionModeLabel,
+  DEFAULT_PERMISSION_MODE,
+  type PermissionMode,
+} from "./lib/permissions";
 import { filesFromEvents, latestUsage } from "./lib/contextDerive";
 import {
   inspectRules,
@@ -130,6 +136,26 @@ function storedNumber(key: string, fallback: number, min: number, max: number): 
   }
 }
 
+/** The remembered default permission mode for NEW sessions, from localStorage. */
+const PERMISSION_MODE_KEY = "kineloop.defaultPermissionMode";
+const PERMISSION_MODES: readonly PermissionMode[] = [
+  "plan",
+  "default",
+  "acceptEdits",
+  "full",
+  "dontAsk",
+];
+function storedPermissionMode(): PermissionMode {
+  try {
+    const raw = localStorage.getItem(PERMISSION_MODE_KEY);
+    return raw && (PERMISSION_MODES as readonly string[]).includes(raw)
+      ? (raw as PermissionMode)
+      : DEFAULT_PERMISSION_MODE;
+  } catch {
+    return DEFAULT_PERMISSION_MODE;
+  }
+}
+
 /** Derive a short display title from the first non-empty line of the prompt. */
 function titleFromPrompt(text: string): string {
   const line =
@@ -187,7 +213,23 @@ export default function App() {
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [selectedAgent, setSelectedAgent] = useState<AgentInfo | null>(null);
   const [selectedRepo, setSelectedRepo] = useState<string | null>(null);
-  const [autoEdit, setAutoEdit] = useState(false);
+  // Permission mode for the NEW Session composer — remembered across launches as the
+  // user's preferred default. Its Antigravity terminal-sandbox toggle is transient.
+  const [newSessionPermissionMode, setNewSessionPermissionMode] =
+    useState<PermissionMode>(storedPermissionMode);
+  // Mirror of the composer mode for reading inside callbacks without stale-closure deps.
+  const newSessionPermissionModeRef = useRef(newSessionPermissionMode);
+  newSessionPermissionModeRef.current = newSessionPermissionMode;
+  const [newSessionSandbox, setNewSessionSandbox] = useState(false);
+  // Per-session permission mode + sandbox overrides, keyed by session id. These hold the
+  // user's pending choice optimistically until the backend persists it (and seed the
+  // dropdown for a session before its persisted value round-trips through list_sessions).
+  const [sessionPermissionValues, setSessionPermissionValues] = useState<
+    Record<string, PermissionMode>
+  >({});
+  const [sessionSandboxValues, setSessionSandboxValues] = useState<Record<string, boolean>>(
+    {},
+  );
   const [recents, setRecents] = useState<string[]>([]);
   const [sessionSearch, setSessionSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
@@ -513,6 +555,25 @@ export default function App() {
     }
   }, []);
 
+  // Agents support different permission modes; when the composer's target agent changes,
+  // coerce the New Session mode to one the agent supports (always resolving DOWN to a safe
+  // mode, never escalating to Full). Surface the change so it's never silent.
+  const applyComposerModeForAgent = useCallback((agentId: string, agentLabel: string) => {
+    const prev = newSessionPermissionModeRef.current;
+    const { mode, changed } = coercePermissionMode(prev, agentId);
+    if (!changed) return;
+    newSessionPermissionModeRef.current = mode;
+    setNewSessionPermissionMode(mode);
+    toast.info(
+      `${agentLabel} doesn't support "${permissionModeLabel(prev)}"; using "${permissionModeLabel(mode)}".`,
+    );
+    try {
+      localStorage.setItem(PERMISSION_MODE_KEY, mode);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
   // The agent picker is the source of truth: changing the agent narrows the model
   // list to that agent and selects its first model, so the two controls never
   // disagree. (A null match leaves the selection so an empty agent can't blank it.)
@@ -524,20 +585,25 @@ export default function App() {
           ? prev
           : (models.find((m) => m.agent === a.id) ?? prev),
       );
+      applyComposerModeForAgent(a.id, a.label);
     },
-    [models],
+    [models, applyComposerModeForAgent],
   );
 
   // Selecting a model also syncs the agent back to that model's agent, so the
-  // pair stays consistent regardless of which control the user touches.
+  // pair stays consistent regardless of which control the user touches — including
+  // coercing the permission mode when the model belongs to a different agent.
   const handleModelChange = useCallback(
     (m: ModelInfo) => {
       setSelectedModel(m);
       setSelectedAgent((prev) =>
         prev?.id === m.agent ? prev : (agents.find((a) => a.id === m.agent) ?? prev),
       );
+      // If the picked model belongs to a different agent, coerce the mode to match.
+      const nextAgent = agents.find((a) => a.id === m.agent);
+      if (nextAgent) applyComposerModeForAgent(nextAgent.id, nextAgent.label);
     },
-    [agents],
+    [agents, applyComposerModeForAgent],
   );
 
   // Models for the currently selected agent — what the New Session model picker
@@ -566,6 +632,40 @@ export default function App() {
 
   function handleSessionModelChange(sessionId: string, model: ModelInfo) {
     setSessionModelValues((prev) => ({ ...prev, [sessionId]: model.value }));
+  }
+
+  // Remember the New Session composer's mode as the cross-launch default.
+  function handleNewSessionPermissionModeChange(mode: PermissionMode) {
+    setNewSessionPermissionMode(mode);
+    try {
+      localStorage.setItem(PERMISSION_MODE_KEY, mode);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  // The effective permission mode / sandbox flag for a session: the user's pending
+  // override wins, then the persisted value from the session row, then the safe default.
+  function permissionModeForSession(session: SessionSummary | null): PermissionMode {
+    if (session === null) return newSessionPermissionMode;
+    return (
+      sessionPermissionValues[session.id] ??
+      (session.permissionMode as PermissionMode | null | undefined) ??
+      DEFAULT_PERMISSION_MODE
+    );
+  }
+
+  function sandboxForSession(session: SessionSummary | null): boolean {
+    if (session === null) return newSessionSandbox;
+    return sessionSandboxValues[session.id] ?? session.sandboxTerminal ?? false;
+  }
+
+  function setSessionPermissionMode(sessionId: string, mode: PermissionMode) {
+    setSessionPermissionValues((prev) => ({ ...prev, [sessionId]: mode }));
+  }
+
+  function setSessionSandbox(sessionId: string, value: boolean) {
+    setSessionSandboxValues((prev) => ({ ...prev, [sessionId]: value }));
   }
 
   // Sidebar toggle — persists the new value to localStorage immediately.
@@ -1058,7 +1158,8 @@ export default function App() {
     model: ModelInfo | null,
     opts?: {
       repo?: string;
-      permissionMode?: string;
+      permissionMode?: PermissionMode;
+      sandboxTerminal?: boolean;
       agent?: string;
       sessionId?: string | null;
       paneId?: string;
@@ -1078,6 +1179,20 @@ export default function App() {
     const sessionId = isNew ? crypto.randomUUID() : currentSessionId;
     const repo = opts?.repo ?? currentSession?.repo ?? ".";
     const modelArg = model?.value;
+    // Effective permission mode + terminal sandbox for this send: an explicit opt (the New
+    // Session composer) wins; otherwise the pane session's pending override, then its
+    // persisted value, then the safe default.
+    const permissionKey = currentSessionId;
+    const effectivePermissionMode: PermissionMode =
+      opts?.permissionMode ??
+      (permissionKey ? sessionPermissionValues[permissionKey] : undefined) ??
+      (currentSession?.permissionMode as PermissionMode | null | undefined) ??
+      DEFAULT_PERMISSION_MODE;
+    const effectiveSandbox: boolean =
+      opts?.sandboxTerminal ??
+      (permissionKey ? sessionSandboxValues[permissionKey] : undefined) ??
+      currentSession?.sandboxTerminal ??
+      false;
     const preferredAgent = opts?.agent ?? model?.agent ?? currentSession?.agent ?? "claude";
     const startAgent = isAgentSpawnable(preferredAgent)
       ? preferredAgent
@@ -1111,6 +1226,8 @@ export default function App() {
             turnCount: null,
             toolCallCount: null,
             fileActionCount: null,
+            permissionMode: effectivePermissionMode,
+            sandboxTerminal: effectiveSandbox,
             createdAt: now,
             updatedAt: now,
           };
@@ -1120,6 +1237,10 @@ export default function App() {
     if (modelArg) {
       setSessionModelValues((prev) => ({ ...prev, [sessionId]: modelArg }));
     }
+    // Seed the (possibly new) session's mode so its PromptBar dropdown reflects the choice
+    // immediately, before the persisted value round-trips through refreshSessions().
+    setSessionPermissionValues((prev) => ({ ...prev, [sessionId]: effectivePermissionMode }));
+    setSessionSandboxValues((prev) => ({ ...prev, [sessionId]: effectiveSandbox }));
     setRunningSessionIds((prev) => new Set(prev).add(sessionId));
     setSessionTurns(sessionId, (prev) => [...prev, { prompt: text, events: [] }]);
     appendStoredEvent(sessionId, "prompt", { text });
@@ -1141,7 +1262,8 @@ export default function App() {
           sessionId,
           agent: startAgent,
           model: modelArg,
-          permissionMode: opts?.permissionMode ?? (autoEdit ? "acceptEdits" : "default"),
+          permissionMode: effectivePermissionMode,
+          sandboxTerminal: effectiveSandbox,
           // Inherit the CLI-history session's displayed title so the continuation reads
           // as a continuation of it, not a new session named after the first message.
           title: currentSession?.title,
@@ -1154,7 +1276,8 @@ export default function App() {
           sessionId,
           agent: startAgent,
           model: modelArg,
-          permissionMode: opts?.permissionMode,
+          permissionMode: effectivePermissionMode,
+          sandboxTerminal: effectiveSandbox,
           onEvent,
         });
       } else {
@@ -1162,7 +1285,8 @@ export default function App() {
           sessionId,
           prompt: text,
           model: modelArg,
-          permissionMode: autoEdit ? "acceptEdits" : "default",
+          permissionMode: effectivePermissionMode,
+          sandboxTerminal: effectiveSandbox,
           onEvent,
         });
       }
@@ -1194,7 +1318,8 @@ export default function App() {
   function handleStartNewSession(text: string, paneId?: string) {
     return handleSend(text, selectedModel, {
       repo: selectedRepo ?? ".",
-      permissionMode: autoEdit ? "acceptEdits" : "default",
+      permissionMode: newSessionPermissionMode,
+      sandboxTerminal: newSessionSandbox,
       agent: selectedAgent?.id ?? selectedModel?.agent ?? "claude",
       sessionId: null,
       paneId,
@@ -1490,7 +1615,8 @@ export default function App() {
                             agent={selectedAgent}
                             models={modelsForSelectedAgent}
                             model={selectedModel}
-                            autoEdit={autoEdit}
+                            permissionMode={newSessionPermissionMode}
+                            sandboxTerminal={newSessionSandbox}
                             running={false}
                             onPickRepo={pickRepo}
                             onPickRecent={(p) => {
@@ -1498,7 +1624,8 @@ export default function App() {
                             }}
                             onAgentChange={handleAgentChange}
                             onModelChange={handleModelChange}
-                            onAutoEditChange={setAutoEdit}
+                            onPermissionModeChange={handleNewSessionPermissionModeChange}
+                            onSandboxTerminalChange={setNewSessionSandbox}
                             onStart={(text) => handleStartNewSession(text, pane.id)}
                           />
                         </div>
@@ -1581,8 +1708,15 @@ export default function App() {
                               handleModelChange(model);
                             }
                           }}
-                          autoEdit={autoEdit}
-                          onAutoEditChange={setAutoEdit}
+                          agent={paneAgent}
+                          permissionMode={permissionModeForSession(paneSession)}
+                          onPermissionModeChange={(m) =>
+                            setSessionPermissionMode(pane.sessionId!, m)
+                          }
+                          sandboxTerminal={sandboxForSession(paneSession)}
+                          onSandboxTerminalChange={(v) =>
+                            setSessionSandbox(pane.sessionId!, v)
+                          }
                           mode={
                             paneSession?.source === "external"
                               ? "external-continuation"

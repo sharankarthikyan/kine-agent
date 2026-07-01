@@ -13,6 +13,12 @@ test("renders a token event's text", () => {
   expect(screen.getByText("Hello")).toBeInTheDocument();
 });
 
+test("renders a transcript status event as inline text", () => {
+  const events: AgentEvent[] = [{ kind: "status", data: { text: "Compacted" } }];
+  render(<EventStream events={events} />);
+  expect(screen.getByText("Compacted")).toBeInTheDocument();
+});
+
 test("renders agent token text as Markdown (bold, code)", () => {
   const events: AgentEvent[] = [
     { kind: "token", data: { text: "Use **bold** and `code` here" } },

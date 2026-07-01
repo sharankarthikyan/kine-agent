@@ -6,14 +6,20 @@ use std::path::PathBuf;
 /// `haiku`, `fable`; or a full model id like `claude-opus-4-5`). `None` leaves the flag
 /// absent, deferring to the CLI's own default — today's behaviour is preserved.
 ///
-/// `permission_mode` is forwarded to `--permission-mode` on the CLI after command-layer
-/// validation. Allowed values are `"default"`, `"acceptEdits"`, and `"plan"`. `None`
-/// omits the flag, preserving the CLI default.
-#[derive(Debug, Clone)]
+/// `permission_mode` carries the unified permission mode id after command-layer
+/// validation — one of `"default"`, `"acceptEdits"`, `"plan"`, `"full"`, `"dontAsk"`,
+/// or `"auto"` (see [`crate::permission::PermissionMode`]). Each adapter maps it onto
+/// that CLI's real flags; `None` leaves the CLI's own default in place.
+///
+/// `sandbox_terminal` is an Antigravity-only orthogonal control: when true it passes
+/// `agy --sandbox` to restrict terminal commands' network/disk access. Other adapters
+/// ignore it. Defaults to false.
+#[derive(Debug, Clone, Default)]
 pub struct Prompt {
     pub text: String,
     pub model: Option<String>,
     pub permission_mode: Option<String>,
+    pub sandbox_terminal: bool,
 }
 
 /// Fatal session-level failure (the agent never ran or died). In-band errors the
@@ -59,11 +65,11 @@ mod tests {
     fn prompt_holds_text() {
         let p = Prompt {
             text: "do it".into(),
-            model: None,
-            permission_mode: None,
+            ..Default::default()
         };
         assert_eq!(p.text, "do it");
         assert!(p.model.is_none());
+        assert!(!p.sandbox_terminal);
     }
 
     #[test]
@@ -71,7 +77,7 @@ mod tests {
         let p = Prompt {
             text: "do it".into(),
             model: Some("opus".into()),
-            permission_mode: None,
+            ..Default::default()
         };
         assert_eq!(p.model.as_deref(), Some("opus"));
     }

@@ -16,6 +16,7 @@ export function assertDesktop(): void {
 
 export type AgentEvent =
   | { kind: "token"; data: { text: string } }
+  | { kind: "status"; data: { text: string } }
   | { kind: "toolCall"; data: { name: string; input: string } }
   | { kind: "fileWrite"; data: { path: string } }
   | { kind: "approvalNeeded"; data: { prompt: string } }
@@ -41,8 +42,13 @@ export interface StartSessionArgs {
   agent?: string;
   /** Model id/alias forwarded to the agent CLI's --model. Omit to use the CLI default. */
   model?: string;
-  /** Permission mode forwarded to the agent CLI. The backend only allows default, acceptEdits, and plan. */
+  /**
+   * Unified permission mode forwarded to the agent CLI. One of: default, acceptEdits,
+   * plan, full, dontAsk, auto. Each adapter maps it onto that CLI's real flags.
+   */
   permissionMode?: string;
+  /** Antigravity-only: restrict terminal commands' network/disk access (`agy --sandbox`). */
+  sandboxTerminal?: boolean;
   onEvent: (event: AgentEvent) => void;
 }
 
@@ -52,11 +58,11 @@ export interface StartSessionArgs {
  * render an optimistic row immediately). The backend creates an isolated
  * worktree for the session and events stream back via `onEvent`.
  */
-export async function startSession({ prompt, repo, sessionId, agent, model, permissionMode, onEvent }: StartSessionArgs): Promise<void> {
+export async function startSession({ prompt, repo, sessionId, agent, model, permissionMode, sandboxTerminal, onEvent }: StartSessionArgs): Promise<void> {
   assertDesktop();
   const channel = new Channel<AgentEvent>();
   channel.onmessage = onEvent;
-  await invoke("start_session", { prompt, repo, sessionId, agent, model, permissionMode, onEvent: channel });
+  await invoke("start_session", { prompt, repo, sessionId, agent, model, permissionMode, sandboxTerminal, onEvent: channel });
 }
 
 /** Remove the worktree and branch for a finished session. */
@@ -80,8 +86,10 @@ export interface SendMessageArgs {
   prompt: string;
   /** Claude CLI model alias (e.g. "opus", "sonnet", "haiku"). Omit to use the CLI default. */
   model?: string;
-  /** Permission mode forwarded to the agent CLI. The backend only allows default, acceptEdits, and plan. */
+  /** Unified permission mode: default, acceptEdits, plan, full, dontAsk, or auto. */
   permissionMode?: string;
+  /** Antigravity-only: restrict terminal commands' network/disk access. */
+  sandboxTerminal?: boolean;
   onEvent: (event: AgentEvent) => void;
 }
 
@@ -93,8 +101,10 @@ export interface ContinueExternalSessionArgs {
   agent?: string;
   /** Model id/alias forwarded to the adopted session's agent CLI. */
   model?: string;
-  /** Permission mode forwarded to the adopted session's agent CLI. */
+  /** Unified permission mode forwarded to the adopted session's agent CLI. */
   permissionMode?: string;
+  /** Antigravity-only: restrict terminal commands' network/disk access. */
+  sandboxTerminal?: boolean;
   /** The originating CLI-history session's title, so the continuation inherits it. */
   title?: string;
   onEvent: (event: AgentEvent) => void;
@@ -113,11 +123,11 @@ export async function listTrustedRepos(): Promise<string[]> {
 }
 
 /** Continue an existing session with a follow-up message. */
-export async function sendMessage({ sessionId, prompt, model, permissionMode, onEvent }: SendMessageArgs): Promise<void> {
+export async function sendMessage({ sessionId, prompt, model, permissionMode, sandboxTerminal, onEvent }: SendMessageArgs): Promise<void> {
   assertDesktop();
   const channel = new Channel<AgentEvent>();
   channel.onmessage = onEvent;
-  await invoke("send_message", { sessionId, prompt, model, permissionMode, onEvent: channel });
+  await invoke("send_message", { sessionId, prompt, model, permissionMode, sandboxTerminal, onEvent: channel });
 }
 
 /** Adopt an imported CLI history session into a new writable Kineloop continuation. */
@@ -128,6 +138,7 @@ export async function continueExternalSession({
   agent,
   model,
   permissionMode,
+  sandboxTerminal,
   title,
   onEvent,
 }: ContinueExternalSessionArgs): Promise<void> {
@@ -141,6 +152,7 @@ export async function continueExternalSession({
     agent,
     model,
     permissionMode,
+    sandboxTerminal,
     title,
     onEvent: channel,
   });

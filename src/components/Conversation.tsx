@@ -84,14 +84,16 @@ export function Conversation({
       {turns.map((turn, i) => (
         <div key={i} className="flex flex-col gap-3">
           {/* User message: subtle muted bubble, contained (not full-width). */}
-          <section className="flex flex-col gap-2 items-end">
-            <div className="text-xs font-medium text-muted-foreground">
-              You
-            </div>
-            <div className="self-end max-w-prose rounded-lg bg-muted px-4 py-3 text-foreground whitespace-pre-wrap">
-              {turn.prompt}
-            </div>
-          </section>
+          {turn.prompt.trim() !== "" && (
+            <section className="flex flex-col gap-2 items-end">
+              <div className="text-xs font-medium text-muted-foreground">
+                You
+              </div>
+              <div className="self-end max-w-prose rounded-lg bg-muted px-4 py-3 text-foreground whitespace-pre-wrap">
+                {turn.prompt}
+              </div>
+            </section>
+          )}
           {/* Agent output: plain on the canvas — room for prose, chips, code. */}
           {turn.events.length > 0 && (
             <section className="flex flex-col gap-2">

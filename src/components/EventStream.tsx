@@ -81,6 +81,13 @@ function renderEvent(
       // Agent prose is Markdown and is the dominant element of the turn.
       return <Markdown>{event.data.text}</Markdown>;
 
+    case "status":
+      return (
+        <div className="text-sm font-medium text-muted-foreground">
+          {event.data.text}
+        </div>
+      );
+
     case "toolCall": {
       const summary = describeToolCall(event.data.name, event.data.input);
       const filePath = fileTargetPath(event.data.name, event.data.input);
@@ -138,10 +145,13 @@ function renderEvent(
     }
 
     case "approvalNeeded":
-      // The one event that earns a real card — it's an interactive gate.
+      // The agent reported an action it can't take without approval. Kineloop runs agents
+      // headless (no live approval channel yet), so this is an informational notice, not an
+      // answerable prompt: pick a more permissive mode (Auto-edit / Full access) to let the
+      // agent proceed. (Interactive approval for Claude is tracked separately.)
       return (
         <Alert className="w-full">
-          <AlertTitle>Needs approval</AlertTitle>
+          <AlertTitle>Approval required</AlertTitle>
           <AlertDescription>{event.data.prompt}</AlertDescription>
         </Alert>
       );

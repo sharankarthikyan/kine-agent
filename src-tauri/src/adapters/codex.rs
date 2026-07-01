@@ -42,16 +42,6 @@ impl AgentAdapter for CodexAdapter {
     }
 }
 
-/// Map Kineloop's permission mode to a Codex `--sandbox` mode. Headless `codex exec`
-/// has no interactive approval prompt, so the sandbox mode is the only blast-radius
-/// control. `acceptEdits`/`default` allow writes inside the worktree; `plan` is read-only.
-fn sandbox_for(permission_mode: Option<&str>) -> &'static str {
-    match permission_mode {
-        Some("plan") => "read-only",
-        _ => "workspace-write",
-    }
-}
-
 /// Parse one `codex exec --json` event line into zero or more AgentEvents.
 ///
 /// Returns an empty Vec for blank lines, non-JSON input, and event types we don't
@@ -192,10 +182,26 @@ pub async fn spawn_and_stream(
     captured_thread: Arc<Mutex<Option<String>>>,
 ) -> Result<(), SessionError> {
     let model = prompt.model.as_deref();
-    let sandbox = sandbox_for(prompt.permission_mode.as_deref());
+    // Headless `codex exec` has no interactive approval prompt, so the sandbox tier (or a
+    // full bypass) is the only blast-radius control. Default `read-only`: "ask before
+    // edits" genuinely doesn't write when there's no live approver. Unknown/None ⇒ Default.
+    let mode = prompt
+        .permission_mode
+        .as_deref()
+        .and_then(crate::permission::PermissionMode::from_wire)
+        .unwrap_or(crate::permission::PermissionMode::Default);
 
     let mut command = Command::new(crate::agent_paths::resolve_program("codex"));
     command.arg("exec");
+    // The sandbox/bypass flag is an `exec`-level option and MUST precede the `resume`
+    // subcommand (`codex exec -s <tier> resume <id>` is accepted; `codex exec resume -s`
+    // is not). Applying it on resume too — unlike the old code, which only set it on new
+    // runs — is what makes a mid-session mode change actually take effect.
+    if mode.is_full() {
+        command.arg("--dangerously-bypass-approvals-and-sandbox");
+    } else {
+        command.arg("--sandbox").arg(mode.codex_sandbox());
+    }
     if resume {
         // `session_id` here is the Codex thread id captured from the first run.
         command.arg("resume").arg(&session_id);
@@ -204,10 +210,9 @@ pub async fn spawn_and_stream(
     if let Some(m) = model {
         command.arg("--model").arg(m);
     }
-    // `--sandbox`/`--cd` are only accepted by `codex exec` (new runs); `exec resume`
-    // reuses the original session's config and the process cwd.
+    // `--cd` is only accepted on new runs; `exec resume` reuses the original session's cwd.
     if !resume {
-        command.arg("--sandbox").arg(sandbox).arg("--cd").arg(&cwd);
+        command.arg("--cd").arg(&cwd);
     }
     command.arg(&prompt.text);
 
@@ -374,9 +379,12 @@ mod tests {
 
     #[test]
     fn sandbox_mapping_matches_permission_mode() {
-        assert_eq!(sandbox_for(Some("plan")), "read-only");
-        assert_eq!(sandbox_for(Some("acceptEdits")), "workspace-write");
-        assert_eq!(sandbox_for(Some("default")), "workspace-write");
-        assert_eq!(sandbox_for(None), "workspace-write");
+        use crate::permission::PermissionMode;
+        // Plan and Default are both read-only headless (no live approver); acceptEdits
+        // writes; Full is not a sandbox tier — it uses the bypass flag instead.
+        assert_eq!(PermissionMode::Plan.codex_sandbox(), "read-only");
+        assert_eq!(PermissionMode::Default.codex_sandbox(), "read-only");
+        assert_eq!(PermissionMode::AcceptEdits.codex_sandbox(), "workspace-write");
+        assert!(PermissionMode::Full.is_full());
     }
 }

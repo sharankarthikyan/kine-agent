@@ -19,6 +19,15 @@ test("renders multiple turns with their prompts and events", () => {
   expect(screen.getAllByText("You")).toHaveLength(2);
 });
 
+test("does not render an empty user bubble for event-only turns", () => {
+  const turns: Turn[] = [
+    { prompt: "", events: [{ kind: "status", data: { text: "Compacted" } }] },
+  ];
+  render(<Conversation turns={turns} running={false} />);
+  expect(screen.getByText("Compacted")).toBeInTheDocument();
+  expect(screen.queryByText("You")).not.toBeInTheDocument();
+});
+
 test("shows the running indicator while working", () => {
   const turns: Turn[] = [{ prompt: "x", events: [] }];
   render(<Conversation turns={turns} running={true} />);

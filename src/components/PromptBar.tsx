@@ -4,15 +4,14 @@ import {
   ChevronDown,
   Check,
   GitBranchPlus,
-  Lock,
-  LockOpen,
   Paperclip,
   Square,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { Switch } from "@/components/ui/switch";
+import { PermissionModeSelect } from "@/components/PermissionModeSelect";
+import { type PermissionMode } from "@/lib/permissions";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -31,10 +30,15 @@ interface PromptBarProps {
   models: ModelInfo[];
   model: ModelInfo | null;
   onModelChange: (m: ModelInfo) => void;
-  /** Whether follow-up messages auto-accept edits without approval prompts. */
-  autoEdit?: boolean;
-  /** Called when the user toggles the "Edit automatically" switch. */
-  onAutoEditChange?: (v: boolean) => void;
+  /** The session's agent, so the permission dropdown offers the right modes. */
+  agent: string;
+  /** The session's current permission mode. */
+  permissionMode: PermissionMode;
+  /** Called when the user picks a different permission mode. */
+  onPermissionModeChange: (mode: PermissionMode) => void;
+  /** Antigravity-only terminal sandbox toggle. */
+  sandboxTerminal?: boolean;
+  onSandboxTerminalChange?: (v: boolean) => void;
   /** Stop the in-flight run. When provided, a Stop button replaces Send while running. */
   onStop?: () => void;
   /** External CLI history is read-only; sending forks it into a writable continuation. */
@@ -63,8 +67,11 @@ export function PromptBar({
   models,
   model,
   onModelChange,
-  autoEdit = false,
-  onAutoEditChange = () => {},
+  agent,
+  permissionMode,
+  onPermissionModeChange,
+  sandboxTerminal = false,
+  onSandboxTerminalChange,
   onStop,
   mode = "default",
 }: PromptBarProps) {
@@ -138,24 +145,10 @@ export function PromptBar({
           </div>
         )}
 
-        {/* Edit automatically — controls autonomy for follow-up messages */}
-        <div className="flex items-center gap-2 px-1">
-          <Switch
-            checked={autoEdit}
-            onCheckedChange={onAutoEditChange}
-            aria-label="Edit automatically"
-          />
-          {autoEdit ? (
-            <LockOpen className="size-3.5 text-muted-foreground" aria-hidden />
-          ) : (
-            <Lock className="size-3.5 text-muted-foreground" aria-hidden />
-          )}
-          <span className="text-xs text-muted-foreground select-none">Edit automatically</span>
-        </div>
-
         {/* Bottom action row */}
-        <div className="flex items-center justify-between">
-          {/* LEFT: model / agent selector */}
+        <div className="flex items-center justify-between gap-2">
+          {/* LEFT: model + permission selectors, side by side */}
+          <div className="flex min-w-0 items-center gap-1">
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button
@@ -172,11 +165,11 @@ export function PromptBar({
 
             <DropdownMenuContent align="start" className="min-w-56">
               {hasModels ? (
-                groups.map(([agent, agentModels], groupIndex) => (
-                  <DropdownMenuGroup key={agent}>
+                groups.map(([groupAgent, agentModels], groupIndex) => (
+                  <DropdownMenuGroup key={groupAgent}>
                     {groupIndex > 0 && <DropdownMenuSeparator />}
                     <DropdownMenuLabel className="text-xs text-muted-foreground font-medium">
-                      {agentLabel(agent)}
+                      {agentLabel(groupAgent)}
                     </DropdownMenuLabel>
                     {agentModels.map((m) => (
                       <DropdownMenuItem
@@ -210,8 +203,17 @@ export function PromptBar({
             </DropdownMenuContent>
           </DropdownMenu>
 
+            <PermissionModeSelect
+              agent={agent}
+              value={permissionMode}
+              onChange={onPermissionModeChange}
+              sandboxTerminal={sandboxTerminal}
+              onSandboxTerminalChange={onSandboxTerminalChange}
+            />
+          </div>
+
           {/* RIGHT: attach + send */}
-          <div className="flex items-center gap-1">
+          <div className="flex shrink-0 items-center gap-1">
             <Button variant="ghost" size="icon" aria-label="Attach" className="size-9" disabled>
               <Paperclip data-icon />
             </Button>

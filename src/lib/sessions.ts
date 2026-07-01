@@ -14,6 +14,14 @@ export interface SessionSummary {
   turnCount: number | null;
   toolCallCount: number | null;
   fileActionCount: number | null;
+  /**
+   * The unified permission mode last used for this session, or null before any run
+   * recorded one (and always null for external CLI-history sessions). Optional so test
+   * fixtures needn't set it; the backend always sends it for Kineloop sessions.
+   */
+  permissionMode?: string | null;
+  /** Antigravity terminal-sandbox toggle last used. Absent ⇒ false. */
+  sandboxTerminal?: boolean;
   createdAt: number;
   updatedAt: number;
 }

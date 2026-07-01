@@ -70,10 +70,21 @@ pub async fn spawn_and_stream(
     if let Some(m) = prompt.model.as_deref() {
         command.arg("--model").arg(m);
     }
-    // Auto-approve tool permissions only when the user opted into auto-edit; otherwise
-    // leave the CLI's default gating in place.
-    if prompt.permission_mode.as_deref() == Some("acceptEdits") {
+    // `agy --print` has no edits-only tier — its only permission lever is blanket
+    // skip-all — so only Full auto-approves everything; every other mode leaves the CLI's
+    // settings-based gating in place. (Unknown/None ⇒ Default ⇒ gated.)
+    let mode = prompt
+        .permission_mode
+        .as_deref()
+        .and_then(crate::permission::PermissionMode::from_wire)
+        .unwrap_or(crate::permission::PermissionMode::Default);
+    if mode.antigravity_skip_permissions() {
         command.arg("--dangerously-skip-permissions");
+    }
+    // Orthogonal terminal sandbox: restrict shell commands' network/disk access. This is
+    // independent of the permission mode (you can gate edits AND sandbox the terminal).
+    if prompt.sandbox_terminal {
+        command.arg("--sandbox");
     }
     if resume {
         command.arg("--conversation").arg(&session_id);

@@ -7,6 +7,7 @@ pub mod external_sessions;
 pub mod git;
 pub mod inspect;
 pub mod models;
+pub mod permission;
 pub mod review;
 pub mod store;
 pub mod worktree;

@@ -373,6 +373,9 @@ fn summarize_claude(path: &Path) -> Option<SessionSummary> {
         title: title.unwrap_or_else(|| "Claude CLI session".to_string()),
         status: "idle".to_string(),
         source: "external".to_string(),
+        // Kineloop doesn't own external runs, so it has no permission setting for them.
+        permission_mode: None,
+        sandbox_terminal: false,
         turn_count: Some(turn_count),
         tool_call_count: Some(tool_call_count),
         file_action_count: Some(file_actions.len() as u32),
@@ -415,13 +418,16 @@ fn summarize_codex(path: &Path) -> Option<SessionSummary> {
             Some("event_msg") => {
                 let payload = value.get("payload").unwrap_or(&Value::Null);
                 if payload.get("type").and_then(Value::as_str) == Some("user_message") {
-                    has_conversation = true;
-                    turn_count = turn_count.saturating_add(1);
-                    if title.is_none() {
-                        title = payload
-                            .get("message")
-                            .and_then(Value::as_str)
-                            .map(title_from_text);
+                    if let Some(text) = payload
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .and_then(visible_external_prompt_text)
+                    {
+                        has_conversation = true;
+                        turn_count = turn_count.saturating_add(1);
+                        if title.is_none() {
+                            title = Some(title_from_text(&text));
+                        }
                     }
                 }
             }
@@ -463,6 +469,9 @@ fn summarize_codex(path: &Path) -> Option<SessionSummary> {
         title: title.unwrap_or_else(|| "Codex CLI session".to_string()),
         status: "idle".to_string(),
         source: "external".to_string(),
+        // Kineloop doesn't own external runs, so it has no permission setting for them.
+        permission_mode: None,
+        sandbox_terminal: false,
         turn_count: Some(turn_count),
         tool_call_count: Some(tool_call_count),
         file_action_count: Some(file_actions.len() as u32),
@@ -501,6 +510,10 @@ fn claude_event_pairs(value: &Value) -> Vec<(String, Value)> {
         Some("user") => {
             if let Some(text) = claude_user_text(value) {
                 events.push(("prompt".to_string(), serde_json::json!({ "text": text })));
+            } else if let Some(text) =
+                claude_user_raw_text(value).and_then(|text| external_control_status_text(&text))
+            {
+                events.push(("status".to_string(), serde_json::json!({ "text": text })));
             }
         }
         Some("assistant") => {
@@ -575,7 +588,11 @@ fn codex_event_pairs(value: &Value) -> Vec<(String, Value)> {
             if payload.get("type").and_then(Value::as_str) == Some("user_message") =>
         {
             if let Some(text) = payload.get("message").and_then(Value::as_str) {
-                events.push(("prompt".to_string(), serde_json::json!({ "text": text })));
+                if let Some(prompt) = visible_external_prompt_text(text) {
+                    events.push(("prompt".to_string(), serde_json::json!({ "text": prompt })));
+                } else if let Some(status) = external_control_status_text(text) {
+                    events.push(("status".to_string(), serde_json::json!({ "text": status })));
+                }
             }
         }
         Some("response_item") => match payload.get("type").and_then(Value::as_str) {
@@ -676,6 +693,9 @@ fn summarize_gemini(path: &Path) -> Option<SessionSummary> {
         title: title.unwrap_or_else(|| "Gemini CLI session".to_string()),
         status: "idle".to_string(),
         source: "external".to_string(),
+        // Kineloop doesn't own external runs, so it has no permission setting for them.
+        permission_mode: None,
+        sandbox_terminal: false,
         turn_count: Some(turn_count),
         tool_call_count: Some(tool_call_count),
         file_action_count: Some(file_actions.len() as u32),
@@ -697,6 +717,10 @@ fn parse_gemini_events(path: &Path) -> Vec<StoredEvent> {
             Some("user") => {
                 if let Some(text) = gemini_user_text(message) {
                     push_event(&mut out, "prompt", serde_json::json!({ "text": text }));
+                } else if let Some(text) = gemini_user_raw_text(message)
+                    .and_then(|text| external_control_status_text(&text))
+                {
+                    push_event(&mut out, "status", serde_json::json!({ "text": text }));
                 }
             }
             Some("gemini") => {
@@ -738,11 +762,14 @@ fn parse_gemini_events(path: &Path) -> Vec<StoredEvent> {
 /// plain string or an array of `{ "text": ... }` blocks (e.g. with `@file`
 /// mentions). Returns `None` for empty content so blank turns aren't counted.
 fn gemini_user_text(message: &Value) -> Option<String> {
+    gemini_user_raw_text(message).and_then(|text| visible_external_prompt_text(&text))
+}
+
+fn gemini_user_raw_text(message: &Value) -> Option<String> {
     let content = message.get("content")?;
 
     if let Some(s) = content.as_str() {
-        let trimmed = s.trim();
-        return (!trimmed.is_empty()).then(|| trimmed.to_string());
+        return Some(s.to_string());
     }
 
     if let Some(blocks) = content.as_array() {
@@ -751,8 +778,7 @@ fn gemini_user_text(message: &Value) -> Option<String> {
             .filter_map(|b| b.get("text").and_then(Value::as_str))
             .collect::<Vec<_>>()
             .join("\n");
-        let trimmed = text.trim();
-        return (!trimmed.is_empty()).then(|| trimmed.to_string());
+        return (!text.trim().is_empty()).then_some(text);
     }
 
     None
@@ -837,6 +863,9 @@ fn summarize_antigravity(path: &Path) -> Option<SessionSummary> {
         title: title.unwrap_or_else(|| "Antigravity CLI session".to_string()),
         status: "idle".to_string(),
         source: "external".to_string(),
+        // Kineloop doesn't own external runs, so it has no permission setting for them.
+        permission_mode: None,
+        sandbox_terminal: false,
         turn_count: Some(turn_count),
         tool_call_count: Some(tool_call_count),
         file_action_count: Some(file_actions.len() as u32),
@@ -875,6 +904,12 @@ fn antigravity_event_pairs(value: &Value) -> Vec<(String, Value)> {
         Some("USER_INPUT") => {
             if let Some(text) = antigravity_user_text(value) {
                 events.push(("prompt".to_string(), serde_json::json!({ "text": text })));
+            } else if let Some(text) = value
+                .get("content")
+                .and_then(Value::as_str)
+                .and_then(external_control_status_text)
+            {
+                events.push(("status".to_string(), serde_json::json!({ "text": text })));
             }
         }
         Some("PLANNER_RESPONSE") => {
@@ -906,8 +941,7 @@ fn antigravity_event_pairs(value: &Value) -> Vec<(String, Value)> {
 fn antigravity_user_text(value: &Value) -> Option<String> {
     let content = value.get("content").and_then(Value::as_str)?;
     let inner = extract_xml_tag(content, "USER_REQUEST").unwrap_or(content);
-    let trimmed = inner.trim();
-    (!trimmed.is_empty()).then(|| trimmed.to_string())
+    visible_external_prompt_text(inner)
 }
 
 /// Extract the text between `<tag>` and `</tag>`. Returns `None` if either
@@ -998,7 +1032,7 @@ fn visit_json_lines(path: &Path, mut visit: impl FnMut(Value) -> bool) {
     loop {
         buf.clear();
         match reader.read_until(b'\n', &mut buf) {
-            Ok(0) => break,  // EOF
+            Ok(0) => break, // EOF
             Ok(_) => {}
             Err(_) => break, // stop on read error instead of looping on it
         }
@@ -1065,6 +1099,81 @@ fn visit_json_lines_reversed(path: &Path, mut visit: impl FnMut(Value) -> bool) 
     }
 }
 
+fn visible_external_prompt_text(text: &str) -> Option<String> {
+    let sanitized = sanitize_external_text(text);
+    let trimmed = sanitized.trim();
+    if trimmed.is_empty() || is_external_control_prompt(trimmed) {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn external_control_status_text(text: &str) -> Option<String> {
+    let extracted = extract_local_command_output(text)?;
+    let sanitized = sanitize_external_text(extracted);
+    let trimmed = sanitized.trim();
+    (!trimmed.is_empty()).then(|| title_from_text(trimmed))
+}
+
+fn extract_local_command_output(text: &str) -> Option<&str> {
+    extract_xml_tag(text, "local-command-stdout")
+        .or_else(|| extract_xml_tag(text, "local-command-stderr"))
+}
+
+fn sanitize_external_text(text: &str) -> String {
+    strip_ansi_sequences(text)
+        .chars()
+        .filter(|ch| {
+            *ch == '\n'
+                || *ch == '\t'
+                || !ch.is_control()
+                || matches!(*ch, '\u{200b}' | '\u{200c}' | '\u{200d}')
+        })
+        .collect()
+}
+
+fn strip_ansi_sequences(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if (ch == '\x1b' || ch == '\u{fffd}') && chars.peek() == Some(&'[') {
+            let _ = chars.next();
+            for terminator in chars.by_ref() {
+                if ('@'..='~').contains(&terminator) {
+                    break;
+                }
+            }
+            continue;
+        }
+        out.push(ch);
+    }
+
+    out
+}
+
+fn is_external_control_prompt(text: &str) -> bool {
+    const CONTROL_TAGS: &[&str] = &[
+        "command-name",
+        "command-message",
+        "command-args",
+        "local-command-stdout",
+        "local-command-stderr",
+        "local-command-caveat",
+    ];
+
+    CONTROL_TAGS
+        .iter()
+        .any(|tag| contains_xml_tag_pair(text, tag))
+}
+
+fn contains_xml_tag_pair(text: &str, tag: &str) -> bool {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    text.contains(&open) && text.contains(&close)
+}
+
 /// Extract a real user prompt's text from a Claude `type:"user"` entry.
 ///
 /// Claude stores BOTH genuine user prompts and tool results as `type:"user"`. A prompt's
@@ -1073,11 +1182,13 @@ fn visit_json_lines_reversed(path: &Path, mut visit: impl FnMut(Value) -> bool) 
 /// `tool_result` blocks. We return text for the former and `None` for the latter, so
 /// tool results are neither rendered as prompts nor counted as conversation turns.
 fn claude_user_text(value: &Value) -> Option<String> {
-    let content = value.get("message").and_then(|m| m.get("content"))?;
+    claude_user_raw_text(value).and_then(|text| visible_external_prompt_text(&text))
+}
 
+fn claude_user_raw_text(value: &Value) -> Option<String> {
+    let content = value.get("message").and_then(|m| m.get("content"))?;
     if let Some(s) = content.as_str() {
-        let trimmed = s.trim();
-        return (!trimmed.is_empty()).then(|| trimmed.to_string());
+        return Some(s.to_string());
     }
 
     if let Some(blocks) = content.as_array() {
@@ -1087,8 +1198,7 @@ fn claude_user_text(value: &Value) -> Option<String> {
             .filter_map(|b| b.get("text").and_then(Value::as_str))
             .collect::<Vec<_>>()
             .join("\n");
-        let trimmed = text.trim();
-        return (!trimmed.is_empty()).then(|| trimmed.to_string());
+        return (!text.trim().is_empty()).then_some(text);
     }
 
     None
@@ -1491,6 +1601,77 @@ mod tests {
     }
 
     #[test]
+    fn codex_control_messages_are_not_rendered_or_counted() {
+        let home = temp_home("codex-control");
+        let dir = home.join(".codex/sessions/2026/07/01");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("rollout.jsonl");
+        fs::write(
+            &path,
+            [
+                serde_json::json!({
+                    "type": "session_meta",
+                    "payload": {"session_id": "codex-control", "cwd": "/repo", "model": "gpt-5"}
+                })
+                .to_string(),
+                serde_json::json!({
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "user_message",
+                        "message": "<command-name>/compact</command-name>\n<command-message>compact</command-message>\n<command-args></command-args>"
+                    }
+                })
+                .to_string(),
+                serde_json::json!({
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "user_message",
+                        "message": "<local-command-stdout>\u{1b}[2mCompacted\u{1b}[22m</local-command-stdout>"
+                    }
+                })
+                .to_string(),
+                serde_json::json!({
+                    "type": "event_msg",
+                    "payload": {"type": "user_message", "message": "Real user task"}
+                })
+                .to_string(),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+
+        let sessions = list_sessions_in(&home);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].title, "Real user task");
+        assert_eq!(sessions[0].turn_count, Some(1));
+
+        let events = events_for_session_in(&home, &sessions[0].id).unwrap();
+        let prompts: Vec<&str> = events
+            .iter()
+            .filter(|e| e.kind == "prompt")
+            .map(|e| e.payload_json.as_str())
+            .collect();
+        assert_eq!(
+            prompts.len(),
+            1,
+            "control prompts should be hidden: {prompts:?}"
+        );
+        assert!(prompts[0].contains("Real user task"));
+        assert!(!prompts[0].contains("command-name"));
+        assert!(!prompts[0].contains("local-command-stdout"));
+        let statuses: Vec<&str> = events
+            .iter()
+            .filter(|e| e.kind == "status")
+            .map(|e| e.payload_json.as_str())
+            .collect();
+        assert_eq!(statuses.len(), 1);
+        assert!(statuses[0].contains("Compacted"));
+        assert!(!statuses[0].contains("\\u001b"));
+
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
     fn lists_and_reads_gemini_chat_session() {
         let home = temp_home("gemini");
         let slug = home.join(".gemini/tmp/myproj");
@@ -1665,6 +1846,34 @@ mod tests {
         assert!(prompts.iter().any(|p| p.contains("second prompt")));
         // The tool_result must NOT have produced a prompt event.
         assert!(!prompts.iter().any(|p| p.contains("file body")));
+    }
+
+    #[test]
+    fn visible_prompt_text_filters_cli_control_wrappers_and_ansi() {
+        assert_eq!(
+            visible_external_prompt_text("  \x1b[2mActual prompt\x1b[22m  "),
+            Some("Actual prompt".to_string())
+        );
+        assert_eq!(
+            visible_external_prompt_text("  \u{fffd}[2mActual prompt\u{fffd}[22m  "),
+            Some("Actual prompt".to_string())
+        );
+        assert_eq!(
+            visible_external_prompt_text(
+                "<command-name>/compact</command-name>\n<command-message>compact</command-message>"
+            ),
+            None
+        );
+        assert_eq!(
+            visible_external_prompt_text("<local-command-stdout>Compacted</local-command-stdout>"),
+            None
+        );
+        assert_eq!(
+            external_control_status_text(
+                "<local-command-stdout>\x1b[2mCompacted\x1b[22m</local-command-stdout>"
+            ),
+            Some("Compacted".to_string())
+        );
     }
 
     #[test]

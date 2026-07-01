@@ -40,6 +40,13 @@ pub struct SessionSummary {
     pub tool_call_count: Option<u32>,
     /// Distinct files with verified write/patch actions in the transcript, when known.
     pub file_action_count: Option<u32>,
+    /// The unified permission mode last used for this session (`default`/`acceptEdits`/
+    /// `plan`/`full`/`dontAsk`/`auto`), or `None` before any run recorded one. Always
+    /// `None` for external CLI-history sessions (Kineloop doesn't own their runs).
+    pub permission_mode: Option<String>,
+    /// Antigravity terminal-sandbox toggle last used for this session. Always false for
+    /// external sessions and non-Antigravity agents.
+    pub sandbox_terminal: bool,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -164,6 +171,21 @@ impl SessionStore {
                 return Err(e.into());
             }
         }
+        // Per-session permission mode + Antigravity terminal-sandbox flag, so each session
+        // remembers its autonomy setting and the UI seeds its control correctly. Added via
+        // ALTER (same duplicate-column-tolerant pattern as external_thread_id) for DBs that
+        // predate these columns. `permission_mode` is NULL until a run records one.
+        for stmt in [
+            "ALTER TABLE sessions ADD COLUMN permission_mode TEXT",
+            "ALTER TABLE sessions ADD COLUMN sandbox_terminal INTEGER NOT NULL DEFAULT 0",
+        ] {
+            if let Err(e) = sqlx::query(stmt).execute(&self.pool).await {
+                let msg = e.to_string().to_lowercase();
+                if !msg.contains("duplicate column") {
+                    return Err(e.into());
+                }
+            }
+        }
         Ok(())
     }
 
@@ -228,6 +250,24 @@ impl SessionStore {
         sqlx::query("UPDATE sessions SET external_thread_id = ?, updated_at = ? WHERE id = ?")
             .bind(thread_id)
             .bind(now_ms())
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Record the permission mode + terminal-sandbox flag used for a run, so the UI can
+    /// seed the session's control from its last choice. Deliberately does NOT bump
+    /// `updated_at` — this is configuration, not activity, and shouldn't reorder the list.
+    pub async fn set_permission_mode(
+        &self,
+        id: &str,
+        mode: &str,
+        sandbox_terminal: bool,
+    ) -> Result<(), StoreError> {
+        sqlx::query("UPDATE sessions SET permission_mode = ?, sandbox_terminal = ? WHERE id = ?")
+            .bind(mode)
+            .bind(sandbox_terminal as i64)
             .bind(id)
             .execute(&self.pool)
             .await?;
@@ -378,7 +418,8 @@ impl SessionStore {
     /// All sessions, most-recently-updated first.
     pub async fn list_sessions(&self) -> Result<Vec<SessionSummary>, StoreError> {
         let rows = sqlx::query(
-            "SELECT id, agent, repo, branch, title, status, created_at, updated_at
+            "SELECT id, agent, repo, branch, title, status,
+                    permission_mode, sandbox_terminal, created_at, updated_at
              FROM sessions ORDER BY updated_at DESC",
         )
         .fetch_all(&self.pool)
@@ -426,6 +467,9 @@ impl SessionStore {
                     turn_count: Some(turns as u32),
                     tool_call_count: Some(tools as u32),
                     file_action_count: Some(files as u32),
+                    permission_mode: r.get("permission_mode"),
+                    // Stored as INTEGER (0/1); read as i64 then narrow to bool.
+                    sandbox_terminal: r.get::<i64, _>("sandbox_terminal") != 0,
                     created_at: r.get("created_at"),
                     updated_at: r.get("updated_at"),
                     id,
@@ -721,6 +765,28 @@ mod tests {
         assert_eq!(s1.turn_count, Some(0));
         assert_eq!(s1.tool_call_count, Some(0));
         assert_eq!(s1.file_action_count, Some(0));
+    }
+
+    #[tokio::test]
+    async fn permission_mode_defaults_to_none_then_round_trips() {
+        let store = SessionStore::connect_in_memory().await.unwrap();
+        store
+            .create_session("s1", "antigravity", "/repo", "/wt/s1", "agent/s1", "t")
+            .await
+            .unwrap();
+
+        // A fresh session has no recorded mode and no terminal sandbox.
+        let before = store.list_sessions().await.unwrap();
+        let s1 = before.iter().find(|s| s.id == "s1").unwrap();
+        assert_eq!(s1.permission_mode, None);
+        assert!(!s1.sandbox_terminal);
+
+        // Recording a run's choice round-trips through list_sessions.
+        store.set_permission_mode("s1", "full", true).await.unwrap();
+        let after = store.list_sessions().await.unwrap();
+        let s1 = after.iter().find(|s| s.id == "s1").unwrap();
+        assert_eq!(s1.permission_mode.as_deref(), Some("full"));
+        assert!(s1.sandbox_terminal);
     }
 
     #[tokio::test]

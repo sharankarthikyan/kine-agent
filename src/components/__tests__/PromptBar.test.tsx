@@ -39,6 +39,7 @@ const FIXTURE_MODELS: ModelInfo[] = [opus, sonnet, disabledCodex];
 function setup(overrides: Partial<React.ComponentProps<typeof PromptBar>> = {}) {
   const onStart = vi.fn();
   const onModelChange = vi.fn();
+  const onPermissionModeChange = vi.fn();
   render(
     <PromptBar
       onStart={onStart}
@@ -46,10 +47,13 @@ function setup(overrides: Partial<React.ComponentProps<typeof PromptBar>> = {}) 
       models={FIXTURE_MODELS}
       model={opus}
       onModelChange={onModelChange}
+      agent="claude"
+      permissionMode="default"
+      onPermissionModeChange={onPermissionModeChange}
       {...overrides}
     />,
   );
-  return { onStart, onModelChange };
+  return { onStart, onModelChange, onPermissionModeChange };
 }
 
 // ── Textarea basics ────────────────────────────────────────────────────────────
@@ -200,4 +204,20 @@ test("onStart receives null when model is null (browser preview / no-agent case)
   await userEvent.type(screen.getByPlaceholderText(PLACEHOLDER), "hello");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   expect(onStart).toHaveBeenCalledWith("hello", null);
+});
+
+// ── Permission mode dropdown ─────────────────────────────────────────────────────
+
+test("permission trigger reflects the session's mode", () => {
+  setup({ permissionMode: "acceptEdits" });
+  expect(
+    screen.getByRole("button", { name: /Permission mode: Auto-edit/i }),
+  ).toBeInTheDocument();
+});
+
+test("changing the permission mode calls onPermissionModeChange", async () => {
+  const { onPermissionModeChange } = setup({ permissionMode: "default" });
+  await userEvent.click(screen.getByRole("button", { name: /Permission mode:/i }));
+  await userEvent.click(screen.getByRole("menuitemradio", { name: /Plan only/i }));
+  expect(onPermissionModeChange).toHaveBeenCalledWith("plan");
 });

@@ -41,7 +41,8 @@ function setup(overrides: Partial<React.ComponentProps<typeof NewSession>> = {})
   const onPickRecent = vi.fn();
   const onAgentChange = vi.fn();
   const onModelChange = vi.fn();
-  const onAutoEditChange = vi.fn();
+  const onPermissionModeChange = vi.fn();
+  const onSandboxTerminalChange = vi.fn();
   const onStart = vi.fn();
 
   render(
@@ -52,19 +53,29 @@ function setup(overrides: Partial<React.ComponentProps<typeof NewSession>> = {})
       agent={claudeAgent}
       models={FIXTURE_MODELS}
       model={opus}
-      autoEdit={false}
+      permissionMode="default"
+      sandboxTerminal={false}
       running={false}
       onPickRepo={onPickRepo}
       onPickRecent={onPickRecent}
       onAgentChange={onAgentChange}
       onModelChange={onModelChange}
-      onAutoEditChange={onAutoEditChange}
+      onPermissionModeChange={onPermissionModeChange}
+      onSandboxTerminalChange={onSandboxTerminalChange}
       onStart={onStart}
       {...overrides}
     />,
   );
 
-  return { onPickRepo, onPickRecent, onAgentChange, onModelChange, onAutoEditChange, onStart };
+  return {
+    onPickRepo,
+    onPickRecent,
+    onAgentChange,
+    onModelChange,
+    onPermissionModeChange,
+    onSandboxTerminalChange,
+    onStart,
+  };
 }
 
 // ── Textarea basics ────────────────────────────────────────────────────────────
@@ -185,16 +196,43 @@ test("model trigger shows the versioned model label", () => {
   expect(screen.getByText(opus.label)).toBeInTheDocument();
 });
 
-// ── Autonomy switch ────────────────────────────────────────────────────────────
+// ── Permission mode dropdown ─────────────────────────────────────────────────────
 
-test("Switch calls onAutoEditChange(true) when toggled on", async () => {
-  const { onAutoEditChange } = setup({ autoEdit: false });
-  await userEvent.click(screen.getByRole("switch", { name: /Edit automatically/i }));
-  expect(onAutoEditChange).toHaveBeenCalledWith(true);
+test("permission trigger reflects the current mode", () => {
+  setup({ permissionMode: "default" });
+  expect(
+    screen.getByRole("button", { name: /Permission mode: Ask before edits/i }),
+  ).toBeInTheDocument();
 });
 
-test("Switch calls onAutoEditChange(false) when toggled off", async () => {
-  const { onAutoEditChange } = setup({ autoEdit: true });
-  await userEvent.click(screen.getByRole("switch", { name: /Edit automatically/i }));
-  expect(onAutoEditChange).toHaveBeenCalledWith(false);
+test("selecting Auto-edit calls onPermissionModeChange with 'acceptEdits'", async () => {
+  const { onPermissionModeChange } = setup();
+  await userEvent.click(screen.getByRole("button", { name: /Permission mode:/i }));
+  await userEvent.click(screen.getByRole("menuitemradio", { name: /Auto-edit/i }));
+  expect(onPermissionModeChange).toHaveBeenCalledWith("acceptEdits");
+});
+
+test("selecting Full access requires confirmation before it applies", async () => {
+  const { onPermissionModeChange } = setup();
+  await userEvent.click(screen.getByRole("button", { name: /Permission mode:/i }));
+  await userEvent.click(screen.getByRole("menuitemradio", { name: /Full access/i }));
+  // Not applied yet — a confirmation is required first.
+  expect(onPermissionModeChange).not.toHaveBeenCalled();
+  await userEvent.click(screen.getByRole("button", { name: /Enable full access/i }));
+  expect(onPermissionModeChange).toHaveBeenCalledWith("full");
+});
+
+test("Claude offers the advanced 'Locked-down (CI)' mode", async () => {
+  setup({ agent: claudeAgent });
+  await userEvent.click(screen.getByRole("button", { name: /Permission mode:/i }));
+  expect(screen.getByRole("menuitemradio", { name: /Locked-down/i })).toBeInTheDocument();
+});
+
+test("Antigravity offers only Ask before edits + Full access (no Auto-edit or advanced)", async () => {
+  const antigravityAgent: AgentInfo = { id: "antigravity", label: "Antigravity", installed: true };
+  setup({ agent: antigravityAgent });
+  await userEvent.click(screen.getByRole("button", { name: /Permission mode:/i }));
+  expect(screen.getByRole("menuitemradio", { name: /Full access/i })).toBeInTheDocument();
+  expect(screen.queryByRole("menuitemradio", { name: /Auto-edit/i })).not.toBeInTheDocument();
+  expect(screen.queryByRole("menuitemradio", { name: /Locked-down/i })).not.toBeInTheDocument();
 });

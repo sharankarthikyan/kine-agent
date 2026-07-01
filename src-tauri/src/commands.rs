@@ -135,6 +135,19 @@ async fn run_persisting(
     mut cancel_rx: watch::Receiver<bool>,
     on_event: Channel<AgentEvent>,
 ) -> Result<(), String> {
+    // Persist the permission mode + sandbox flag actually used for this run so the UI can
+    // seed each session's control from its last choice (single place, covering both new
+    // sessions and follow-up turns). Best-effort: a persistence hiccup must not abort a run.
+    // Skipped when no mode was supplied, to avoid clobbering a stored value with NULL.
+    if let Some(mode) = prompt.permission_mode.as_deref() {
+        if let Err(e) = store
+            .set_permission_mode(&session_id, mode, prompt.sandbox_terminal)
+            .await
+        {
+            eprintln!("failed to persist permission mode for {session_id}: {e}");
+        }
+    }
+
     let (tx, mut rx) = mpsc::unbounded_channel::<AgentEvent>();
     let saw_error = Arc::new(AtomicBool::new(false));
     let sink = Box::new(StoreSink {
@@ -393,12 +406,21 @@ fn ensure_scope_dir(scope: &Path) -> Result<(), String> {
     std::fs::create_dir_all(scope).map_err(|e| e.to_string())
 }
 
+/// Validate the unified permission-mode id from the (untrusted) IPC boundary. Accepts the
+/// wire vocabulary the frontend emits (`default`, `acceptEdits`, `plan`, `full`, `dontAsk`)
+/// or `None` (defer to the CLI default). Raw per-CLI spellings like `bypassPermissions` are
+/// rejected so only the unified vocabulary crosses the boundary; adapters translate `full`
+/// to each CLI's real bypass flag. `full` is intentionally allowed (the UI gates it behind
+/// an explicit confirmation). Claude's `auto` classifier mode is not accepted: it aborts
+/// under headless `-p`, so Kineloop never offers it.
 fn validate_permission_mode(mode: Option<String>) -> Result<Option<String>, String> {
     match mode.as_deref() {
-        None | Some("default") | Some("acceptEdits") | Some("plan") => Ok(mode),
-        Some("bypassPermissions") => {
-            Err("bypassPermissions is not allowed from the app UI".to_string())
-        }
+        None
+        | Some("default")
+        | Some("acceptEdits")
+        | Some("plan")
+        | Some("full")
+        | Some("dontAsk") => Ok(mode),
         Some(other) => Err(format!("unsupported permission mode: {other}")),
     }
 }
@@ -524,6 +546,7 @@ async fn create_session_and_run(
     agent_prompt: String,
     model: Option<String>,
     permission_mode: Option<String>,
+    sandbox_terminal: bool,
     title_override: Option<String>,
     cancel_rx: watch::Receiver<bool>,
     on_event: Channel<AgentEvent>,
@@ -573,6 +596,7 @@ async fn create_session_and_run(
             text: agent_prompt,
             model,
             permission_mode,
+            sandbox_terminal,
         },
         wt.path,
         false,
@@ -603,6 +627,7 @@ pub async fn start_session(
     agent: Option<String>,
     model: Option<String>,
     permission_mode: Option<String>,
+    sandbox_terminal: Option<bool>,
     on_event: Channel<AgentEvent>,
     store: State<'_, SessionStore>,
     runs: State<'_, RunRegistry>,
@@ -611,6 +636,7 @@ pub async fn start_session(
     let (_guard, cancel_rx) = runs.acquire(&session_id)?;
     let agent = validate_agent(agent)?;
     let permission_mode = validate_permission_mode(permission_mode)?;
+    let sandbox_terminal = sandbox_terminal.unwrap_or(false);
     let model = validate_model(model)?;
     // `canonical_repo_path` does blocking FS + a git subprocess — keep it off the async
     // runtime thread.
@@ -630,6 +656,7 @@ pub async fn start_session(
         prompt,
         model,
         permission_mode,
+        sandbox_terminal,
         None,
         cancel_rx,
         on_event,
@@ -646,6 +673,7 @@ pub async fn continue_external_session(
     agent: Option<String>,
     model: Option<String>,
     permission_mode: Option<String>,
+    sandbox_terminal: Option<bool>,
     // The originating CLI-history session's display title (as shown in the list, already
     // reflecting any rename override). The writable continuation inherits it so it reads
     // as a continuation of that session instead of being titled by the first follow-up.
@@ -662,6 +690,7 @@ pub async fn continue_external_session(
         .then(|| original_agent.clone());
     let agent = validate_agent(agent.or(default_agent))?;
     let permission_mode = validate_permission_mode(permission_mode)?;
+    let sandbox_terminal = sandbox_terminal.unwrap_or(false);
     let model = validate_model(model)?;
 
     let repo_lookup_id = external_session_id.clone();
@@ -724,6 +753,7 @@ pub async fn continue_external_session(
         agent_prompt,
         model,
         permission_mode,
+        sandbox_terminal,
         title_override,
         cancel_rx,
         on_event,
@@ -735,13 +765,16 @@ pub async fn continue_external_session(
 /// session's worktree, persisting the new prompt + streamed events).
 ///
 /// `model` is optional: passes `--model` to the CLI when `Some`, omitted when `None`.
-/// `permission_mode` is optional: passes `--permission-mode` to the CLI when `Some`, omitted when `None`.
+/// `permission_mode` is optional: the unified mode id applied to the resumed run.
+// A Tauri command's parameters are its IPC contract; the count is inherent.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn send_message(
     prompt: String,
     session_id: String,
     model: Option<String>,
     permission_mode: Option<String>,
+    sandbox_terminal: Option<bool>,
     on_event: Channel<AgentEvent>,
     store: State<'_, SessionStore>,
     runs: State<'_, RunRegistry>,
@@ -749,6 +782,7 @@ pub async fn send_message(
     validate_prompt(&prompt)?;
     let (_guard, cancel_rx) = runs.acquire(&session_id)?;
     let permission_mode = validate_permission_mode(permission_mode)?;
+    let sandbox_terminal = sandbox_terminal.unwrap_or(false);
     let model = validate_model(model)?;
     // Resume uses the session's own agent + its captured CLI-native conversation id.
     let agent = store
@@ -795,6 +829,7 @@ pub async fn send_message(
             text: prompt,
             model,
             permission_mode,
+            sandbox_terminal,
         },
         wt_path,
         true,
@@ -1335,8 +1370,8 @@ pub async fn commit_session(session_id: String, message: String) -> Result<Commi
 #[cfg(test)]
 mod tests {
     use super::{
-        normalize_title, truncate_transcript_tail, validate_prompt, MAX_PROMPT_BYTES,
-        MAX_TRANSCRIPT_BYTES,
+        normalize_title, truncate_transcript_tail, validate_permission_mode, validate_prompt,
+        MAX_PROMPT_BYTES, MAX_TRANSCRIPT_BYTES,
     };
 
     // Guards the cancellation mechanism in `run_persisting`: a freshly-created watch
@@ -1360,6 +1395,25 @@ mod tests {
         assert!(validate_prompt("write a function").is_ok());
         assert!(validate_prompt(&"a".repeat(MAX_PROMPT_BYTES)).is_ok());
         assert!(validate_prompt(&"a".repeat(MAX_PROMPT_BYTES + 1)).is_err());
+    }
+
+    #[test]
+    fn validate_permission_mode_accepts_unified_ids_and_rejects_raw_spellings() {
+        for ok in ["default", "acceptEdits", "plan", "full", "dontAsk"] {
+            assert!(
+                validate_permission_mode(Some(ok.to_string())).is_ok(),
+                "{ok} should be accepted"
+            );
+        }
+        // None defers to the CLI default.
+        assert!(validate_permission_mode(None).is_ok());
+        // `full` is now allowed (UI gates it behind a confirm); raw per-CLI spellings and
+        // anything unknown are rejected so only the unified vocabulary crosses the boundary.
+        assert!(validate_permission_mode(Some("bypassPermissions".to_string())).is_err());
+        assert!(validate_permission_mode(Some("workspace-write".to_string())).is_err());
+        assert!(validate_permission_mode(Some("nonsense".to_string())).is_err());
+        // `auto` is rejected: its classifier aborts under headless -p, so it's never offered.
+        assert!(validate_permission_mode(Some("auto".to_string())).is_err());
     }
 
     #[test]
