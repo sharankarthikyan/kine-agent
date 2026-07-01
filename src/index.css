@@ -148,6 +148,10 @@
      the content's min-content from cascading up through the flex-start ancestors. */
   min-width: 0;
   max-width: 100%;
+  /* Break long unbreakable tokens (URLs, file paths) so prose never overflows the column.
+     Use break-word, NOT anywhere — break-word doesn't shrink intrinsic min-content, so it
+     cascades to table cells without collapsing their columns. */
+  overflow-wrap: break-word;
 }
 .md > :first-child { margin-top: 0; }
 .md > :last-child  { margin-bottom: 0; }

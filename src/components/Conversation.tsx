@@ -92,7 +92,7 @@ export function Conversation({
               <div className="text-xs font-medium text-muted-foreground">
                 You
               </div>
-              <div className="self-end max-w-prose rounded-lg bg-muted px-4 py-3 text-foreground whitespace-pre-wrap">
+              <div className="self-end min-w-0 max-w-prose [overflow-wrap:anywhere] rounded-lg bg-muted px-4 py-3 text-foreground whitespace-pre-wrap">
                 {turn.prompt}
               </div>
             </section>
