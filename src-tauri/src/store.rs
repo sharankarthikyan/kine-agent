@@ -188,12 +188,14 @@ impl SessionStore {
         }
         // Per-session streaming engine ("pipe" = CLI adapters, "acp" = Agent Client
         // Protocol). Same ALTER-tolerant pattern as the columns above.
-        for stmt in ["ALTER TABLE sessions ADD COLUMN engine TEXT NOT NULL DEFAULT 'pipe'"] {
-            if let Err(e) = sqlx::query(stmt).execute(&self.pool).await {
-                let msg = e.to_string().to_lowercase();
-                if !msg.contains("duplicate column") {
-                    return Err(e.into());
-                }
+        if let Err(e) =
+            sqlx::query("ALTER TABLE sessions ADD COLUMN engine TEXT NOT NULL DEFAULT 'pipe'")
+                .execute(&self.pool)
+                .await
+        {
+            let msg = e.to_string().to_lowercase();
+            if !msg.contains("duplicate column") {
+                return Err(e.into());
             }
         }
         Ok(())
@@ -269,11 +271,12 @@ impl SessionStore {
     /// The streaming engine recorded for a session ("pipe" | "acp"). Defaults to
     /// "pipe" when the session is absent, so callers degrade to today's behavior.
     pub async fn get_engine(&self, id: &str) -> Result<String, StoreError> {
-        let v = sqlx::query_scalar::<_, Option<String>>("SELECT engine FROM sessions WHERE id = ?")
+        // Column is NOT NULL, so only row absence needs a default (same shape as get_agent).
+        let v = sqlx::query_scalar::<_, String>("SELECT engine FROM sessions WHERE id = ?")
             .bind(id)
             .fetch_optional(&self.pool)
             .await?;
-        Ok(v.flatten().unwrap_or_else(|| "pipe".to_string()))
+        Ok(v.unwrap_or_else(|| "pipe".to_string()))
     }
 
     /// Record the engine a session runs on. Bumps `updated_at`.
