@@ -1670,7 +1670,7 @@ export default function App() {
                           }}
                         />
                         <div className="flex min-h-0 flex-1 flex-col overflow-auto">
-                          <div className="mt-auto w-full max-w-3xl mx-auto px-4">
+                          <div className="mt-auto w-full min-w-0 max-w-3xl mx-auto px-4">
                             {paneLoading ? (
                               <div
                                 role="status"

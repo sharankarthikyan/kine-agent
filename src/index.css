@@ -143,6 +143,11 @@
   color: var(--foreground);
   font-size: 0.875rem;       /* text-sm */
   line-height: 1.625;        /* leading-relaxed */
+  /* Bound the block to its column so wide children (tables, long code) scroll within it
+     instead of forcing the flex chain wider than the transcript column. min-width:0 stops
+     the content's min-content from cascading up through the flex-start ancestors. */
+  min-width: 0;
+  max-width: 100%;
 }
 .md > :first-child { margin-top: 0; }
 .md > :last-child  { margin-bottom: 0; }
@@ -179,5 +184,14 @@
   border-left: 2px solid var(--border);
   color: var(--muted-foreground);
 }
-.md table          { border-collapse: collapse; margin: 0.5rem 0; }
-.md th, .md td     { border: 1px solid var(--border); padding: 0.25rem 0.5rem; }
+/* Wide tables scroll horizontally within the transcript column instead of clipping.
+   Cells wrap at word boundaries (natural column widths); the wrapper scrolls when the
+   table is genuinely wider than the column. Do NOT set overflow-wrap:anywhere on cells —
+   it collapses every column's min-width to one character and wraps text per-character. */
+.md-table-wrap     { overflow-x: auto; max-width: 100%; margin: 0.5rem 0; }
+.md table          { border-collapse: collapse; margin: 0; }
+.md th, .md td     {
+  border: 1px solid var(--border);
+  padding: 0.25rem 0.5rem;
+  vertical-align: top;
+}
