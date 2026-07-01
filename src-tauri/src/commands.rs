@@ -451,14 +451,63 @@ fn original_agent_from_external_session_id(session_id: &str) -> Result<String, S
     }
 }
 
-/// Root under which per-session worktrees are created (outside any target repo).
+/// Root under which NEW per-session worktrees are created (outside any target repo).
 ///
-/// Uses a stable per-user directory (`<home>/.kineloop/worktrees`), NOT the system
-/// temp dir — worktrees hold unreviewed agent work that must survive across reboots
-/// until the user reviews and `cleanup_session`s them. Falls back to temp only if the
-/// home dir is unavailable. (A later phase moves this to the Tauri app-data dir.)
+/// Deliberately a **non-hidden** directory (`<home>/Kineloop/worktrees`): the Antigravity
+/// CLI (`agy`) silently refuses to adopt a workspace whose path contains a dot-prefixed
+/// (hidden) component and falls back to its default `scratch` project, which breaks
+/// worktree isolation for antigravity sessions. The rest of Kineloop's data stays hidden
+/// under `~/.kineloop`; only worktrees — which are plain working copies of the user's
+/// repos — must be visible. (Verified 2026-07-01 via `agy --print` smoke tests; claude and
+/// codex honor the process cwd regardless and are unaffected either way.)
+///
+/// Worktrees hold unreviewed agent work that must survive reboots until the user reviews
+/// and `cleanup_session`s them, so this is a stable per-user dir, NOT the system temp dir.
+/// Falls back to temp only if the home dir is unavailable.
 fn worktrees_root() -> PathBuf {
+    crate::agent_paths::home_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("Kineloop")
+        .join("worktrees")
+}
+
+/// Pre-relocation worktrees root (`<home>/.kineloop/worktrees`, hidden). Sessions created
+/// before worktrees moved to the visible [`worktrees_root`] still have their worktree here;
+/// resolution falls back to it so those sessions keep resuming, diffing, and cleaning up.
+fn legacy_worktrees_root() -> PathBuf {
     crate::agent_paths::data_dir().join("worktrees")
+}
+
+/// Pick the root that actually holds `session_id`'s worktree: the visible root if its
+/// directory exists there, else the legacy hidden root, else the visible root (the case of
+/// a worktree about to be created). Resolution-only — `worktree::create` always targets the
+/// visible [`worktrees_root`]. Pure helper split out for testing.
+fn resolve_worktree_root(visible: PathBuf, legacy: PathBuf, session_id: &str) -> PathBuf {
+    if visible.join(session_id).exists() {
+        return visible;
+    }
+    if legacy.join(session_id).exists() {
+        return legacy;
+    }
+    visible
+}
+
+/// The worktrees root holding `session_id`, preferring the visible root and falling back to
+/// the legacy hidden root for pre-relocation sessions. Feeds the `root` argument of the
+/// resolution helpers (`worktree_for`, `worktree_resolve`, `inspect_scope`).
+fn worktree_root_for(session_id: &str) -> PathBuf {
+    resolve_worktree_root(worktrees_root(), legacy_worktrees_root(), session_id)
+}
+
+/// [`worktree_root_for`] for the optional session id the inspect commands carry. A concrete
+/// (non-external, non-empty) id resolves per-session; `None`/empty/external ids have no
+/// Kineloop worktree, so the visible root is used (only its `.global-scope` sentinel matters
+/// there).
+fn worktree_root_for_opt(session_id: Option<&str>) -> PathBuf {
+    match session_id {
+        Some(id) if !id.is_empty() && !id.starts_with("external:") => worktree_root_for(id),
+        _ => worktrees_root(),
+    }
 }
 
 /// Resolve which directory to inspect for customizations.
@@ -891,7 +940,7 @@ pub async fn send_message(
         .get_external_thread_id(&session_id)
         .await
         .map_err(|e| e.to_string())?;
-    let root = worktrees_root();
+    let root = worktree_root_for(&session_id);
     let sid = session_id.clone();
     let wt_path = tokio::task::spawn_blocking(move || -> Result<PathBuf, String> {
         let wt = worktree::worktree_for(&root, &sid).map_err(|e| e.to_string())?;
@@ -989,7 +1038,7 @@ pub async fn cleanup_session(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "session not found".to_string())?;
     let repo_path = canonical_repo_path(repo)?;
-    let root = worktrees_root();
+    let root = worktree_root_for(&session_id);
     let cleanup_id = session_id.clone();
     // Resolve+validate the session→worktree mapping, then remove off the async runtime.
     // `worktree::remove` is idempotent (a missing worktree is treated as already removed),
@@ -1013,7 +1062,7 @@ pub async fn cleanup_session(
 /// Compute the diff of a session's worktree for review.
 #[tauri::command]
 pub async fn review_session(session_id: String) -> Result<SessionDiff, String> {
-    let root = worktrees_root();
+    let root = worktree_root_for(&session_id);
     tokio::task::spawn_blocking(move || {
         let wt_path = worktree_resolve(&root, &session_id)?;
         let base = git::default_base(&wt_path);
@@ -1213,7 +1262,7 @@ pub async fn refresh_models(agent: String) -> Result<Vec<crate::models::ModelInf
 /// List candidate rule/config files for a session's worktree + global config dirs.
 #[tauri::command]
 pub async fn inspect_rules(session_id: Option<String>) -> Result<Vec<RuleFile>, String> {
-    let root = worktrees_root();
+    let root = worktree_root_for_opt(session_id.as_deref());
     tokio::task::spawn_blocking(move || {
         let path = inspect_scope(&root, session_id)?;
         Ok::<Vec<RuleFile>, String>(inspect::rule_candidates(&path))
@@ -1225,7 +1274,7 @@ pub async fn inspect_rules(session_id: Option<String>) -> Result<Vec<RuleFile>, 
 /// Read a rule/config file (validated to the session's worktree or known config dirs).
 #[tauri::command]
 pub async fn read_text_file(session_id: Option<String>, path: String) -> Result<String, String> {
-    let root = worktrees_root();
+    let root = worktree_root_for_opt(session_id.as_deref());
     tokio::task::spawn_blocking(move || {
         let scope = inspect_scope(&root, session_id)?;
         ensure_scope_dir(&scope)?;
@@ -1246,7 +1295,7 @@ pub async fn write_text_file(
     path: String,
     content: String,
 ) -> Result<(), String> {
-    let root = worktrees_root();
+    let root = worktree_root_for(&session_id);
     tokio::task::spawn_blocking(move || {
         let wt = crate::worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
         inspect::write_project_text_file(&path, &content, &wt.path).map_err(|e| e.to_string())
@@ -1265,7 +1314,7 @@ pub async fn read_worktree_file(session_id: String, path: String) -> Result<Stri
     if session_id.starts_with("external:") {
         return Err("external CLI-history sessions have no worktree to read from".to_string());
     }
-    let root = worktrees_root();
+    let root = worktree_root_for(&session_id);
     tokio::task::spawn_blocking(move || {
         let wt = crate::worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
         crate::git::read_worktree_file(&wt.path, &path)
@@ -1304,7 +1353,7 @@ pub async fn list_capabilities(
     session_id: Option<String>,
     agent: String,
 ) -> Result<Capabilities, String> {
-    let root = worktrees_root();
+    let root = worktree_root_for_opt(session_id.as_deref());
     tokio::task::spawn_blocking(move || {
         let path = inspect_scope(&root, session_id)?;
         Ok::<Capabilities, String>(inspect::list_capabilities(&agent, &path))
@@ -1319,7 +1368,7 @@ pub async fn list_capabilities(
 pub async fn customizations_counts(
     session_id: Option<String>,
 ) -> Result<CustomizationCounts, String> {
-    let root = worktrees_root();
+    let root = worktree_root_for_opt(session_id.as_deref());
     tokio::task::spawn_blocking(move || {
         let path = inspect_scope(&root, session_id)?;
         Ok::<CustomizationCounts, String>(inspect::customizations_counts(&path))
@@ -1339,7 +1388,7 @@ pub async fn session_diffstat(session_id: String) -> Result<Diffstat, String> {
             files_changed: 0,
         });
     }
-    let root = worktrees_root();
+    let root = worktree_root_for(&session_id);
     tokio::task::spawn_blocking(move || {
         let wt = crate::worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
         let base = git::default_base(&wt.path);
@@ -1355,7 +1404,7 @@ pub async fn session_diffstat(session_id: String) -> Result<Diffstat, String> {
 /// Capped at 2000 entries; excess is logged server-side and truncated.
 #[tauri::command]
 pub async fn worktree_tree(session_id: String) -> Result<Vec<TreeEntry>, String> {
-    let root = worktrees_root();
+    let root = worktree_root_for(&session_id);
     tokio::task::spawn_blocking(move || {
         let wt = crate::worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
         Ok::<Vec<TreeEntry>, String>(git::worktree_tree(&wt.path))
@@ -1369,7 +1418,7 @@ pub async fn worktree_tree(session_id: String) -> Result<Vec<TreeEntry>, String>
 /// uncommitted changes. Both are best-effort (0 / empty on error).
 #[tauri::command]
 pub async fn branch_changes(session_id: String) -> Result<BranchChanges, String> {
-    let root = worktrees_root();
+    let root = worktree_root_for(&session_id);
     tokio::task::spawn_blocking(move || {
         let wt = crate::worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
         let base = git::default_base(&wt.path);
@@ -1383,7 +1432,7 @@ pub async fn branch_changes(session_id: String) -> Result<BranchChanges, String>
 /// friendly error if `code` is not on PATH; does not wait for VS Code to exit.
 #[tauri::command]
 pub async fn open_in_editor(session_id: String) -> Result<(), String> {
-    let root = worktrees_root();
+    let root = worktree_root_for(&session_id);
     tokio::task::spawn_blocking(move || -> Result<(), String> {
         let wt = worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
         // Resolve `code` via PATHEXT so the Windows `code.cmd` shim is found, not just
@@ -1461,7 +1510,7 @@ fn open_terminal_at(dir: &Path) -> Result<(), String> {
 /// returns a friendly error if no terminal could be launched.
 #[tauri::command]
 pub async fn open_terminal(session_id: String) -> Result<(), String> {
-    let root = worktrees_root();
+    let root = worktree_root_for(&session_id);
     tokio::task::spawn_blocking(move || -> Result<(), String> {
         let wt = worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
         open_terminal_at(&wt.path)
@@ -1475,7 +1524,7 @@ pub async fn open_terminal(session_id: String) -> Result<(), String> {
 /// entry. Best-effort: missing or unparseable files contribute an empty list.
 #[tauri::command]
 pub async fn list_hooks(session_id: Option<String>) -> Result<Vec<HookEntry>, String> {
-    let root = worktrees_root();
+    let root = worktree_root_for_opt(session_id.as_deref());
     tokio::task::spawn_blocking(move || {
         let path = inspect_scope(&root, session_id)?;
         Ok::<Vec<HookEntry>, String>(inspect::list_hooks(&path))
@@ -1488,7 +1537,7 @@ pub async fn list_hooks(session_id: Option<String>) -> Result<Vec<HookEntry>, St
 /// `~/.claude.json` (user). Best-effort: missing or unparseable files contribute nothing.
 #[tauri::command]
 pub async fn list_mcp_servers(session_id: Option<String>) -> Result<Vec<McpServerEntry>, String> {
-    let root = worktrees_root();
+    let root = worktree_root_for_opt(session_id.as_deref());
     tokio::task::spawn_blocking(move || {
         let path = inspect_scope(&root, session_id)?;
         Ok::<Vec<McpServerEntry>, String>(inspect::list_mcp_servers(&path))
@@ -1501,7 +1550,7 @@ pub async fn list_mcp_servers(session_id: Option<String>) -> Result<Vec<McpServe
 /// Best-effort: returns an empty list when the file is missing or unparseable.
 #[tauri::command]
 pub async fn list_plugins(session_id: Option<String>) -> Result<Vec<PluginEntry>, String> {
-    let root = worktrees_root();
+    let root = worktree_root_for_opt(session_id.as_deref());
     tokio::task::spawn_blocking(move || {
         let path = inspect_scope(&root, session_id)?;
         Ok::<Vec<PluginEntry>, String>(inspect::list_plugins(&path))
@@ -1515,7 +1564,7 @@ pub async fn list_plugins(session_id: Option<String>) -> Result<Vec<PluginEntry>
 /// clean, or git fails for any reason. Never pushes, merges, or switches branches.
 #[tauri::command]
 pub async fn commit_session(session_id: String, message: String) -> Result<CommitResult, String> {
-    let root = worktrees_root();
+    let root = worktree_root_for(&session_id);
     tokio::task::spawn_blocking(move || {
         let wt = crate::worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
         git::commit_session(&wt.path, &message)
@@ -1527,9 +1576,44 @@ pub async fn commit_session(session_id: String, message: String) -> Result<Commi
 #[cfg(test)]
 mod tests {
     use super::{
-        normalize_title, truncate_transcript_tail, validate_permission_mode, validate_prompt,
-        MAX_PROMPT_BYTES, MAX_TRANSCRIPT_BYTES,
+        normalize_title, resolve_worktree_root, truncate_transcript_tail,
+        validate_permission_mode, validate_prompt, MAX_PROMPT_BYTES, MAX_TRANSCRIPT_BYTES,
     };
+
+    // Worktree-root resolution: prefer the visible root, fall back to the legacy hidden
+    // root only for pre-relocation sessions that physically live there, and default to the
+    // visible root for a not-yet-created worktree.
+    #[test]
+    fn resolve_worktree_root_prefers_visible_then_legacy() {
+        let base = std::env::temp_dir().join(format!("kl-root-{}", std::process::id()));
+        let visible = base.join("visible");
+        let legacy = base.join("legacy");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&visible).unwrap();
+        std::fs::create_dir_all(&legacy).unwrap();
+
+        // Absent from both → visible root (the worktree is about to be created there).
+        assert_eq!(
+            resolve_worktree_root(visible.clone(), legacy.clone(), "sess"),
+            visible
+        );
+
+        // Present only under the legacy hidden root (a pre-relocation session).
+        std::fs::create_dir_all(legacy.join("sess")).unwrap();
+        assert_eq!(
+            resolve_worktree_root(visible.clone(), legacy.clone(), "sess"),
+            legacy
+        );
+
+        // Present under both → the visible root wins.
+        std::fs::create_dir_all(visible.join("sess")).unwrap();
+        assert_eq!(
+            resolve_worktree_root(visible.clone(), legacy.clone(), "sess"),
+            visible
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     // Guards the cancellation mechanism in `run_persisting`: a freshly-created watch
     // receiver must NOT report a change until `send` is called, otherwise the select would
