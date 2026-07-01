@@ -97,7 +97,9 @@ function renderEvent(
 ) {
   switch (event.kind) {
     case "token":
-      // Agent prose is Markdown and is the dominant element of the turn.
+      // Unreachable in practice: groupEventRuns coalesces every token run into a
+      // "prose" group rendered directly. Kept because removing the case would send
+      // "token" into the default arm and break its `never` exhaustiveness check.
       return <Markdown>{event.data.text}</Markdown>;
 
     case "status":
