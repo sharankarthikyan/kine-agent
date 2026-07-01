@@ -3,7 +3,6 @@ import {
   Suspense,
   useCallback,
   useEffect,
-  useMemo,
   useRef,
   useState,
 } from "react";
@@ -117,6 +116,18 @@ const EXTERNAL_EVENT_PAGE_SIZE = 300;
 
 type SplitDirection = "vertical" | "horizontal";
 type SessionPane = { id: string; sessionId: string | null };
+
+/** Draft config for a New Session pane before it becomes a real session. Held per-pane so
+ *  multiple New Session tabs each keep their own repo / agent / model / permission selection
+ *  instead of sharing one global draft. */
+type PaneDraft = {
+  repo: string | null;
+  agentId: string;
+  /** Preferred model value for the agent; null ⇒ the agent's first model. */
+  modelValue: string | null;
+  permissionMode: PermissionMode;
+  sandbox: boolean;
+};
 type EventPageState = {
   nextOffset: number;
   hasMore: boolean;
@@ -213,7 +224,6 @@ export default function App() {
   const [sessionModelValues, setSessionModelValues] = useState<Record<string, string>>({});
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [selectedAgent, setSelectedAgent] = useState<AgentInfo | null>(null);
-  const [selectedRepo, setSelectedRepo] = useState<string | null>(null);
   // Permission mode for the NEW Session composer — remembered across launches as the
   // user's preferred default. Its Antigravity terminal-sandbox toggle is transient.
   const [newSessionPermissionMode, setNewSessionPermissionMode] =
@@ -221,7 +231,7 @@ export default function App() {
   // Mirror of the composer mode for reading inside callbacks without stale-closure deps.
   const newSessionPermissionModeRef = useRef(newSessionPermissionMode);
   newSessionPermissionModeRef.current = newSessionPermissionMode;
-  const [newSessionSandbox, setNewSessionSandbox] = useState(false);
+  const [newSessionSandbox] = useState(false);
   // Per-session permission mode + sandbox overrides, keyed by session id. These hold the
   // user's pending choice optimistically until the backend persists it (and seed the
   // dropdown for a session before its persisted value round-trips through list_sessions).
@@ -231,6 +241,10 @@ export default function App() {
   const [sessionSandboxValues, setSessionSandboxValues] = useState<Record<string, boolean>>(
     {},
   );
+  // Per-pane New Session draft, so each New Session tab is independent. A pane with no entry
+  // falls back to defaultPaneDraft() (seeded from the last-used defaults); the first edit
+  // commits a pane-specific entry, isolating it from the other panes.
+  const [paneDrafts, setPaneDrafts] = useState<Record<string, PaneDraft>>({});
   const [recents, setRecents] = useState<string[]>([]);
   const [sessionSearch, setSessionSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
@@ -575,22 +589,6 @@ export default function App() {
     }
   }, []);
 
-  // The agent picker is the source of truth: changing the agent narrows the model
-  // list to that agent and selects its first model, so the two controls never
-  // disagree. (A null match leaves the selection so an empty agent can't blank it.)
-  const handleAgentChange = useCallback(
-    (a: AgentInfo) => {
-      setSelectedAgent(a);
-      setSelectedModel((prev) =>
-        prev?.agent === a.id
-          ? prev
-          : (models.find((m) => m.agent === a.id) ?? prev),
-      );
-      applyComposerModeForAgent(a.id, a.label);
-    },
-    [models, applyComposerModeForAgent],
-  );
-
   // Selecting a model also syncs the agent back to that model's agent, so the
   // pair stays consistent regardless of which control the user touches — including
   // coercing the permission mode when the model belongs to a different agent.
@@ -605,13 +603,6 @@ export default function App() {
       if (nextAgent) applyComposerModeForAgent(nextAgent.id, nextAgent.label);
     },
     [agents, applyComposerModeForAgent],
-  );
-
-  // Models for the currently selected agent — what the New Session model picker
-  // shows, so it can never list a model from a different agent than the one chosen.
-  const modelsForSelectedAgent = useMemo(
-    () => models.filter((m) => m.agent === (selectedAgent?.id ?? "claude")),
-    [models, selectedAgent?.id],
   );
 
   function modelForAgent(agentId: string, preferredValue?: string): ModelInfo | null {
@@ -635,16 +626,6 @@ export default function App() {
     setSessionModelValues((prev) => ({ ...prev, [sessionId]: model.value }));
   }
 
-  // Remember the New Session composer's mode as the cross-launch default.
-  function handleNewSessionPermissionModeChange(mode: PermissionMode) {
-    setNewSessionPermissionMode(mode);
-    try {
-      localStorage.setItem(PERMISSION_MODE_KEY, mode);
-    } catch {
-      /* ignore */
-    }
-  }
-
   // The effective permission mode / sandbox flag for a session: the user's pending
   // override wins, then the persisted value from the session row, then the safe default.
   function permissionModeForSession(session: SessionSummary | null): PermissionMode {
@@ -663,6 +644,76 @@ export default function App() {
 
   function setSessionPermissionMode(sessionId: string, mode: PermissionMode) {
     setSessionPermissionValues((prev) => ({ ...prev, [sessionId]: mode }));
+  }
+
+  // ── Per-pane New Session draft ────────────────────────────────────────────────
+  // A fresh pane is seeded from the last-used defaults; once edited it holds its own entry,
+  // so changing one New Session tab's repo/agent/model/permission never touches the others.
+  function defaultPaneDraft(): PaneDraft {
+    const agentId = selectedAgent?.id ?? models[0]?.agent ?? "claude";
+    return {
+      repo: null,
+      agentId,
+      modelValue: selectedModel?.agent === agentId ? (selectedModel?.value ?? null) : null,
+      permissionMode: newSessionPermissionMode,
+      sandbox: newSessionSandbox,
+    };
+  }
+
+  function draftFor(paneId: string): PaneDraft {
+    return paneDrafts[paneId] ?? defaultPaneDraft();
+  }
+
+  function updatePaneDraft(paneId: string, patch: Partial<PaneDraft>) {
+    setPaneDrafts((prev) => ({
+      ...prev,
+      [paneId]: { ...(prev[paneId] ?? defaultPaneDraft()), ...patch },
+    }));
+  }
+
+  // The agent picker is the source of truth: switching narrows the model to that agent and
+  // coerces the permission mode when the new agent doesn't support the current one.
+  function paneAgentChange(paneId: string, a: AgentInfo) {
+    const cur = draftFor(paneId);
+    const keepModel =
+      cur.modelValue !== null &&
+      models.some((m) => m.value === cur.modelValue && m.agent === a.id);
+    const modelValue = keepModel
+      ? cur.modelValue
+      : (models.find((m) => m.agent === a.id)?.value ?? null);
+    const { mode, changed } = coercePermissionMode(cur.permissionMode, a.id);
+    if (changed) {
+      toast.info(
+        `${a.label} doesn't support "${permissionModeLabel(cur.permissionMode)}"; using "${permissionModeLabel(mode)}".`,
+      );
+    }
+    updatePaneDraft(paneId, { agentId: a.id, modelValue, permissionMode: mode });
+  }
+
+  function paneModelChange(paneId: string, m: ModelInfo) {
+    const cur = draftFor(paneId);
+    const { mode } = coercePermissionMode(cur.permissionMode, m.agent);
+    updatePaneDraft(paneId, { modelValue: m.value, agentId: m.agent, permissionMode: mode });
+  }
+
+  function panePermissionChange(paneId: string, mode: PermissionMode) {
+    updatePaneDraft(paneId, { permissionMode: mode });
+    try {
+      localStorage.setItem(PERMISSION_MODE_KEY, mode); // remembered as the next-launch default
+    } catch {
+      /* ignore */
+    }
+  }
+
+  async function pickRepoForPane(paneId: string) {
+    try {
+      const path = await pickRepository();
+      if (!path) return;
+      updatePaneDraft(paneId, { repo: path });
+      setRecents(await listTrustedRepos());
+    } catch (err) {
+      toast.error(safeErrorMessage(err));
+    }
   }
 
   function setSessionSandbox(sessionId: string, value: boolean) {
@@ -902,17 +953,6 @@ export default function App() {
   }, []);
 
   // Open the backend-owned native directory picker and update repo + recents.
-  async function pickRepo() {
-    try {
-      const path = await pickRepository();
-      if (!path) return;
-      setSelectedRepo(path);
-      setRecents(await listTrustedRepos());
-    } catch (err) {
-      toast.error(safeErrorMessage(err));
-    }
-  }
-
   // On mount: load sessions.
   useEffect(() => {
     void refreshSessions();
@@ -1316,12 +1356,18 @@ export default function App() {
 
   // Start a brand-new session from the NewSession composer, threading repo,
   // permissionMode, and the currently selected model into the shared send path.
-  function handleStartNewSession(text: string, paneId?: string) {
-    return handleSend(text, selectedModel, {
-      repo: selectedRepo ?? ".",
-      permissionMode: newSessionPermissionMode,
-      sandboxTerminal: newSessionSandbox,
-      agent: selectedAgent?.id ?? selectedModel?.agent ?? "claude",
+  function handleStartNewSession(text: string, paneId: string) {
+    const draft = draftFor(paneId);
+    const agentId = draft.agentId || "claude";
+    const model =
+      models.find((m) => m.value === draft.modelValue && m.agent === agentId) ??
+      models.find((m) => m.agent === agentId) ??
+      null;
+    return handleSend(text, model, {
+      repo: draft.repo ?? ".",
+      permissionMode: draft.permissionMode,
+      sandboxTerminal: draft.sandbox,
+      agent: agentId,
       sessionId: null,
       paneId,
     });
@@ -1584,6 +1630,19 @@ export default function App() {
                   : selectedModel?.agent === paneAgent
                     ? selectedModel
                     : (paneModels[0] ?? null);
+                // New Session pane draft (per-pane, so tabs don't share model/agent/permission).
+                const draft = pane.sessionId === null ? draftFor(pane.id) : null;
+                const draftAgent = draft
+                  ? (agents.find((a) => a.id === draft.agentId) ?? null)
+                  : null;
+                const draftModels = draft
+                  ? models.filter((m) => m.agent === draft.agentId)
+                  : [];
+                const draftModel = draft
+                  ? (draftModels.find((m) => m.value === draft.modelValue) ??
+                    draftModels[0] ??
+                    null)
+                  : null;
                 return (
                   <section
                     key={pane.id}
@@ -1624,23 +1683,21 @@ export default function App() {
                         </div>
                         <div className="min-h-0 flex-1 overflow-auto">
                           <NewSession
-                            repo={selectedRepo}
+                            repo={draft?.repo ?? null}
                             recents={recents}
                             agents={agents}
-                            agent={selectedAgent}
-                            models={modelsForSelectedAgent}
-                            model={selectedModel}
-                            permissionMode={newSessionPermissionMode}
-                            sandboxTerminal={newSessionSandbox}
+                            agent={draftAgent}
+                            models={draftModels}
+                            model={draftModel}
+                            permissionMode={draft?.permissionMode ?? DEFAULT_PERMISSION_MODE}
+                            sandboxTerminal={draft?.sandbox ?? false}
                             running={false}
-                            onPickRepo={pickRepo}
-                            onPickRecent={(p) => {
-                              setSelectedRepo(p);
-                            }}
-                            onAgentChange={handleAgentChange}
-                            onModelChange={handleModelChange}
-                            onPermissionModeChange={handleNewSessionPermissionModeChange}
-                            onSandboxTerminalChange={setNewSessionSandbox}
+                            onPickRepo={() => void pickRepoForPane(pane.id)}
+                            onPickRecent={(p) => updatePaneDraft(pane.id, { repo: p })}
+                            onAgentChange={(a) => paneAgentChange(pane.id, a)}
+                            onModelChange={(m) => paneModelChange(pane.id, m)}
+                            onPermissionModeChange={(mode) => panePermissionChange(pane.id, mode)}
+                            onSandboxTerminalChange={(v) => updatePaneDraft(pane.id, { sandbox: v })}
                             onStart={(text) => handleStartNewSession(text, pane.id)}
                           />
                         </div>
