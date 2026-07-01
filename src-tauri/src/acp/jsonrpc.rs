@@ -5,17 +5,21 @@
 //! official `agent-client-protocol` crate because that crate is `!Send`
 //! (Rc + LocalSet) and our `AgentAdapter::run` future must be `Send`.
 
+use crate::adapters::{read_capped_line, CappedLine, MAX_LINE_BYTES};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 
 #[derive(Debug, thiserror::Error)]
 pub enum RpcError {
     #[error("agent returned error {code}: {message}")]
     Remote { code: i64, message: String },
+    /// The transport is gone in some form: the reader hit EOF and drained this
+    /// pending request, the post-EOF half-closed guard rejected the request, or
+    /// a write hit a broken pipe / unexpected EOF (agent process died).
     #[error("connection closed before response")]
     Closed,
     #[error("io error: {0}")]
@@ -36,7 +40,11 @@ pub enum Inbound {
     },
 }
 
-type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, RpcError>>>>>;
+/// Pending requests keyed by the id's canonical JSON encoding (`Value::to_string()`),
+/// not by u64: JSON-RPC ids may be strings or floats, and a response echoing a
+/// non-u64 id must still resolve its caller instead of leaking the oneshot.
+/// Outbound ids stay numeric (`AtomicU64`); only the key representation is textual.
+type Pending = Arc<Mutex<HashMap<String, oneshot::Sender<Result<Value, RpcError>>>>>;
 
 /// One side of an ndjson JSON-RPC connection. Cheap to clone.
 #[derive(Clone)]
@@ -53,21 +61,44 @@ pub struct RpcPeer {
 
 impl RpcPeer {
     /// Start the peer: spawns the reader task routing incoming lines.
+    ///
+    /// Reader-task lifecycle: the task exits only when the transport reaches EOF
+    /// or a read error occurs. Dropping `RpcPeer` clones does NOT abort it. The
+    /// owning adapter must kill the child process — closing its stdout and
+    /// producing EOF — to end the task.
     pub fn start(
         read: impl AsyncRead + Unpin + Send + 'static,
         write: impl AsyncWrite + Unpin + Send + 'static,
     ) -> Self {
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
+        // Unbounded inbound channel is deliberate for M1: the single consumer
+        // (the adapter's event loop) drains it promptly, so it can't grow without
+        // bound in practice. Revisit if a slow approval UI ever backs it up.
         let (inbound_tx, inbound_rx) = mpsc::unbounded_channel();
         let reader_pending = Arc::clone(&pending);
         let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let reader_closed = Arc::clone(&closed);
         tokio::spawn(async move {
-            let mut lines = BufReader::new(read).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                route_line(&line, &reader_pending, &inbound_tx);
+            let mut reader = BufReader::new(read);
+            loop {
+                // Per-line size cap: a pathological line (huge embedded blob) is
+                // skipped rather than buffered unbounded — never fatal.
+                match read_capped_line(&mut reader, MAX_LINE_BYTES).await {
+                    Ok(CappedLine::Eof) => break,
+                    Ok(CappedLine::Skipped(bytes)) => {
+                        eprintln!("acp: skipped an oversized stdout line ({bytes} bytes)");
+                    }
+                    Ok(CappedLine::Line(buf)) => {
+                        let line = String::from_utf8_lossy(&buf);
+                        route_line(&line, &reader_pending, &inbound_tx);
+                    }
+                    Err(e) => {
+                        eprintln!("acp: transport read error: {e}");
+                        break;
+                    }
+                }
             }
-            // EOF: mark closed FIRST, then fail every still-pending request. A
+            // EOF/read error: mark closed FIRST, then fail every still-pending request. A
             // request that checks `closed` after inserting therefore either sees
             // the flag or has its entry drained here — no window to hang in.
             reader_closed.store(true, Ordering::SeqCst);
@@ -97,11 +128,14 @@ impl RpcPeer {
     /// Send a request; resolves with the matched response's `result`.
     pub async fn request(&self, method: &str, params: Value) -> Result<Value, RpcError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        // Key by the id's canonical JSON encoding so route_line can match the raw
+        // echoed id Value regardless of its JSON type (see `Pending`).
+        let key = Value::from(id).to_string();
         let (tx, rx) = oneshot::channel();
         self.pending
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .insert(id, tx);
+            .insert(key.clone(), tx);
         let msg =
             serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
         if let Err(e) = self.write_line(&msg).await {
@@ -111,20 +145,8 @@ impl RpcPeer {
             self.pending
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
-                .remove(&id);
-            // A broken pipe means the agent went away — report it as Closed so
-            // callers see one consistent "connection is gone" error.
-            return Err(match e {
-                RpcError::Io(io_err)
-                    if matches!(
-                        io_err.kind(),
-                        std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::UnexpectedEof
-                    ) =>
-                {
-                    RpcError::Closed
-                }
-                other => other,
-            });
+                .remove(&key);
+            return Err(e);
         }
         // Half-closed guard: if the reader already hit EOF, its drain may have run
         // before our insert — nothing would ever resolve this slot even though the
@@ -134,7 +156,7 @@ impl RpcPeer {
             self.pending
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
-                .remove(&id);
+                .remove(&key);
             return Err(RpcError::Closed);
         }
         rx.await.map_err(|_| RpcError::Closed)?
@@ -160,13 +182,28 @@ impl RpcPeer {
         .await
     }
 
+    /// Write one ndjson line. A broken pipe / unexpected EOF means the agent went
+    /// away — normalized to [`RpcError::Closed`] here so `request`, `notify`,
+    /// `respond`, and `respond_error` all report the same "connection is gone" error.
     async fn write_line(&self, msg: &Value) -> Result<(), RpcError> {
         let mut line = msg.to_string();
         line.push('\n');
         let mut w = self.writer.lock().await;
-        w.write_all(line.as_bytes()).await?;
-        w.flush().await?;
-        Ok(())
+        let result = async {
+            w.write_all(line.as_bytes()).await?;
+            w.flush().await
+        }
+        .await;
+        result.map_err(|io_err| {
+            if matches!(
+                io_err.kind(),
+                std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::UnexpectedEof
+            ) {
+                RpcError::Closed
+            } else {
+                RpcError::Io(io_err)
+            }
+        })
     }
 }
 
@@ -189,28 +226,31 @@ fn route_line(line: &str, pending: &Pending, inbound: &mpsc::UnboundedSender<Inb
     let method = v.get("method").and_then(Value::as_str);
     let id = v.get("id").cloned();
     match (method, id) {
-        // Response to one of our requests.
+        // Response to one of our requests. Match by the raw id's canonical JSON
+        // encoding — ids may be strings or floats, not just u64 (see `Pending`).
         (None, Some(id)) => {
-            let Some(id) = id.as_u64() else { return };
+            let key = id.to_string();
             let tx = pending
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
-                .remove(&id);
-            if let Some(tx) = tx {
-                let outcome = if let Some(err) = v.get("error") {
-                    Err(RpcError::Remote {
-                        code: err.get("code").and_then(Value::as_i64).unwrap_or(0),
-                        message: err
-                            .get("message")
-                            .and_then(Value::as_str)
-                            .unwrap_or("unknown error")
-                            .to_string(),
-                    })
-                } else {
-                    Ok(v.get("result").cloned().unwrap_or(Value::Null))
-                };
-                let _ = tx.send(outcome);
-            }
+                .remove(&key);
+            let Some(tx) = tx else {
+                eprintln!("acp: response for unknown id {key}");
+                return;
+            };
+            let outcome = if let Some(err) = v.get("error") {
+                Err(RpcError::Remote {
+                    code: err.get("code").and_then(Value::as_i64).unwrap_or(0),
+                    message: err
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown error")
+                        .to_string(),
+                })
+            } else {
+                Ok(v.get("result").cloned().unwrap_or(Value::Null))
+            };
+            let _ = tx.send(outcome);
         }
         // Request from the agent — must be answered by the consumer.
         (Some(m), Some(id)) => {
@@ -338,6 +378,58 @@ mod tests {
         let err = fut.await.unwrap_err();
         assert!(err.to_string().contains("method not found"));
         agent_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn out_of_order_responses_resolve_their_own_requests() {
+        let (peer, agent) = harness();
+        let (r, mut agent_tx) = tokio::io::split(agent);
+        let mut agent_rx = BufReader::new(r).lines();
+        let first = peer.request("one", serde_json::json!({}));
+        let second = peer.request("two", serde_json::json!({}));
+        let agent_task = tokio::spawn(async move {
+            // Read BOTH request lines, then answer the second id first.
+            let line_a = agent_rx.next_line().await.unwrap().unwrap();
+            let line_b = agent_rx.next_line().await.unwrap().unwrap();
+            let req_a: serde_json::Value = serde_json::from_str(&line_a).unwrap();
+            let req_b: serde_json::Value = serde_json::from_str(&line_b).unwrap();
+            for req in [&req_b, &req_a] {
+                let resp = serde_json::json!({
+                    "jsonrpc": "2.0", "id": req["id"],
+                    "result": {"for": req["method"]}
+                });
+                agent_tx
+                    .write_all(format!("{resp}\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+        });
+        let (first, second) = tokio::join!(first, second);
+        assert_eq!(first.unwrap()["for"], "one");
+        assert_eq!(second.unwrap()["for"], "two");
+        agent_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn route_line_matches_string_ids_via_canonical_key() {
+        // Outbound ids are always numeric, so pin the key normalization directly:
+        // a pending entry stored under the canonical JSON encoding of a STRING id
+        // must be resolved by a response echoing that id.
+        let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
+        let (inbound_tx, _inbound_rx) = mpsc::unbounded_channel();
+        let (tx, rx) = oneshot::channel();
+        pending
+            .lock()
+            .unwrap()
+            .insert("\"abc\"".to_string(), tx);
+        route_line(
+            "{\"jsonrpc\":\"2.0\",\"id\":\"abc\",\"result\":{\"ok\":true}}",
+            &pending,
+            &inbound_tx,
+        );
+        let result = rx.await.expect("oneshot must resolve").unwrap();
+        assert_eq!(result["ok"], true);
+        assert!(pending.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
