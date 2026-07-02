@@ -1,0 +1,169 @@
+//! Worktree containment for the ACP fs proxy (spec §Inbound request handling, M4).
+//!
+//! Whole-path `canonicalize` fails for files that don't exist yet — the common
+//! agent case is writing a NEW file — so: canonicalize the nearest EXISTING
+//! ancestor, require that under the canonicalized root, then lexically reject
+//! `..` in the remaining (non-existing) suffix before joining. Both sides of
+//! the containment check are canonicalized, which also normalizes Windows
+//! `\\?\` verbatim prefixes. Check-to-use TOCTOU is accepted risk for a local
+//! single-user app.
+
+use std::path::{Component, Path, PathBuf};
+
+/// Resolve `requested` to an absolute path guaranteed inside `canonical_root`,
+/// or explain why it was rejected. `canonical_root` must already be
+/// canonicalized by the caller (once per session, not per request).
+pub fn resolve_within_root(canonical_root: &Path, requested: &str) -> Result<PathBuf, String> {
+    if requested.trim().is_empty() {
+        return Err("empty path".to_string());
+    }
+    let requested_path = Path::new(requested);
+    let candidate: PathBuf = if requested_path.is_absolute() {
+        requested_path.to_path_buf()
+    } else {
+        canonical_root.join(requested_path)
+    };
+
+    // Split into (deepest existing ancestor, non-existing suffix).
+    let mut ancestor = candidate.clone();
+    let mut suffix: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        if ancestor.exists() {
+            break;
+        }
+        match (ancestor.parent(), ancestor.file_name()) {
+            (Some(parent), Some(name)) => {
+                suffix.push(name.to_os_string());
+                ancestor = parent.to_path_buf();
+            }
+            // Walked off the top without finding anything that exists.
+            _ => return Err(format!("path has no existing ancestor: {requested}")),
+        }
+    }
+    // NOTE: `parent()`/`file_name()` return None for `..` tails, but a `..`
+    // BETWEEN components would be consumed silently — reject them lexically
+    // over the whole candidate first, so no normalization ambiguity survives.
+    if candidate
+        .components()
+        .any(|c| matches!(c, Component::ParentDir))
+    {
+        return Err(format!("path may not contain '..': {requested}"));
+    }
+
+    let canonical_ancestor = std::fs::canonicalize(&ancestor)
+        .map_err(|e| format!("cannot resolve {}: {e}", ancestor.display()))?;
+    if !canonical_ancestor.starts_with(canonical_root) {
+        return Err(format!("path escapes the session worktree: {requested}"));
+    }
+
+    let mut resolved = canonical_ancestor;
+    for part in suffix.iter().rev() {
+        resolved.push(part);
+    }
+    Ok(resolved)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    /// A canonicalized tempdir root with one file and one subdir:
+    ///   <root>/existing.txt, <root>/sub/
+    /// Canonicalized because macOS tempdirs live behind the /tmp → /private/tmp
+    /// symlink — un-canonicalized expectations fail containment spuriously.
+    ///
+    /// No `tempfile` dev-dependency exists in this crate, so this mirrors the
+    /// hand-rolled `std::env::temp_dir()` + pid-and-tag-tagged directory
+    /// pattern already used by `inspect.rs`/`external_sessions.rs` tests,
+    /// with a best-effort `remove_dir_all` cleanup at the end of each test.
+    /// `tag` must be unique per test so parallel `cargo test` runs (same
+    /// process, same pid) don't collide on the same directory.
+    fn root(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("kl-fsguard-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let root = fs::canonicalize(&dir).unwrap();
+        fs::write(root.join("existing.txt"), "hello").unwrap();
+        fs::create_dir(root.join("sub")).unwrap();
+        root
+    }
+
+    #[test]
+    fn accepts_existing_file_inside_root() {
+        let root = root("accepts-existing-file");
+        let p = resolve_within_root(&root, root.join("existing.txt").to_str().unwrap()).unwrap();
+        assert_eq!(p, root.join("existing.txt"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn accepts_new_file_in_existing_dir() {
+        let root = root("accepts-new-in-existing-dir");
+        let p = resolve_within_root(&root, root.join("sub/new.txt").to_str().unwrap()).unwrap();
+        assert_eq!(p, root.join("sub/new.txt"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn accepts_new_file_under_new_nested_dirs() {
+        let root = root("accepts-new-nested-dirs");
+        let p = resolve_within_root(&root, root.join("a/b/c.txt").to_str().unwrap()).unwrap();
+        assert_eq!(p, root.join("a/b/c.txt"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn resolves_relative_paths_against_the_root() {
+        let root = root("resolves-relative");
+        let p = resolve_within_root(&root, "sub/new.txt").unwrap();
+        assert_eq!(p, root.join("sub/new.txt"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rejects_parent_dir_escape() {
+        let root = root("rejects-parent-escape");
+        assert!(resolve_within_root(&root, root.join("../outside.txt").to_str().unwrap()).is_err());
+        assert!(resolve_within_root(&root, "sub/../../outside.txt").is_err());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rejects_absolute_path_outside_root() {
+        let root = root("rejects-absolute-outside");
+        assert!(resolve_within_root(&root, "/etc/passwd").is_err());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rejects_dotdot_in_nonexisting_suffix() {
+        let root = root("rejects-dotdot-in-suffix");
+        // Ancestor "<root>/ghost" doesn't exist; the suffix still may not climb.
+        assert!(resolve_within_root(&root, root.join("ghost/../..").to_str().unwrap()).is_err());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlink_ancestor_pointing_outside_root() {
+        let root = root("rejects-symlink-outside-root");
+        let outside_dir =
+            std::env::temp_dir().join(format!("kl-fsguard-symlink-outside-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&outside_dir);
+        fs::create_dir_all(&outside_dir).unwrap();
+        std::os::unix::fs::symlink(&outside_dir, root.join("link")).unwrap();
+        // <root>/link exists and is inside lexically, but canonicalizes outside.
+        assert!(resolve_within_root(&root, root.join("link/new.txt").to_str().unwrap()).is_err());
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&outside_dir);
+    }
+
+    #[test]
+    fn rejects_empty_path() {
+        let root = root("rejects-empty-path");
+        assert!(resolve_within_root(&root, "").is_err());
+        assert!(resolve_within_root(&root, "   ").is_err());
+        let _ = fs::remove_dir_all(&root);
+    }
+}
