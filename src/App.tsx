@@ -135,6 +135,8 @@ type PaneDraft = {
   modelValue: string | null;
   permissionMode: PermissionMode;
   sandbox: boolean;
+  /** Streaming engine: "pipe" (default, CLI adapters) | "acp" (beta, claude only). */
+  engine: string;
 };
 type EventPageState = {
   nextOffset: number;
@@ -702,6 +704,7 @@ export default function App() {
       modelValue: selectedModel?.agent === agentId ? (selectedModel?.value ?? null) : null,
       permissionMode: newSessionPermissionMode,
       sandbox: newSessionSandbox,
+      engine: "pipe",
     };
   }
 
@@ -732,13 +735,25 @@ export default function App() {
         `${a.label} doesn't support "${permissionModeLabel(cur.permissionMode)}"; using "${permissionModeLabel(mode)}".`,
       );
     }
-    updatePaneDraft(paneId, { agentId: a.id, modelValue, permissionMode: mode });
+    updatePaneDraft(paneId, {
+      agentId: a.id,
+      modelValue,
+      permissionMode: mode,
+      // ACP is claude-only (M1): leaving claude drops the draft back to the pipe engine.
+      engine: a.id === "claude" ? cur.engine : "pipe",
+    });
   }
 
   function paneModelChange(paneId: string, m: ModelInfo) {
     const cur = draftFor(paneId);
     const { mode } = coercePermissionMode(cur.permissionMode, m.agent);
-    updatePaneDraft(paneId, { modelValue: m.value, agentId: m.agent, permissionMode: mode });
+    updatePaneDraft(paneId, {
+      modelValue: m.value,
+      agentId: m.agent,
+      permissionMode: mode,
+      // Picking another agent's model also switches agents — same ACP reset rule.
+      engine: m.agent === "claude" ? cur.engine : "pipe",
+    });
   }
 
   function panePermissionChange(paneId: string, mode: PermissionMode) {
@@ -1273,6 +1288,8 @@ export default function App() {
       permissionMode?: PermissionMode;
       sandboxTerminal?: boolean;
       agent?: string;
+      /** Streaming engine for NEW sessions only; follow-ups reuse the persisted engine. */
+      engine?: string;
       sessionId?: string | null;
       paneId?: string;
     },
@@ -1406,6 +1423,7 @@ export default function App() {
           model: modelArg,
           permissionMode: effectivePermissionMode,
           sandboxTerminal: effectiveSandbox,
+          engine: opts?.engine,
           onEvent,
         });
       } else {
@@ -1454,6 +1472,7 @@ export default function App() {
       repo: draft.repo ?? ".",
       permissionMode: draft.permissionMode,
       sandboxTerminal: draft.sandbox,
+      engine: draft.engine,
       agent: agentId,
       sessionId: null,
       paneId,
@@ -1804,6 +1823,7 @@ export default function App() {
                             model={draftModel}
                             permissionMode={draft?.permissionMode ?? DEFAULT_PERMISSION_MODE}
                             sandboxTerminal={draft?.sandbox ?? false}
+                            engine={draft?.engine ?? "pipe"}
                             running={false}
                             onPickRepo={() => void pickRepoForPane(pane.id)}
                             onPickRecent={(p) => updatePaneDraft(pane.id, { repo: p })}
@@ -1811,6 +1831,7 @@ export default function App() {
                             onModelChange={(m) => paneModelChange(pane.id, m)}
                             onPermissionModeChange={(mode) => panePermissionChange(pane.id, mode)}
                             onSandboxTerminalChange={(v) => updatePaneDraft(pane.id, { sandbox: v })}
+                            onEngineChange={(engine) => updatePaneDraft(pane.id, { engine })}
                             onStart={(text) => handleStartNewSession(text, pane.id)}
                           />
                         </div>

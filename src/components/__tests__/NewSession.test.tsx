@@ -43,6 +43,7 @@ function setup(overrides: Partial<React.ComponentProps<typeof NewSession>> = {})
   const onModelChange = vi.fn();
   const onPermissionModeChange = vi.fn();
   const onSandboxTerminalChange = vi.fn();
+  const onEngineChange = vi.fn();
   const onStart = vi.fn();
 
   render(
@@ -55,6 +56,7 @@ function setup(overrides: Partial<React.ComponentProps<typeof NewSession>> = {})
       model={opus}
       permissionMode="default"
       sandboxTerminal={false}
+      engine="pipe"
       running={false}
       onPickRepo={onPickRepo}
       onPickRecent={onPickRecent}
@@ -62,6 +64,7 @@ function setup(overrides: Partial<React.ComponentProps<typeof NewSession>> = {})
       onModelChange={onModelChange}
       onPermissionModeChange={onPermissionModeChange}
       onSandboxTerminalChange={onSandboxTerminalChange}
+      onEngineChange={onEngineChange}
       onStart={onStart}
       {...overrides}
     />,
@@ -74,6 +77,7 @@ function setup(overrides: Partial<React.ComponentProps<typeof NewSession>> = {})
     onModelChange,
     onPermissionModeChange,
     onSandboxTerminalChange,
+    onEngineChange,
     onStart,
   };
 }
@@ -226,6 +230,25 @@ test("Claude offers the advanced 'Locked-down (CI)' mode", async () => {
   setup({ agent: claudeAgent });
   await userEvent.click(screen.getByRole("button", { name: /Permission mode:/i }));
   expect(screen.getByRole("menuitemradio", { name: /Locked-down/i })).toBeInTheDocument();
+});
+
+// ── ACP engine toggle ──────────────────────────────────────────────────────────
+
+test("threads the ACP engine toggle into onEngineChange", async () => {
+  const { onEngineChange } = setup({ agent: claudeAgent, engine: "pipe" });
+  await userEvent.click(screen.getByRole("switch", { name: /acp streaming/i }));
+  expect(onEngineChange).toHaveBeenCalledWith("acp");
+});
+
+test("turning the ACP toggle off calls onEngineChange with 'pipe'", async () => {
+  const { onEngineChange } = setup({ agent: claudeAgent, engine: "acp" });
+  await userEvent.click(screen.getByRole("switch", { name: /acp streaming/i }));
+  expect(onEngineChange).toHaveBeenCalledWith("pipe");
+});
+
+test("hides the ACP toggle for non-claude agents (M1)", () => {
+  setup({ agent: codexAgent, engine: "pipe" });
+  expect(screen.queryByRole("switch", { name: /acp streaming/i })).not.toBeInTheDocument();
 });
 
 test("Antigravity offers only Ask before edits + Full access (no Auto-edit or advanced)", async () => {

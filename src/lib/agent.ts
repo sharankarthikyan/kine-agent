@@ -52,6 +52,8 @@ export interface StartSessionArgs {
   permissionMode?: string;
   /** Antigravity-only: restrict terminal commands' network/disk access (`agy --sandbox`). */
   sandboxTerminal?: boolean;
+  /** Streaming engine: "pipe" (default, CLI adapters) | "acp" (beta, claude only). */
+  engine?: string;
   onEvent: (event: AgentEvent) => void;
 }
 
@@ -61,11 +63,11 @@ export interface StartSessionArgs {
  * render an optimistic row immediately). The backend creates an isolated
  * worktree for the session and events stream back via `onEvent`.
  */
-export async function startSession({ prompt, repo, sessionId, agent, model, permissionMode, sandboxTerminal, onEvent }: StartSessionArgs): Promise<void> {
+export async function startSession({ prompt, repo, sessionId, agent, model, permissionMode, sandboxTerminal, engine, onEvent }: StartSessionArgs): Promise<void> {
   assertDesktop();
   const channel = new Channel<AgentEvent>();
   channel.onmessage = onEvent;
-  await invoke("start_session", { prompt, repo, sessionId, agent, model, permissionMode, sandboxTerminal, onEvent: channel });
+  await invoke("start_session", { prompt, repo, sessionId, agent, model, permissionMode, sandboxTerminal, engine, onEvent: channel });
 }
 
 /** Remove the worktree and branch for a finished session. */
