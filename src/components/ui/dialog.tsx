@@ -50,7 +50,10 @@ const DialogContent = React.forwardRef<
       {...props}
     >
       {children}
-      <DialogPrimitive.Close className="absolute right-4 top-4 rounded-sm opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:pointer-events-none data-[state=open]:bg-accent data-[state=open]:text-muted-foreground z-10">
+      {/* p-1 at right-3/top-3 keeps the icon at the same 16px inset while giving the
+          hover background room to breathe; after:-inset-2 extends the 24px box to a
+          40px hit area without any visual change. */}
+      <DialogPrimitive.Close className="absolute right-3 top-3 rounded-md p-1 opacity-70 ring-offset-background transition-[opacity,background-color] hover:opacity-100 hover:bg-accent hover:text-accent-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:pointer-events-none data-[state=open]:bg-accent data-[state=open]:text-muted-foreground z-10 after:absolute after:-inset-2 after:content-['']">
         <X className="h-4 w-4" />
         <span className="sr-only">Close</span>
       </DialogPrimitive.Close>

@@ -132,8 +132,8 @@ test("shows counts in the left nav for agents, skills, instructions, hooks, mcp"
 
 test("overview is the default active section and shows overview heading", () => {
   render(<CustomizationsDialog {...defaultProps} />);
-  // The overview section heading should be visible (distinct from the sr-only dialog title)
-  expect(screen.getByRole("heading", { name: /^customizations$/i })).toBeInTheDocument();
+  // The overview section heading should be visible (distinct from the title-bar heading)
+  expect(screen.getByRole("heading", { name: /^overview$/i })).toBeInTheDocument();
 });
 
 test("overview section shows cards for each non-overview section", () => {

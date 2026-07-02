@@ -364,9 +364,9 @@ function OverviewSection({
   return (
     <div className="flex flex-col gap-4 p-4">
       <div>
-        <h2 className="text-base font-semibold">Customizations</h2>
+        <h2 className="text-base font-semibold">Overview</h2>
         <p className="text-sm text-muted-foreground mt-0.5">
-          Agents, skills, rules, hooks, and servers configured for this session.
+          All customizations configured for this session, at a glance.
         </p>
       </div>
       <div className="grid grid-cols-2 gap-2.5">
@@ -880,14 +880,18 @@ export function CustomizationsDialog({
       <DialogContent
         className="w-[min(1180px,84vw)] h-[min(800px,82vh)] max-w-none flex flex-col p-0 gap-0 overflow-hidden rounded-2xl border border-border shadow-2xl"
       >
-        {/* A11y: accessible name and description for the dialog (sr-only). */}
-        <DialogTitle className="sr-only">Agent customizations</DialogTitle>
+        {/* Title bar: visible dialog title on the left, and the h-12 strip keeps the
+            absolute close button (top-4 + 16px icon → center 24px) vertically
+            centered beside the content panel instead of overlaying it. */}
+        <DialogTitle className="flex h-12 shrink-0 items-center px-4 text-sm font-medium text-muted-foreground">
+          Customizations
+        </DialogTitle>
         <DialogDescription className="sr-only">
           Browse agents, skills, instructions, hooks, MCP servers, and plugins configured for this session.
         </DialogDescription>
 
-        {/* Two-column layout: left nav + inset rounded content panel */}
-        <div className="flex flex-1 min-h-0 overflow-hidden gap-2 p-2">
+        {/* Two-column layout: left nav + inset rounded content panel. */}
+        <div className="flex flex-1 min-h-0 overflow-hidden gap-2 px-2 pb-2">
           {/* Left nav */}
           <nav
             className="w-48 shrink-0 flex flex-col py-1 px-1 gap-0.5 overflow-y-auto"
@@ -904,8 +908,10 @@ export function CustomizationsDialog({
             ))}
           </nav>
 
-          {/* Right content — inset rounded panel */}
-          <div className="flex-1 min-w-0 min-h-0 rounded-xl border border-border overflow-hidden">
+          {/* Right content — inset rounded panel. rounded-lg keeps the radius
+              concentric with the outer frame: outer rounded-2xl (16px) − p-2 gap
+              (8px) = 8px. */}
+          <div className="flex-1 min-w-0 min-h-0 rounded-lg border border-border overflow-hidden">
             {detail !== null ? (
               <FileDetailView
                 detail={detail}
