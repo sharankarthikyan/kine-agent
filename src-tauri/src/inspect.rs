@@ -131,13 +131,40 @@ fn allowed_read_write_paths(worktree: &Path, canonical_worktree: &Path) -> Vec<P
         if cap.path.is_empty() {
             continue;
         }
-        if let Ok(cp) = std::fs::canonicalize(&cap.path) {
-            if cap_roots.iter().any(|root| cp.starts_with(root)) {
-                allowed.push(cp);
-            }
+        let Ok(cp) = std::fs::canonicalize(&cap.path) else {
+            continue;
+        };
+        if cap_roots.iter().any(|root| cp.starts_with(root)) {
+            allowed.push(cp);
+        } else if capability_file_is_real_behind_dir_symlinks(&cap.path, &cp) {
+            // Per-ENTRY directory symlink: skill managers symlink each skill dir
+            // into `.claude/skills` (skills/foo -> ~/.agents/skills/foo), so the
+            // canonical path escapes every discovery root even though the file is
+            // genuine. Allowed only when resolving the parent directories keeps
+            // the file inside them — a FILE symlink (SKILL.md -> ~/.ssh/id_rsa)
+            // still resolves elsewhere and stays rejected.
+            allowed.push(cp);
         }
     }
     allowed
+}
+
+/// True when `path`'s final component is a real file once its parent directories
+/// are resolved — i.e. any symlinks on the way are DIRECTORY symlinks, and the
+/// file itself is not a symlink. `canonical` must be `canonicalize(path)`.
+fn capability_file_is_real_behind_dir_symlinks(path: &str, canonical: &Path) -> bool {
+    let p = Path::new(path);
+    let (Some(parent), Some(file_name)) = (p.parent(), p.file_name()) else {
+        return false;
+    };
+    let Ok(canonical_parent) = std::fs::canonicalize(parent) else {
+        return false;
+    };
+    let candidate = canonical_parent.join(file_name);
+    let Ok(meta) = std::fs::symlink_metadata(&candidate) else {
+        return false;
+    };
+    !meta.file_type().is_symlink() && candidate == canonical
 }
 
 /// Read a rule/config file, but ONLY if it is one of the exact files returned by
@@ -717,6 +744,53 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&real_skills);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_allows_capability_under_per_entry_symlinked_skill_dir() {
+        // Skill managers install by symlinking EACH skill directory into
+        // `.claude/skills` (e.g. `skills/agent-browser -> ~/.agents/skills/agent-browser`)
+        // while `skills` itself stays a real directory. The SKILL.md canonicalizes
+        // outside every discovery root, but it is a real file reached through a
+        // directory symlink — it must remain readable.
+        let dir = std::env::temp_dir().join(format!("ae-syment-{}", std::process::id()));
+        let real = std::env::temp_dir().join(format!("ae-realent-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join(".claude/skills")).unwrap();
+        std::fs::create_dir_all(real.join("bar")).unwrap();
+        std::fs::write(real.join("bar/SKILL.md"), "skill body").unwrap();
+        // .claude/skills/bar -> real/bar (per-entry directory symlink)
+        std::os::unix::fs::symlink(real.join("bar"), dir.join(".claude/skills/bar")).unwrap();
+
+        let skill_via_link = dir.join(".claude/skills/bar/SKILL.md");
+        assert_eq!(
+            read_text_file(&skill_via_link.display().to_string(), &dir).unwrap(),
+            "skill body"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&real);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_rejects_file_symlink_inside_real_skill_dir() {
+        // A FILE symlink jumping out of a real skill dir (SKILL.md -> secret) must
+        // stay Forbidden even once per-entry directory symlinks are allowed.
+        let dir = std::env::temp_dir().join(format!("ae-symfile-{}", std::process::id()));
+        let skill_dir = dir.join(".claude/skills/evil");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let secret = std::env::temp_dir().join(format!("ae-symfile-secret-{}", std::process::id()));
+        std::fs::write(&secret, "TOP SECRET").unwrap();
+        std::os::unix::fs::symlink(&secret, skill_dir.join("SKILL.md")).unwrap();
+
+        assert!(matches!(
+            read_text_file(&skill_dir.join("SKILL.md").display().to_string(), &dir),
+            Err(InspectError::Forbidden(_))
+        ));
+
+        let _ = std::fs::remove_file(&secret);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
