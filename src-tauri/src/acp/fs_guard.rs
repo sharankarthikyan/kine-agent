@@ -28,7 +28,16 @@ pub fn resolve_within_root(canonical_root: &Path, requested: &str) -> Result<Pat
     let mut ancestor = candidate.clone();
     let mut suffix: Vec<std::ffi::OsString> = Vec::new();
     loop {
-        if ancestor.exists() {
+        // `symlink_metadata` reports existence WITHOUT following the final
+        // symlink component (unlike `exists()`, which follows links and
+        // reports `false` for a dangling one). A dangling symlink must count
+        // as "existing" here so it becomes the ancestor to canonicalize —
+        // `std::fs::canonicalize` then fails on it (broken link) and the
+        // request is rejected, instead of the dangling link being treated as
+        // a non-existing path suffix that a later `tokio::fs::write` would
+        // follow and use to CREATE the symlink's (possibly outside-root)
+        // target.
+        if ancestor.symlink_metadata().is_ok() {
             break;
         }
         match (ancestor.parent(), ancestor.file_name()) {
@@ -157,6 +166,46 @@ mod tests {
         assert!(resolve_within_root(&root, root.join("link/new.txt").to_str().unwrap()).is_err());
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&outside_dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_dangling_symlink_final_component() {
+        let root = root("rejects-dangling-symlink");
+        // Dangling link: target does not exist, so exists() would say false and
+        // (pre-fix) the link joins the "non-existing suffix" — a write through
+        // the returned path would CREATE the outside target. Must reject.
+        std::os::unix::fs::symlink("/nonexistent-outside-target", root.join("link")).unwrap();
+        assert!(resolve_within_root(&root, root.join("link").to_str().unwrap()).is_err());
+        assert!(
+            resolve_within_root(&root, root.join("link/nested.txt").to_str().unwrap()).is_err()
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rejects_lexical_prefix_confusion_sibling() {
+        let root = root("rejects-lexical-prefix-sibling");
+        // Sibling dir whose name string-prefixes the root must not pass containment.
+        let sibling = root.parent().unwrap().join(format!(
+            "{}-evil",
+            root.file_name().unwrap().to_str().unwrap()
+        ));
+        fs::create_dir_all(&sibling).unwrap();
+        let result = resolve_within_root(&root, sibling.join("x.txt").to_str().unwrap());
+        let _ = fs::remove_dir_all(&sibling);
+        assert!(result.is_err());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn accepts_in_root_symlink_to_in_root_target() {
+        let root = root("accepts-in-root-symlink");
+        std::os::unix::fs::symlink(root.join("existing.txt"), root.join("alias.txt")).unwrap();
+        let p = resolve_within_root(&root, root.join("alias.txt").to_str().unwrap()).unwrap();
+        assert_eq!(p, root.join("existing.txt")); // canonicalized to the target
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

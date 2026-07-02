@@ -546,12 +546,20 @@ async fn answer_request(
             match tokio::fs::read_to_string(&path).await {
                 Ok(content) => {
                     let sliced = slice_lines(&content, line, limit);
-                    let _ = peer
+                    if let Err(e) = peer
                         .respond(id, serde_json::json!({"content": sliced}))
-                        .await;
+                        .await
+                    {
+                        eprintln!("acp: failed to answer {method}: {e}");
+                    }
                 }
                 Err(e) => {
-                    let _ = peer.respond_error(id, -32603, &format!("read failed: {e}")).await;
+                    if let Err(e) = peer
+                        .respond_error(id, -32603, &format!("read failed: {e}"))
+                        .await
+                    {
+                        eprintln!("acp: failed to answer {method}: {e}");
+                    }
                 }
             }
             None
@@ -566,19 +574,28 @@ async fn answer_request(
             .await;
             match write_result {
                 Ok(()) => {
-                    let _ = peer.respond(id, serde_json::json!({})).await;
+                    if let Err(e) = peer.respond(id, serde_json::json!({})).await {
+                        eprintln!("acp: failed to answer {method}: {e}");
+                    }
                     Some(AgentEvent::FileWrite {
                         path: path.to_string_lossy().to_string(),
                     })
                 }
                 Err(e) => {
-                    let _ = peer.respond_error(id, -32603, &format!("write failed: {e}")).await;
+                    if let Err(e) = peer
+                        .respond_error(id, -32603, &format!("write failed: {e}"))
+                        .await
+                    {
+                        eprintln!("acp: failed to answer {method}: {e}");
+                    }
                     None
                 }
             }
         }
         InboundAnswer::FsRejected { message } => {
-            let _ = peer.respond_error(id, -32602, &message).await;
+            if let Err(e) = peer.respond_error(id, -32602, &message).await {
+                eprintln!("acp: failed to answer {method}: {e}");
+            }
             None
         }
     }

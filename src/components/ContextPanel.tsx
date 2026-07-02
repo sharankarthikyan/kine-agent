@@ -52,7 +52,7 @@ function SectionHeading({ children }: { children: React.ReactNode }) {
 // Normalizes Windows separators to `/` so the match works cross-platform.
 function displayPath(path: string): string {
   const norm = path.replace(/\\/g, "/");
-  const match = norm.match(/\/\.(?:kineloop|agent-editor)\/worktrees\/[^/]+\/(.+)$/);
+  const match = norm.match(/\/(?:\.(?:kineloop|agent-editor)|Kineloop)\/worktrees\/[^/]+\/(.+)$/);
   return match ? match[1] : norm;
 }
 
