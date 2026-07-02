@@ -83,10 +83,20 @@ pub fn parse_modes(result: &Value) -> SessionModes {
 /// (acceptEdits, bypassPermissions, plan, dontAsk, auto) and codex-acp ids
 /// (read-only, auto, full-access). Falls back along same-or-safer semantics when
 /// the primary mapping isn't in `available`; an empty `available` (agent didn't
-/// advertise) trusts the primary (claude-shaped) mapping.
+/// advertise) trusts the primary (claude-shaped) mapping. Name collision: "auto"
+/// is claude's FULLY-AUTONOMOUS mode but codex's ask-on-escalation mode, so
+/// acceptEdits only falls back to "auto" when the advertised list is codex-shaped.
 pub fn acp_mode_for(permission_mode: Option<&str>, available: &[String]) -> String {
+    // "auto" is two different modes wearing one name: codex-acp's auto asks on
+    // escalation (safe fallback for acceptEdits), claude-agent-acp's auto is
+    // fully autonomous (the M3 bug). Only trust it for acceptEdits when the
+    // advertised list is codex-shaped — claude never advertises these ids.
+    let codex_shaped = available
+        .iter()
+        .any(|a| a == "read-only" || a == "full-access");
     let chain: &[&str] = match permission_mode {
-        Some("acceptEdits") => &["acceptEdits", "auto", "default"],
+        Some("acceptEdits") if codex_shaped => &["acceptEdits", "auto", "default"],
+        Some("acceptEdits") => &["acceptEdits", "default"],
         Some("plan") => &["plan", "read-only", "default"],
         Some("full") => &["bypassPermissions", "full-access", "acceptEdits", "auto", "default"],
         Some("dontAsk") => &["dontAsk", "full-access", "acceptEdits", "auto", "default"],
@@ -495,6 +505,11 @@ mod tests {
         // full → auto when only auto/default are advertised (codex-ish list).
         let only_auto = vec!["auto".to_string(), "default".to_string()];
         assert_eq!(acp_mode_for(Some("full"), &only_auto), "auto");
+
+        // claude-shaped list advertising auto WITHOUT acceptEdits: auto is
+        // claude's fully-autonomous mode — acceptEdits must NOT escalate to it.
+        let claude_auto = vec!["auto".to_string(), "default".to_string()];
+        assert_eq!(acp_mode_for(Some("acceptEdits"), &claude_auto), "default");
 
         // empty available (agent didn't advertise) → primary mapping unclamped
         assert_eq!(acp_mode_for(Some("acceptEdits"), &[]), "acceptEdits");
