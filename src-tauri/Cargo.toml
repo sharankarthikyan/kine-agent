@@ -27,3 +27,7 @@ thiserror = "2"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
 which = "6"
 dirs = "6"
+
+# Unix-only: group-kill of agent process trees (adapters/acp.rs teardown).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

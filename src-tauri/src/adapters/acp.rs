@@ -122,14 +122,22 @@ async fn spawn_and_drive(
         ));
     }
     let npx = crate::agent_paths::resolve_program("npx");
-    let mut child = Command::new(&npx)
-        .arg("--yes")
+    let mut cmd = Command::new(&npx);
+    cmd.arg("--yes")
         .arg(profile.package)
         .current_dir(&cwd)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
+        .kill_on_drop(true);
+    // The child must lead its own process group: npx's descendants (the node
+    // shim and codex-acp's native binary) don't die with npx — SIGKILL doesn't
+    // propagate — and codex-acp doesn't exit on stdin EOF either (observed
+    // live: one orphaned node+binary pair leaked per turn). Group-kill below
+    // is the only reliable teardown for the whole tree.
+    #[cfg(unix)]
+    cmd.process_group(0);
+    let mut child = cmd
         .spawn()
         .map_err(|e| SessionError::Spawn(format!("npx {}: {e}", profile.package)))?;
     let stdin = child
@@ -176,9 +184,17 @@ async fn spawn_and_drive(
     // Kill BEFORE awaiting the stderr tail: an ACP agent is a persistent server,
     // and the tail task only resolves at stderr EOF (child exit). Awaiting first
     // would hang whenever the agent ignores stdin EOF after the turn completes.
-    // The await is bounded too: the kill only reaches the direct child (npx),
-    // and a descendant that survives it keeps the stderr pipe open — its
-    // lifetime must never wedge the session.
+    // The await stays bounded regardless: any process that escapes the kill
+    // (non-unix, or a descendant that left the group) keeps the stderr pipe
+    // open — its lifetime must never wedge the session.
+    //
+    // Kill the entire process group first (unix): the direct kill below only
+    // reaches the npx wrapper. On non-unix this degrades to the direct kill.
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        // process_group(0) above made the child's pgid == its pid.
+        unsafe { libc::killpg(pid as i32, libc::SIGKILL) };
+    }
     let _ = child.kill().await;
     let stderr_tail =
         match tokio::time::timeout(std::time::Duration::from_secs(2), stderr_task).await {
@@ -2259,5 +2275,60 @@ mod tests {
         .await
         .unwrap();
         agent.await.unwrap();
+    }
+
+    /// Pins the teardown mechanism spawn_and_drive relies on: SIGKILL to the
+    /// process GROUP reaches descendants the direct kill can't. npx's node
+    /// shim + codex-acp's native binary survive their parent's SIGKILL and
+    /// ignore stdin EOF (observed live in the M6 smoke — one orphaned pair
+    /// leaked per turn). A shell with a background `sleep` stands in for the
+    /// npx tree; a real npx tree is out of scope for a unit test.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn group_kill_reaches_grandchildren_the_direct_kill_cannot() {
+        use tokio::io::AsyncReadExt;
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c")
+            .arg("echo $$; sleep 30 & echo $!; wait")
+            .stdout(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        // Mirrors spawn_and_drive: the child leads its own process group, so
+        // its pgid == its pid and killpg(pid) covers the whole tree.
+        cmd.process_group(0);
+        let mut child = cmd.spawn().unwrap();
+        let mut stdout = child.stdout.take().unwrap();
+        let mut out = String::new();
+        let mut buf = [0u8; 256];
+        while out.lines().count() < 2 {
+            let n = stdout.read(&mut buf).await.unwrap();
+            assert!(n > 0, "shell exited before printing both pids: {out:?}");
+            out.push_str(std::str::from_utf8(&buf[..n]).unwrap());
+        }
+        let mut lines = out.lines();
+        let shell_pid: i32 = lines.next().unwrap().trim().parse().unwrap();
+        let sleep_pid: i32 = lines.next().unwrap().trim().parse().unwrap();
+        // Sanity: the descendant is alive before the kill.
+        assert_eq!(unsafe { libc::kill(sleep_pid, 0) }, 0);
+
+        // The mechanism under test. A direct kill(shell_pid) here — what
+        // child.kill() amounts to — leaves the sleep orphaned and alive
+        // (verified: this test FAILS with kill in place of killpg).
+        unsafe { libc::killpg(shell_pid, libc::SIGKILL) };
+        let _ = child.wait().await; // reap the direct child
+
+        // Bounded poll: SIGKILL delivery + init reaping the orphan aren't
+        // instantaneous. ESRCH ⇒ the descendant is truly gone.
+        let mut gone = false;
+        for _ in 0..100 {
+            let alive = unsafe { libc::kill(sleep_pid, 0) } == 0;
+            if !alive
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+            {
+                gone = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(gone, "grandchild (sleep) survived the group kill");
     }
 }
