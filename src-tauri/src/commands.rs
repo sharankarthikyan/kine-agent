@@ -321,7 +321,20 @@ async fn run_persisting(
     // below). On cancel of an ACP engine, the adapter saw the same watch signal and is
     // sending session/cancel; give it a bounded grace window to finish the turn before
     // falling back to the same drop-based kill.
-    tokio::pin!(run_future);
+    //
+    // `run_future` is boxed (not just `tokio::pin!`-ed) so it can be dropped *explicitly*
+    // while still Pending. `select!` only drops the async expression it was given for a
+    // losing branch; when that expression is `&mut run_future` (a re-borrow, as `pin!`
+    // requires for the ACP grace re-await), losing the race drops the reborrow — a no-op
+    // — and leaves the referenced future alive and un-polled. Verified empirically: a
+    // guard held across `long_running().await` inside a `pin!`-ed future did NOT run its
+    // `Drop` immediately after `select!` picked the other branch. Left as `pin!` alone,
+    // both the pipe "immediate kill" and the ACP grace-timeout kill would silently stop
+    // polling the run but never drop it, so `kill_on_drop` never fires and the child
+    // keeps running; worse, `sink`'s `tx` (owned by the still-alive future) never drops,
+    // so `drain.await` below hangs forever waiting for `rx` to close. Boxing keeps
+    // `run_future` an owned value we can `drop()` on purpose in the "give up" arms.
+    let mut run_future = Box::pin(run_future);
     let mut cancelled = false;
     let result = tokio::select! {
         r = &mut run_future => r,
@@ -335,11 +348,13 @@ async fn run_persisting(
                     Ok(r) => r,
                     Err(_) => {
                         eprintln!("acp: cancel grace expired for {session_id} — killing the agent");
+                        drop(run_future);
                         Ok(())
                     }
                 }
             } else {
                 // Pipe engines: immediate kill via drop, exactly as before.
+                drop(run_future);
                 Ok(())
             }
         }
