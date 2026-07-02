@@ -164,8 +164,17 @@ function shortenPath(path: string): string {
   return norm.replace(/^(?:[A-Za-z]:)?\/(?:Users|home)\/[^/]+\//, "~/");
 }
 
+interface FileDetail {
+  name: string;
+  path: string;
+  editable: boolean;
+  /** Which scope the file lives in — surfaced as a badge so the user always knows
+   *  whether they are editing a project file or a global (~/.claude) one. */
+  scope: "project" | "global";
+}
+
 interface FileDetailViewProps {
-  detail: { name: string; path: string; editable: boolean };
+  detail: FileDetail;
   loading: boolean;
   error: boolean;
   content: string | null;
@@ -229,7 +238,12 @@ function FileDetailView({ detail, loading, error, content, sessionId, onBack, on
           <ArrowLeft className="size-4" />
         </Button>
         <div className="flex flex-col min-w-0 gap-0.5 flex-1">
-          <span className="text-sm font-bold leading-tight truncate">{detail.name}</span>
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="text-sm font-bold leading-tight truncate">{detail.name}</span>
+            <Badge variant="outline" className="shrink-0 text-xs font-normal">
+              {detail.scope === "project" ? "Project" : "Global"}
+            </Badge>
+          </div>
           <span
             className="text-xs text-muted-foreground font-mono leading-tight truncate"
             title={detail.path}
@@ -556,7 +570,7 @@ function NewCapabilityForm({
 }: {
   kind: CapabilityKind;
   sessionId: string | null;
-  onCreated: (name: string, path: string) => void;
+  onCreated: (name: string, path: string, scope: "project" | "global") => void;
   onCancel: () => void;
 }) {
   const [name, setName] = useState("");
@@ -567,11 +581,12 @@ function NewCapabilityForm({
   async function submit() {
     if (!valid) return;
     const trimmed = name.trim();
+    const target = scopedSessionId(sessionId, scope);
     setBusy(true);
     try {
-      const path = await createCustomization(scopedSessionId(sessionId, scope), kind, trimmed);
+      const path = await createCustomization(target, kind, trimmed);
       toast.success(`Created ${trimmed}`);
-      onCreated(trimmed, path);
+      onCreated(trimmed, path, target === null ? "global" : "project");
     } catch (err) {
       toast.error(String(err));
     } finally {
@@ -630,8 +645,8 @@ function CapabilitySection({
   search: string;
   onSearchChange: (s: string) => void;
   sessionId: string | null;
-  onOpenDetail: (name: string, path: string, editable: boolean) => void;
-  onCreated: (name: string, path: string) => void;
+  onOpenDetail: (name: string, path: string, editable: boolean, scope: "project" | "global") => void;
+  onCreated: (name: string, path: string, scope: "project" | "global") => void;
   onDelete: (path: string) => Promise<void>;
 }) {
   const [adding, setAdding] = useState(false);
@@ -662,9 +677,9 @@ function CapabilitySection({
         <NewCapabilityForm
           kind={kind}
           sessionId={sessionId}
-          onCreated={(name, path) => {
+          onCreated={(name, path, scope) => {
             setAdding(false);
-            onCreated(name, path);
+            onCreated(name, path, scope);
           }}
           onCancel={() => setAdding(false)}
         />
@@ -679,7 +694,17 @@ function CapabilitySection({
             <CapabilityRow
               key={cap.path || `${cap.source}-${cap.name}`}
               capability={cap}
-              onOpen={cap.path ? () => onOpenDetail(cap.name, cap.path, true) : undefined}
+              onOpen={
+                cap.path
+                  ? () =>
+                      onOpenDetail(
+                        cap.name,
+                        cap.path,
+                        true,
+                        cap.source === "user" ? "global" : "project"
+                      )
+                  : undefined
+              }
               onDelete={cap.path ? () => onDelete(cap.path) : undefined}
             />
           ))}
@@ -700,7 +725,7 @@ function InstructionsSection({
   rules: RuleFile[];
   search: string;
   onSearchChange: (s: string) => void;
-  onOpenDetail: (name: string, path: string, editable: boolean) => void;
+  onOpenDetail: (name: string, path: string, editable: boolean, scope: "project" | "global") => void;
 }) {
   const existing = rules.filter((r) => r.exists);
   const filtered = search
@@ -725,7 +750,7 @@ function InstructionsSection({
               key={rule.path}
               type="button"
               className="flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-muted/50 text-left w-full min-w-0"
-              onClick={() => onOpenDetail(rule.label, rule.path, true)}
+              onClick={() => onOpenDetail(rule.label, rule.path, true, rule.scope)}
             >
               <FileCode className="size-3.5 text-muted-foreground shrink-0" />
               <span className="flex-1 min-w-0 truncate text-sm">{rule.label}</span>
@@ -1360,7 +1385,7 @@ export function CustomizationsDialog({
   const [search, setSearch] = useState("");
 
   // In-dialog file detail view state.
-  const [detail, setDetail] = useState<{ name: string; path: string; editable: boolean } | null>(null);
+  const [detail, setDetail] = useState<FileDetail | null>(null);
   const [fileContent, setFileContent] = useState<string | null>(null);
   const [fileLoading, setFileLoading] = useState(false);
   const [fileError, setFileError] = useState(false);
@@ -1401,9 +1426,14 @@ export function CustomizationsDialog({
   };
 
   // Open a file in the in-dialog viewer.
-  async function handleOpenDetail(name: string, path: string, editable: boolean) {
+  async function handleOpenDetail(
+    name: string,
+    path: string,
+    editable: boolean,
+    scope: "project" | "global"
+  ) {
     latestRequestRef.current = path;
-    setDetail({ name, path, editable });
+    setDetail({ name, path, editable, scope });
     setFileContent(null);
     setFileError(false);
     setFileLoading(true);
@@ -1431,9 +1461,9 @@ export function CustomizationsDialog({
 
   // After scaffolding a new capability: refresh the listings, then drop straight into the
   // editor on the freshly created file so the user can fill in the template.
-  function handleCreated(name: string, path: string) {
+  function handleCreated(name: string, path: string, scope: "project" | "global") {
     notifyChanged();
-    void handleOpenDetail(name, path, true);
+    void handleOpenDetail(name, path, true, scope);
   }
 
   // Delete a capability (agent/skill) by its backing-file path, then refresh. A skill's
@@ -1533,7 +1563,7 @@ export function CustomizationsDialog({
                     search={search}
                     onSearchChange={setSearch}
                     sessionId={sessionId}
-                    onOpenDetail={(name, path, editable) => void handleOpenDetail(name, path, editable)}
+                    onOpenDetail={(name, path, editable, scope) => void handleOpenDetail(name, path, editable, scope)}
                     onCreated={handleCreated}
                     onDelete={handleDeleteCapability}
                   />
@@ -1548,7 +1578,7 @@ export function CustomizationsDialog({
                     search={search}
                     onSearchChange={setSearch}
                     sessionId={sessionId}
-                    onOpenDetail={(name, path, editable) => void handleOpenDetail(name, path, editable)}
+                    onOpenDetail={(name, path, editable, scope) => void handleOpenDetail(name, path, editable, scope)}
                     onCreated={handleCreated}
                     onDelete={handleDeleteCapability}
                   />
@@ -1558,7 +1588,7 @@ export function CustomizationsDialog({
                     rules={rules}
                     search={search}
                     onSearchChange={setSearch}
-                    onOpenDetail={(name, path, editable) => void handleOpenDetail(name, path, editable)}
+                    onOpenDetail={(name, path, editable, scope) => void handleOpenDetail(name, path, editable, scope)}
                   />
                 )}
                 {activeSection === "hooks" && (

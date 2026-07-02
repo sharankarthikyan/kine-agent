@@ -877,3 +877,23 @@ test("deleting an MCP server passes its source and name", async () => {
 
   await waitFor(() => expect(deleteMcpServer).toHaveBeenCalledWith("s1", "user", "playwright"));
 });
+
+// ─── Scope is surfaced in the file editor ──────────────────────────────────────
+
+test("editor header shows a Global badge for a ~/.claude file", async () => {
+  vi.mocked(readTextFile).mockResolvedValue("body");
+  render(<CustomizationsDialog {...defaultProps} sessionId={null} capabilities={capsWithPaths} />);
+  const nav = getNav();
+  await userEvent.click(within(nav).getByRole("button", { name: /agents/i }));
+  await userEvent.click(screen.getByText("code-reviewer")); // source: user
+  expect(await screen.findByText("Global")).toBeInTheDocument();
+});
+
+test("editor header shows a Project badge for a project-scope rule", async () => {
+  vi.mocked(readTextFile).mockResolvedValue("x");
+  render(<CustomizationsDialog {...defaultProps} />);
+  const nav = getNav();
+  await userEvent.click(within(nav).getByRole("button", { name: /instructions/i }));
+  await userEvent.click(screen.getByText("CLAUDE.md")); // scope: project
+  expect(await screen.findByText("Project")).toBeInTheDocument();
+});
