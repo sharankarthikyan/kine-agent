@@ -153,7 +153,8 @@ pub async fn drive_session(
     // fresh session (M5 adds the transcript-replay fallback so conversation
     // context isn't silently lost).
     let acp_session_id = match resume_session {
-        Some(id) if can_load => match client::session_load(&peer, &id, &cwd).await {
+        Some(id) if can_load => match load_discarding_replay(&peer, &mut inbound, &id, &cwd).await
+        {
             Ok(()) => id,
             Err(e) => {
                 eprintln!("acp: session/load failed ({e}); starting a fresh session");
@@ -179,6 +180,20 @@ pub async fn drive_session(
             // turn a successful run into a spurious "connection closed" error.
             biased;
             stop = &mut prompt_fut => {
+                // The reader enqueues lines in order, so any update the agent sent
+                // BEFORE its session/prompt response is already in the channel —
+                // flush it into the transcript before closing the turn, or the
+                // final streamed chunk(s) would be silently dropped.
+                while let Ok(msg) = inbound.try_recv() {
+                    match msg {
+                        Inbound::Notification { method, params } => {
+                            handle_notification(&method, &params, sink.as_ref(), &mut final_text);
+                        }
+                        Inbound::Request { id, method, params } => {
+                            answer_request(&peer, id, &method, &params, permission_mode.as_deref()).await;
+                        }
+                    }
+                }
                 match stop {
                     Ok(reason) if reason == "cancelled" => {
                         sink.emit(AgentEvent::Error { message: "turn cancelled by agent".into() });
@@ -219,6 +234,50 @@ async fn new_session(peer: &RpcPeer, cwd: &str) -> Result<String, SessionError> 
     client::session_new(peer, cwd)
         .await
         .map_err(|e| SessionError::Protocol(format!("session/new failed: {e}")))
+}
+
+/// Await session/load while DISCARDING the replayed history. The ACP spec
+/// requires the agent to replay the entire prior conversation as session/update
+/// notifications before answering session/load; Kineloop already persists that
+/// history itself, so re-emitting it would duplicate the transcript on every
+/// resume (and grow the events table multiplicatively).
+async fn load_discarding_replay(
+    peer: &RpcPeer,
+    inbound: &mut tokio::sync::mpsc::UnboundedReceiver<Inbound>,
+    session_id: &str,
+    cwd: &str,
+) -> Result<(), crate::acp::jsonrpc::RpcError> {
+    // The unbounded channel simply buffers the replay while we await the
+    // response — but inbound REQUESTS still need answers (an agent blocking on
+    // one mid-replay could never send the load response).
+    let load_fut = client::session_load(peer, session_id, cwd);
+    tokio::pin!(load_fut);
+    let result = loop {
+        tokio::select! {
+            biased;
+            result = &mut load_fut => break result,
+            msg = inbound.recv() => match msg {
+                Some(Inbound::Notification { .. }) => {} // historical replay: drop
+                Some(Inbound::Request { id, method, .. }) => {
+                    let _ = peer
+                        .respond_error(id, -32601, &format!("{method} not supported"))
+                        .await;
+                }
+                None => break Err(crate::acp::jsonrpc::RpcError::Closed),
+            },
+        }
+    };
+    // The reader task processes lines sequentially, so by the time the load
+    // response resolved, every replayed notification is already queued. Flush
+    // whatever the select didn't get to, so none of it leaks into the live turn.
+    while let Ok(msg) = inbound.try_recv() {
+        if let Inbound::Request { id, method, .. } = msg {
+            let _ = peer
+                .respond_error(id, -32601, &format!("{method} not supported"))
+                .await;
+        }
+    }
+    result
 }
 
 /// Map a session/update notification onto AgentEvents. Synchronous by design —
@@ -494,6 +553,19 @@ mod tests {
             let req = next_request(&mut lines, "session/load").await;
             assert_eq!(req["params"]["sessionId"], "acp-abc");
             assert_eq!(req["params"]["cwd"], "/wt");
+            // The spec REQUIRES the agent to replay the entire prior conversation
+            // as session/update notifications before answering session/load.
+            // None of it may resurface as live events.
+            for replay in [
+                serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{
+                    "sessionId":"acp-abc","update":{"sessionUpdate":"agent_message_chunk",
+                    "content":{"type":"text","text":"OLD TURN TEXT"}}}}),
+                serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{
+                    "sessionId":"acp-abc","update":{"sessionUpdate":"tool_call",
+                    "toolCallId":"old","title":"Old tool call","rawInput":{}}}}),
+            ] {
+                send_line(&mut w, replay).await;
+            }
             send_line(
                 &mut w,
                 serde_json::json!({"jsonrpc":"2.0","id":req["id"],"result":{}}),
@@ -501,6 +573,14 @@ mod tests {
             .await;
             let req = next_request(&mut lines, "session/prompt").await;
             assert_eq!(req["params"]["sessionId"], "acp-abc");
+            // Live turn: one real chunk, then completion.
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{
+                    "sessionId":"acp-abc","update":{"sessionUpdate":"agent_message_chunk",
+                    "content":{"type":"text","text":"fresh reply"}}}}),
+            )
+            .await;
             send_line(
                 &mut w,
                 serde_json::json!({"jsonrpc":"2.0","id":req["id"],
@@ -510,10 +590,17 @@ mod tests {
         })
         .await;
         assert_eq!(h.captured.lock().unwrap().as_deref(), Some("acp-abc"));
-        assert!(matches!(
-            h.events.lock().unwrap().last().unwrap(),
-            AgentEvent::Done { .. }
-        ));
+        let events = h.events.lock().unwrap();
+        // Replayed history must be discarded: no event mentions the old turn.
+        assert!(
+            !events.iter().any(|e| format!("{e:?}").contains("OLD TURN")
+                || format!("{e:?}").contains("Old tool call")),
+            "replayed history leaked into live events: {events:?}"
+        );
+        assert!(matches!(&events[0], AgentEvent::Token { text } if text == "fresh reply"));
+        assert!(
+            matches!(events.last().unwrap(), AgentEvent::Done { summary } if summary == "fresh reply")
+        );
     }
 
     #[tokio::test]
