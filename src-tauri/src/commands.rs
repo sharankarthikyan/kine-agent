@@ -779,8 +779,8 @@ pub fn node_available() -> bool {
     which::which("npx").is_ok()
 }
 
-/// Engine matrix (spec §Engine selection). M1 enables acp for claude only;
-/// codex joins in M6, gemini (acp-only) in M7, antigravity never.
+/// Engine matrix (spec §Engine selection). ACP is available for claude and codex (and
+/// the DEFAULT via the None arm / default_engine_for above); antigravity never; gemini not spawnable.
 fn validate_engine(engine: Option<String>, agent: &str) -> Result<String, String> {
     match engine.as_deref() {
         None => Ok(default_engine_for(agent).to_string()),
