@@ -43,7 +43,6 @@ import {
   nodeAvailable,
   pickRepository,
   respondToApproval,
-  engineForAgentSwitch,
   startSession,
   sendMessage,
   stopSession,
@@ -141,7 +140,7 @@ type PaneDraft = {
   modelValue: string | null;
   permissionMode: PermissionMode;
   sandbox: boolean;
-  /** Streaming engine: "acp" (default for claude + codex when Node is available) | "pipe" (legacy CLI adapters; the opt-out). */
+  /** Streaming engine, derived automatically (never user-chosen): "acp" for claude + codex when Node is available, "pipe" otherwise. */
   engine: Engine;
 };
 type EventPageState = {
@@ -753,7 +752,8 @@ export default function App() {
       agentId: a.id,
       modelValue,
       permissionMode: mode,
-      engine: engineForAgentSwitch(a.id, cur.engine),
+      // Engine is automatic — re-derived for the new agent, never user-chosen.
+      engine: defaultEngineFor(a.id, nodeOk),
     });
   }
 
@@ -764,8 +764,8 @@ export default function App() {
       modelValue: m.value,
       agentId: m.agent,
       permissionMode: mode,
-      // Picking another agent's model also switches agents — same ACP reset rule.
-      engine: engineForAgentSwitch(m.agent, cur.engine),
+      // Picking another agent's model also switches agents — same automatic derivation.
+      engine: defaultEngineFor(m.agent, nodeOk),
     });
   }
 
@@ -1860,7 +1860,6 @@ export default function App() {
                             model={draftModel}
                             permissionMode={draft?.permissionMode ?? DEFAULT_PERMISSION_MODE}
                             sandboxTerminal={draft?.sandbox ?? false}
-                            engine={draft?.engine ?? "pipe"}
                             running={false}
                             onPickRepo={() => void pickRepoForPane(pane.id)}
                             onPickRecent={(p) => updatePaneDraft(pane.id, { repo: p })}
@@ -1868,7 +1867,6 @@ export default function App() {
                             onModelChange={(m) => paneModelChange(pane.id, m)}
                             onPermissionModeChange={(mode) => panePermissionChange(pane.id, mode)}
                             onSandboxTerminalChange={(v) => updatePaneDraft(pane.id, { sandbox: v })}
-                            onEngineChange={(engine) => updatePaneDraft(pane.id, { engine })}
                             onStart={(text) => handleStartNewSession(text, pane.id)}
                           />
                         </div>

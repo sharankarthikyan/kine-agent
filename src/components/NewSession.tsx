@@ -8,7 +8,6 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
-import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { PermissionModeSelect } from "@/components/PermissionModeSelect";
 import { type PermissionMode } from "@/lib/permissions";
@@ -21,7 +20,6 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { type Engine } from "@/lib/agent";
 import { type AgentInfo, type ModelInfo, isAgentSpawnable } from "@/lib/models";
 import { AgentLogo } from "./AgentLogo";
 
@@ -34,8 +32,6 @@ interface NewSessionProps {
   model: ModelInfo | null;
   permissionMode: PermissionMode;
   sandboxTerminal: boolean;
-  /** Streaming engine: "acp" (default for claude + codex when Node is available) | "pipe" (legacy CLI adapters; the opt-out). */
-  engine: Engine;
   running: boolean;
   onPickRepo: () => void;
   onPickRecent: (path: string) => void;
@@ -43,7 +39,6 @@ interface NewSessionProps {
   onModelChange: (m: ModelInfo) => void;
   onPermissionModeChange: (mode: PermissionMode) => void;
   onSandboxTerminalChange: (v: boolean) => void;
-  onEngineChange: (engine: Engine) => void;
   onStart: (text: string) => void;
 }
 
@@ -77,7 +72,6 @@ export function NewSession({
   model,
   permissionMode,
   sandboxTerminal,
-  engine,
   running,
   onPickRepo,
   onPickRecent,
@@ -85,7 +79,6 @@ export function NewSession({
   onModelChange,
   onPermissionModeChange,
   onSandboxTerminalChange,
-  onEngineChange,
   onStart,
 }: NewSessionProps) {
   const [text, setText] = useState("");
@@ -300,20 +293,6 @@ export function NewSession({
                 onSandboxTerminalChange={onSandboxTerminalChange}
               />
 
-              {/* ACP streaming engine — the DEFAULT for claude/codex (M1–M8
-                  rollout complete); the switch is the opt-out back to the
-                  legacy pipe adapters. Hidden for agents without ACP support. */}
-              {(agent?.id === "claude" || agent?.id === "codex") && (
-                <label className="flex shrink-0 cursor-pointer select-none items-center gap-1.5 whitespace-nowrap text-xs text-muted-foreground">
-                  <Switch
-                    checked={engine === "acp"}
-                    onCheckedChange={(on) => onEngineChange(on ? "acp" : "pipe")}
-                    disabled={running}
-                    aria-label="ACP streaming (requires Node.js)"
-                  />
-                  <span>ACP streaming</span>
-                </label>
-              )}
             </div>
 
             {/* RIGHT: attach (inert stub) + send */}

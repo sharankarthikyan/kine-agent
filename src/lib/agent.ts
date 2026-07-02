@@ -71,7 +71,7 @@ export interface StartSessionArgs {
   permissionMode?: string;
   /** Antigravity-only: restrict terminal commands' network/disk access (`agy --sandbox`). */
   sandboxTerminal?: boolean;
-  /** Streaming engine: "acp" (default for claude + codex when Node is available) | "pipe" (legacy CLI adapters; the opt-out). */
+  /** Streaming engine, derived automatically: "acp" for claude + codex when Node is available, "pipe" (legacy CLI adapters) otherwise. */
   engine?: Engine;
   onEvent: (event: AgentEvent) => void;
 }
@@ -79,20 +79,12 @@ export interface StartSessionArgs {
 /** Streaming engines a session can run on. Backend re-validates per agent. */
 export type Engine = "pipe" | "acp";
 
-/** ACP-capable agents are claude (M1) + codex (M6): switching a draft between
- * them keeps the chosen engine (which may be the "pipe" opt-out); any other
- * agent resets to pipe, since ACP support is agent-specific. Gemini joins in
- * M7. Deliberately sticky within a draft — bouncing through antigravity lands
- * on pipe and stays there, even after switching back to claude/codex. Single
- * home for the rule — widen it here. */
-export function engineForAgentSwitch(nextAgentId: string, currentEngine: Engine): Engine {
-  return nextAgentId === "claude" || nextAgentId === "codex" ? currentEngine : "pipe";
-}
-
-/** The engine a fresh New Session draft starts on. ACP is the default for the
- * agents that support it (M1–M8 rollout complete); pipe is the opt-out via the
- * NewSession toggle and the only engine for everything else. Mirrors the
- * backend's `default_engine_for` plus the frontend-only Node check. */
+/** The engine a draft runs on — fully automatic, no UI choice. ACP for the
+ * agents that support it (claude M1, codex M6; M1–M8 rollout complete) when
+ * Node is present, pipe otherwise. There is no UI opt-out: pipe is reachable
+ * only via a backend-explicit engine or Node being absent (ACP agents are
+ * npx-launched). Mirrors the backend's `default_engine_for` plus the
+ * frontend-only Node check. Single home for the rule — widen it here. */
 export function defaultEngineFor(agentId: string, nodeOk: boolean): Engine {
   if (!nodeOk) return "pipe";
   return agentId === "claude" || agentId === "codex" ? "acp" : "pipe";

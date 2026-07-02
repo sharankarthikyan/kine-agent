@@ -4,30 +4,11 @@ import {
   cleanupSession,
   continueExternalSession,
   defaultEngineFor,
-  engineForAgentSwitch,
   listTrustedRepos,
   pickRepository,
   sendMessage,
   type AgentEvent,
 } from "../agent";
-
-describe("engineForAgentSwitch", () => {
-  it("keeps the current engine when switching to claude", () => {
-    expect(engineForAgentSwitch("claude", "acp")).toBe("acp");
-  });
-
-  it("keeps the current engine when switching to codex (M6)", () => {
-    expect(engineForAgentSwitch("codex", "acp")).toBe("acp");
-  });
-
-  it("resets to pipe when switching to antigravity", () => {
-    expect(engineForAgentSwitch("antigravity", "acp")).toBe("pipe");
-  });
-
-  it("passes pipe through unchanged for ACP-capable agents", () => {
-    expect(engineForAgentSwitch("codex", "pipe")).toBe("pipe");
-  });
-});
 
 describe("defaultEngineFor", () => {
   it("defaults claude and codex to acp when Node is present", () => {

@@ -43,7 +43,6 @@ function setup(overrides: Partial<React.ComponentProps<typeof NewSession>> = {})
   const onModelChange = vi.fn();
   const onPermissionModeChange = vi.fn();
   const onSandboxTerminalChange = vi.fn();
-  const onEngineChange = vi.fn();
   const onStart = vi.fn();
 
   render(
@@ -56,7 +55,6 @@ function setup(overrides: Partial<React.ComponentProps<typeof NewSession>> = {})
       model={opus}
       permissionMode="default"
       sandboxTerminal={false}
-      engine="pipe"
       running={false}
       onPickRepo={onPickRepo}
       onPickRecent={onPickRecent}
@@ -64,7 +62,6 @@ function setup(overrides: Partial<React.ComponentProps<typeof NewSession>> = {})
       onModelChange={onModelChange}
       onPermissionModeChange={onPermissionModeChange}
       onSandboxTerminalChange={onSandboxTerminalChange}
-      onEngineChange={onEngineChange}
       onStart={onStart}
       {...overrides}
     />,
@@ -77,7 +74,6 @@ function setup(overrides: Partial<React.ComponentProps<typeof NewSession>> = {})
     onModelChange,
     onPermissionModeChange,
     onSandboxTerminalChange,
-    onEngineChange,
     onStart,
   };
 }
@@ -232,35 +228,20 @@ test("Claude offers the advanced 'Locked-down (CI)' mode", async () => {
   expect(screen.getByRole("menuitemradio", { name: /Locked-down/i })).toBeInTheDocument();
 });
 
-// ── ACP engine toggle ──────────────────────────────────────────────────────────
+// ── No engine choice in the UI ─────────────────────────────────────────────────
+// The engine is fully derived (ACP for claude/codex when Node is present, pipe
+// otherwise) — users never pick it, so no ACP control renders for any agent.
 
-test("threads the ACP engine toggle into onEngineChange", async () => {
-  const { onEngineChange } = setup({ agent: claudeAgent, engine: "pipe" });
-  await userEvent.click(screen.getByRole("switch", { name: /acp streaming/i }));
-  expect(onEngineChange).toHaveBeenCalledWith("acp");
-});
-
-test("turning the ACP toggle off calls onEngineChange with 'pipe'", async () => {
-  const { onEngineChange } = setup({ agent: claudeAgent, engine: "acp" });
-  await userEvent.click(screen.getByRole("switch", { name: /acp streaming/i }));
-  expect(onEngineChange).toHaveBeenCalledWith("pipe");
-});
-
-test("shows the ACP streaming toggle for codex (M6)", () => {
-  setup({ agent: codexAgent, engine: "pipe" });
-  expect(screen.getByRole("switch", { name: /acp streaming/i })).toBeInTheDocument();
-});
-
-test("hides the ACP toggle for antigravity", () => {
-  const antigravityAgent: AgentInfo = { id: "antigravity", label: "Antigravity", installed: true };
-  setup({ agent: antigravityAgent, engine: "pipe" });
+test("renders no ACP streaming control for claude — the engine is automatic", () => {
+  setup({ agent: claudeAgent });
   expect(screen.queryByRole("switch", { name: /acp streaming/i })).not.toBeInTheDocument();
+  expect(screen.queryByText(/acp streaming/i)).not.toBeInTheDocument();
 });
 
-test("shows the ACP toggle without a beta badge — ACP is the default now", () => {
-  setup({ agent: claudeAgent, engine: "acp" });
-  expect(screen.getByRole("switch", { name: /acp streaming/i })).toBeInTheDocument();
-  expect(screen.queryByText(/beta/i)).not.toBeInTheDocument();
+test("renders no ACP streaming control for codex either", () => {
+  setup({ agent: codexAgent });
+  expect(screen.queryByRole("switch", { name: /acp streaming/i })).not.toBeInTheDocument();
+  expect(screen.queryByText(/acp streaming/i)).not.toBeInTheDocument();
 });
 
 test("Antigravity offers only Ask before edits + Full access (no Auto-edit or advanced)", async () => {
