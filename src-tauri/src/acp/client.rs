@@ -33,9 +33,9 @@ pub async fn initialize(peer: &RpcPeer) -> Result<bool, RpcError> {
             "initialize",
             serde_json::json!({
                 "protocolVersion": PROTOCOL_VERSION,
-                // M1: no fs capability — the agent uses its own file access,
-                // exactly like the pipe engine. M4 flips these and adds the proxy.
-                "clientCapabilities": {"fs": {"readTextFile": false, "writeTextFile": false}},
+                // M4: the fs proxy is live — the agent routes file access through
+                // fs/read_text_file / fs/write_text_file, worktree-enforced by us.
+                "clientCapabilities": {"fs": {"readTextFile": true, "writeTextFile": true}},
                 "clientInfo": {"name": "kineloop", "version": env!("CARGO_PKG_VERSION")}
             }),
         )
@@ -263,6 +263,23 @@ pub fn parse_session_update(params: &Value) -> Option<SessionUpdate> {
         // unknown/future update kinds — ignored by design
         _ => None,
     }
+}
+
+/// Params of fs/read_text_file: (path, 1-based start line, max lines).
+/// `line` 0 and 1 both mean "from the start" (the schema allows 0; the
+/// protocol convention is 1-based). None on malformed params.
+pub fn parse_fs_read(params: &Value) -> Option<(String, Option<u64>, Option<u64>)> {
+    let path = params.get("path").and_then(Value::as_str)?.to_string();
+    let line = params.get("line").and_then(Value::as_u64);
+    let limit = params.get("limit").and_then(Value::as_u64);
+    Some((path, line, limit))
+}
+
+/// Params of fs/write_text_file: (path, content). None on malformed params.
+pub fn parse_fs_write(params: &Value) -> Option<(String, String)> {
+    let path = params.get("path").and_then(Value::as_str)?.to_string();
+    let content = params.get("content").and_then(Value::as_str)?.to_string();
+    Some((path, content))
 }
 
 /// Parse the options array of a session/request_permission request.
@@ -692,6 +709,47 @@ mod tests {
         assert_eq!(tool, "tool");
         assert_eq!(input, "{}");
         assert_eq!(prompt, "The agent requests permission to use a tool.");
+    }
+
+    #[test]
+    fn parses_fs_read_params_with_optional_line_and_limit() {
+        let params = serde_json::json!({"sessionId": "s", "path": "/w/x.txt", "line": 5, "limit": 10});
+        assert_eq!(
+            parse_fs_read(&params),
+            Some(("/w/x.txt".to_string(), Some(5), Some(10)))
+        );
+        let bare = serde_json::json!({"sessionId": "s", "path": "/w/x.txt"});
+        assert_eq!(parse_fs_read(&bare), Some(("/w/x.txt".to_string(), None, None)));
+        assert_eq!(parse_fs_read(&serde_json::json!({"sessionId": "s"})), None);
+    }
+
+    #[test]
+    fn parses_fs_write_params() {
+        let params = serde_json::json!({"sessionId": "s", "path": "/w/x.txt", "content": "hi"});
+        assert_eq!(
+            parse_fs_write(&params),
+            Some(("/w/x.txt".to_string(), "hi".to_string()))
+        );
+        assert_eq!(parse_fs_write(&serde_json::json!({"path": "/w/x.txt"})), None);
+    }
+
+    #[tokio::test]
+    async fn initialize_advertises_fs_capability() {
+        // Agent side captures the initialize request and asserts the fs caps.
+        let (ours, theirs) = duplex(64 * 1024);
+        let (read_half, write_half) = tokio::io::split(ours);
+        let peer = RpcPeer::start(read_half, write_half);
+        let (agent_read, mut agent_write) = tokio::io::split(theirs);
+        let agent = tokio::spawn(async move {
+            let mut lines = BufReader::new(agent_read).lines();
+            let req: Value = serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(req["params"]["clientCapabilities"]["fs"]["readTextFile"], true);
+            assert_eq!(req["params"]["clientCapabilities"]["fs"]["writeTextFile"], true);
+            let resp = serde_json::json!({"jsonrpc":"2.0","id":req["id"],"result":{}});
+            agent_write.write_all(format!("{resp}\n").as_bytes()).await.unwrap();
+        });
+        let _ = initialize(&peer).await.unwrap();
+        agent.await.unwrap();
     }
 
     #[test]

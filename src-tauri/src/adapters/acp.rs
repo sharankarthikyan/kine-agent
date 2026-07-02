@@ -2,15 +2,16 @@
 //! over ndjson JSON-RPC stdio. See docs/superpowers/specs/2026-07-01-acp-adapter-design.md.
 //!
 //! M1 scope: text + tool-call streaming, permissions auto-answered from the
-//! session's permission mode, no fs proxy (capability not advertised, so the
-//! agent uses its own file access exactly like the pipe engine), no usage event
-//! (ACP does not standardize usage), immediate-kill cancel via `kill_on_drop`.
+//! session's permission mode, no usage event (ACP does not standardize usage),
+//! immediate-kill cancel via `kill_on_drop`. M4 adds the fs proxy: reads/writes
+//! the agent routes through fs/read_text_file / fs/write_text_file are served
+//! here, contained to the session worktree (`acp::fs_guard`).
 
 use crate::acp::client::{self, SessionUpdate};
 use crate::acp::jsonrpc::{Inbound, RpcPeer};
 use crate::adapter::{AgentAdapter, EventSink, Prompt, SessionError};
 use crate::events::AgentEvent;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, BufReader};
 use tokio::process::Command;
@@ -165,6 +166,12 @@ pub async fn drive_session(
     let peer = RpcPeer::start(read, write);
     let mut inbound = peer.inbound();
 
+    // Canonicalized once: every fs/* request is contained against this root.
+    // Canonicalization also survives macOS /tmp symlinks and Windows \\?\ paths.
+    // A canonicalize failure leaves `None` — every fs request is then rejected
+    // with -32603, never served unguarded.
+    let fs_root = std::fs::canonicalize(&cwd).ok();
+
     let can_load = client::initialize(&peer)
         .await
         .map_err(|e| SessionError::Protocol(format!("ACP initialize failed: {e}")))?;
@@ -223,8 +230,10 @@ pub async fn drive_session(
                             handle_notification(&method, &params, sink.as_ref(), &mut final_text);
                         }
                         Inbound::Request { id, method, params } => {
-                            let answer = prepare_answer(&method, &params, permission_mode.as_deref(), sink.as_ref(), &approvals, &app_session_id);
-                            answer_request(&peer, id, &method, answer).await;
+                            let answer = prepare_answer(&method, &params, permission_mode.as_deref(), fs_root.as_deref(), sink.as_ref(), &approvals, &app_session_id);
+                            if let Some(event) = answer_request(&peer, id, &method, answer).await {
+                                sink.emit(event); // FileWrite — sync emit after the await
+                            }
                         }
                     }
                 }
@@ -251,8 +260,10 @@ pub async fn drive_session(
                         handle_notification(&method, &params, sink.as_ref(), &mut final_text);
                     }
                     Some(Inbound::Request { id, method, params }) => {
-                        let answer = prepare_answer(&method, &params, permission_mode.as_deref(), sink.as_ref(), &approvals, &app_session_id);
-                        answer_request(&peer, id, &method, answer).await;
+                        let answer = prepare_answer(&method, &params, permission_mode.as_deref(), fs_root.as_deref(), sink.as_ref(), &approvals, &app_session_id);
+                        if let Some(event) = answer_request(&peer, id, &method, answer).await {
+                            sink.emit(event); // FileWrite — sync emit after the await
+                        }
                     }
                 }
             }
@@ -353,13 +364,17 @@ fn handle_notification(
     }
 }
 
-/// What `prepare_answer` decided to do about an inbound request. Splitting
+/// What the drive loop must do with an agent-initiated request. Produced by
+/// the synchronous `prepare_answer` (which owns all sink emission and registry
+/// access); consumed by the async `answer_request` (IO + RPC only). Splitting
 /// "decide" from "answer" keeps the `&dyn EventSink` borrow (Send-not-Sync)
 /// entirely inside the synchronous `prepare_answer` — it never crosses an
 /// `.await`, so `answer_request`'s future stays `Send` without requiring
-/// `EventSink: Sync`.
-enum PermissionAnswer {
-    /// Not a permission request at all: fs/*, terminal/*, anything else.
+/// `EventSink: Sync`. A returned FileWrite is emitted by the CALLER,
+/// synchronously, after the await — the sink must never cross an await point.
+enum InboundAnswer {
+    /// Not a permission or fs request: terminal/*, anything else Kineloop
+    /// doesn't implement.
     NotSupported,
     /// Autonomous mode, or the agent offered no options: answer right away.
     Immediate(Option<String>),
@@ -368,74 +383,137 @@ enum PermissionAnswer {
     ///
     /// [`ApprovalRegistry::cancel_session`]: crate::approval::ApprovalRegistry::cancel_session
     Deferred(tokio::sync::oneshot::Receiver<crate::approval::ApprovalDecision>),
+    /// fs/read_text_file, validated + resolved inside the session worktree.
+    FsRead { path: PathBuf, line: Option<u64>, limit: Option<u64> },
+    /// fs/write_text_file, validated + resolved inside the session worktree.
+    FsWrite { path: PathBuf, content: String },
+    /// Malformed params, an unresolved worktree, or a fs_guard rejection
+    /// (escape attempt) — answered with -32602/-32603, never touches disk.
+    FsRejected { message: String },
 }
 
 /// Decide how an inbound request should be answered. Synchronous by design —
-/// see [`PermissionAnswer`]. Interactive permission requests surface
-/// `ApprovalNeeded` here, before any RPC round-trip.
+/// see [`InboundAnswer`]. Interactive permission requests surface
+/// `ApprovalNeeded` here, before any RPC round-trip. fs/* requests are
+/// validated and worktree-resolved here too, but their IO happens later in
+/// `answer_request`.
 fn prepare_answer(
     method: &str,
     params: &serde_json::Value,
     permission_mode: Option<&str>,
+    fs_root: Option<&Path>,
     sink: &dyn EventSink,
     approvals: &crate::approval::ApprovalRegistry,
     app_session_id: &str,
-) -> PermissionAnswer {
-    if method != "session/request_permission" {
-        return PermissionAnswer::NotSupported;
+) -> InboundAnswer {
+    match method {
+        "session/request_permission" => {
+            let options = client::parse_permission_options(params);
+            // Autonomous modes answer without asking (same policy as M1); everything
+            // else — and only when the agent offered real options — goes interactive.
+            let autonomous = matches!(
+                permission_mode,
+                Some("acceptEdits") | Some("full") | Some("dontAsk") | Some("auto")
+            );
+            if autonomous || options.is_empty() {
+                return InboundAnswer::Immediate(client::auto_select_option(&options, permission_mode));
+            }
+            // Interactive: surface ApprovalNeeded now; the RPC is answered later (from a
+            // spawned task) so a deliberating user can't head-of-line-block
+            // session/update streaming. Run end drops the registry entry → cancelled.
+            let request_id = approvals.next_request_id();
+            let rx = approvals.register(&request_id, app_session_id);
+            let (tool, input, prompt) = client::parse_permission_request(params);
+            sink.emit(AgentEvent::ApprovalNeeded {
+                request_id,
+                tool,
+                input,
+                prompt,
+                options: options
+                    .iter()
+                    .map(|o| crate::events::ApprovalOption {
+                        id: o.option_id.clone(),
+                        label: o.name.clone(),
+                        kind: o.kind.clone(),
+                    })
+                    .collect(),
+            });
+            InboundAnswer::Deferred(rx)
+        }
+        "fs/read_text_file" => match (fs_root, client::parse_fs_read(params)) {
+            (Some(root), Some((path, line, limit))) => {
+                match crate::acp::fs_guard::resolve_within_root(root, &path) {
+                    Ok(resolved) => InboundAnswer::FsRead { path: resolved, line, limit },
+                    Err(e) => InboundAnswer::FsRejected { message: e },
+                }
+            }
+            (None, _) => InboundAnswer::FsRejected {
+                message: "session worktree could not be resolved".to_string(),
+            },
+            (_, None) => InboundAnswer::FsRejected {
+                message: "malformed fs/read_text_file params".to_string(),
+            },
+        },
+        "fs/write_text_file" => match (fs_root, client::parse_fs_write(params)) {
+            (Some(root), Some((path, content))) => {
+                match crate::acp::fs_guard::resolve_within_root(root, &path) {
+                    Ok(resolved) => InboundAnswer::FsWrite { path: resolved, content },
+                    Err(e) => InboundAnswer::FsRejected { message: e },
+                }
+            }
+            (None, _) => InboundAnswer::FsRejected {
+                message: "session worktree could not be resolved".to_string(),
+            },
+            (_, None) => InboundAnswer::FsRejected {
+                message: "malformed fs/write_text_file params".to_string(),
+            },
+        },
+        _ => InboundAnswer::NotSupported,
     }
-    let options = client::parse_permission_options(params);
-    // Autonomous modes answer without asking (same policy as M1); everything
-    // else — and only when the agent offered real options — goes interactive.
-    let autonomous = matches!(
-        permission_mode,
-        Some("acceptEdits") | Some("full") | Some("dontAsk") | Some("auto")
-    );
-    if autonomous || options.is_empty() {
-        return PermissionAnswer::Immediate(client::auto_select_option(&options, permission_mode));
+}
+
+/// 1-based `line` + `limit` slicing for fs/read_text_file. 0 and 1 both mean
+/// "from the start"; absent limit means "to the end".
+fn slice_lines(content: &str, line: Option<u64>, limit: Option<u64>) -> String {
+    if line.is_none() && limit.is_none() {
+        return content.to_string();
     }
-    // Interactive: surface ApprovalNeeded now; the RPC is answered later (from a
-    // spawned task) so a deliberating user can't head-of-line-block
-    // session/update streaming. Run end drops the registry entry → cancelled.
-    let request_id = approvals.next_request_id();
-    let rx = approvals.register(&request_id, app_session_id);
-    let (tool, input, prompt) = client::parse_permission_request(params);
-    sink.emit(AgentEvent::ApprovalNeeded {
-        request_id,
-        tool,
-        input,
-        prompt,
-        options: options
-            .iter()
-            .map(|o| crate::events::ApprovalOption {
-                id: o.option_id.clone(),
-                label: o.name.clone(),
-                kind: o.kind.clone(),
-            })
-            .collect(),
-    });
-    PermissionAnswer::Deferred(rx)
+    let start = line.unwrap_or(1).max(1) as usize - 1;
+    let iter = content.lines().skip(start);
+    match limit {
+        Some(n) => iter.take(n as usize).collect::<Vec<_>>().join("\n"),
+        None => iter.collect::<Vec<_>>().join("\n"),
+    }
 }
 
 /// Answer an agent-initiated request over the wire. Never leaves the request
 /// dangling — an unanswered inbound RPC would hang the child. Takes no
-/// `EventSink`: any event was already emitted synchronously by `prepare_answer`.
-async fn answer_request(peer: &RpcPeer, id: serde_json::Value, method: &str, answer: PermissionAnswer) {
+/// `EventSink`: any event was already decided synchronously by `prepare_answer`;
+/// a `FileWrite` to emit is returned to the caller instead, which emits it
+/// synchronously after this call returns (see [`InboundAnswer`]).
+async fn answer_request(
+    peer: &RpcPeer,
+    id: serde_json::Value,
+    method: &str,
+    answer: InboundAnswer,
+) -> Option<AgentEvent> {
     match answer {
-        PermissionAnswer::NotSupported => {
+        InboundAnswer::NotSupported => {
             if let Err(e) = peer
                 .respond_error(id, -32601, &format!("{method} not supported"))
                 .await
             {
                 eprintln!("acp: failed to answer {method}: {e}");
             }
+            None
         }
-        PermissionAnswer::Immediate(selected) => {
+        InboundAnswer::Immediate(selected) => {
             if let Err(e) = client::respond_permission(peer, id, selected.as_deref()).await {
                 eprintln!("acp: failed to answer {method}: {e}");
             }
+            None
         }
-        PermissionAnswer::Deferred(rx) => {
+        InboundAnswer::Deferred(rx) => {
             let peer = peer.clone();
             tokio::spawn(async move {
                 let selected = match rx.await {
@@ -446,6 +524,46 @@ async fn answer_request(peer: &RpcPeer, id: serde_json::Value, method: &str, ans
                     eprintln!("acp: failed to answer session/request_permission: {e}");
                 }
             });
+            None
+        }
+        InboundAnswer::FsRead { path, line, limit } => {
+            match tokio::fs::read_to_string(&path).await {
+                Ok(content) => {
+                    let sliced = slice_lines(&content, line, limit);
+                    let _ = peer
+                        .respond(id, serde_json::json!({"content": sliced}))
+                        .await;
+                }
+                Err(e) => {
+                    let _ = peer.respond_error(id, -32603, &format!("read failed: {e}")).await;
+                }
+            }
+            None
+        }
+        InboundAnswer::FsWrite { path, content } => {
+            let write_result = async {
+                if let Some(parent) = path.parent() {
+                    tokio::fs::create_dir_all(parent).await?;
+                }
+                tokio::fs::write(&path, &content).await
+            }
+            .await;
+            match write_result {
+                Ok(()) => {
+                    let _ = peer.respond(id, serde_json::json!({})).await;
+                    Some(AgentEvent::FileWrite {
+                        path: path.to_string_lossy().to_string(),
+                    })
+                }
+                Err(e) => {
+                    let _ = peer.respond_error(id, -32603, &format!("write failed: {e}")).await;
+                    None
+                }
+            }
+        }
+        InboundAnswer::FsRejected { message } => {
+            let _ = peer.respond_error(id, -32602, &message).await;
+            None
         }
     }
 }
@@ -473,11 +591,31 @@ mod tests {
         /// which resolve concurrently via the `resolver` closure instead).
         #[allow(dead_code)]
         approvals: crate::approval::ApprovalRegistry,
+        /// Canonicalized per-test tempdir used as the session cwd/worktree — fs
+        /// fixtures create/inspect files here (real fs_guard containment needs a
+        /// real, canonicalized root; a literal "/wt" can't be canonicalized).
+        worktree: PathBuf,
     }
 
     type AgentReader =
         tokio::io::Lines<tokio::io::BufReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>>;
     type AgentWriter = tokio::io::WriteHalf<tokio::io::DuplexStream>;
+
+    /// A fresh, canonicalized tempdir per test — mirrors the hand-rolled
+    /// `std::env::temp_dir()` pattern in `acp/fs_guard.rs`'s tests, tagged
+    /// uniquely (pid + a per-process counter) so parallel `cargo test` runs
+    /// never collide on the same directory.
+    fn unique_worktree() -> PathBuf {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "kl-acp-fixture-{}-{n}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::canonicalize(&dir).unwrap()
+    }
 
     /// Read the fake agent's next inbound line and assert its JSON-RPC method.
     async fn next_request(lines: &mut AgentReader, method: &str) -> serde_json::Value {
@@ -518,9 +656,10 @@ mod tests {
         agent: F,
     ) -> Harness
     where
-        F: FnOnce(AgentReader, AgentWriter) -> Fut + Send + 'static,
+        F: FnOnce(AgentReader, AgentWriter, PathBuf) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = ()> + Send,
     {
+        let worktree = unique_worktree();
         let (ours, theirs) = tokio::io::duplex(64 * 1024);
         let (read, write) = tokio::io::split(ours);
         let events = Arc::new(Mutex::new(Vec::new()));
@@ -528,10 +667,13 @@ mod tests {
         let captured = Arc::new(Mutex::new(None));
         let approvals = crate::approval::ApprovalRegistry::new();
 
-        let agent_task = tokio::spawn(async move {
-            let (r, w) = tokio::io::split(theirs);
-            let lines = tokio::io::BufReader::new(r).lines();
-            agent(lines, w).await;
+        let agent_task = tokio::spawn({
+            let worktree = worktree.clone();
+            async move {
+                let (r, w) = tokio::io::split(theirs);
+                let lines = tokio::io::BufReader::new(r).lines();
+                agent(lines, w, worktree).await;
+            }
         });
 
         let resolver_task = resolver.map(|make| make(Arc::clone(&events), approvals.clone()));
@@ -540,7 +682,7 @@ mod tests {
             read,
             write,
             prompt,
-            "/wt".into(),
+            worktree.to_string_lossy().to_string(),
             resume_session,
             sink,
             Arc::clone(&captured),
@@ -553,7 +695,7 @@ mod tests {
             handle.await.unwrap();
         }
         agent_task.await.unwrap();
-        Harness { events, captured, approvals }
+        Harness { events, captured, approvals, worktree }
     }
 
     /// Concurrently: wait until an ApprovalNeeded lands in `events` — and, when
@@ -632,10 +774,10 @@ mod tests {
     /// existing fixtures don't all need to know about mode syncing.
     async fn run_fixture<F, Fut>(prompt: Prompt, resolver: Option<Resolver>, script: F) -> Harness
     where
-        F: FnOnce(AgentReader, AgentWriter, serde_json::Value) -> Fut + Send + 'static,
+        F: FnOnce(AgentReader, AgentWriter, serde_json::Value, PathBuf) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = ()> + Send,
     {
-        run_agent_fixture(prompt, None, resolver, |mut lines, mut w| async move {
+        run_agent_fixture(prompt, None, resolver, |mut lines, mut w, worktree| async move {
             let req = next_request(&mut lines, "initialize").await;
             send_line(
                 &mut w,
@@ -644,7 +786,7 @@ mod tests {
             )
             .await;
             let req = next_request(&mut lines, "session/new").await;
-            assert_eq!(req["params"]["cwd"], "/wt");
+            assert_eq!(req["params"]["cwd"], worktree.to_string_lossy().as_ref());
             send_line(
                 &mut w,
                 serde_json::json!({"jsonrpc":"2.0","id":req["id"],
@@ -661,7 +803,7 @@ mod tests {
                 assert_eq!(next["method"], "session/prompt");
                 next
             };
-            script(lines, w, req["id"].clone()).await;
+            script(lines, w, req["id"].clone(), worktree).await;
         })
         .await
     }
@@ -673,7 +815,7 @@ mod tests {
             permission_mode: Some("acceptEdits".into()),
             ..Default::default()
         };
-        let h = run_fixture(prompt, None, |mut lines, mut w, prompt_id| async move {
+        let h = run_fixture(prompt, None, |mut lines, mut w, prompt_id, _wt| async move {
             for msg in [
                 serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{
                     "sessionId":"acp-abc","update":{"sessionUpdate":"agent_message_chunk",
@@ -723,7 +865,7 @@ mod tests {
             permission_mode: None,
             ..Default::default()
         };
-        let h = run_agent_fixture(prompt, None, None, |mut lines, mut w| async move {
+        let h = run_agent_fixture(prompt, None, None, |mut lines, mut w, _wt| async move {
             let req = next_request(&mut lines, "initialize").await;
             send_line(
                 &mut w,
@@ -768,7 +910,7 @@ mod tests {
             permission_mode: Some("acceptEdits".into()),
             ..Default::default()
         };
-        let h = run_agent_fixture(prompt, None, None, |mut lines, mut w| async move {
+        let h = run_agent_fixture(prompt, None, None, |mut lines, mut w, _wt| async move {
             let req = next_request(&mut lines, "initialize").await;
             send_line(
                 &mut w,
@@ -808,7 +950,7 @@ mod tests {
             permission_mode: None,
             ..Default::default()
         };
-        let h = run_agent_fixture(prompt, None, None, |mut lines, mut w| async move {
+        let h = run_agent_fixture(prompt, None, None, |mut lines, mut w, _wt| async move {
             let req = next_request(&mut lines, "initialize").await;
             send_line(
                 &mut w,
@@ -849,7 +991,7 @@ mod tests {
     #[tokio::test]
     async fn tool_call_update_emits_tool_status_event() {
         let prompt = Prompt { text: "hello".into(), ..Default::default() };
-        let h = run_fixture(prompt, None, |_lines, mut w, prompt_id| async move {
+        let h = run_fixture(prompt, None, |_lines, mut w, prompt_id, _wt| async move {
             for msg in [
                 serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{
                     "sessionId":"acp-abc","update":{"sessionUpdate":"tool_call",
@@ -875,7 +1017,7 @@ mod tests {
     #[tokio::test]
     async fn plan_updates_emit_plan_events() {
         let prompt = Prompt { text: "hello".into(), ..Default::default() };
-        let h = run_fixture(prompt, None, |_lines, mut w, prompt_id| async move {
+        let h = run_fixture(prompt, None, |_lines, mut w, prompt_id, _wt| async move {
             send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{
                 "sessionId":"acp-abc","update":{"sessionUpdate":"plan","entries":[
                     {"content":"Step A","status":"pending","priority":"medium"}]}}})).await;
@@ -891,7 +1033,7 @@ mod tests {
     #[tokio::test]
     async fn available_commands_update_emits_commands_event() {
         let prompt = Prompt { text: "hello".into(), ..Default::default() };
-        let h = run_fixture(prompt, None, |_lines, mut w, prompt_id| async move {
+        let h = run_fixture(prompt, None, |_lines, mut w, prompt_id, _wt| async move {
             send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{
                 "sessionId":"acp-abc","update":{"sessionUpdate":"available_commands_update",
                 "availableCommands":[{"name":"web","description":"Search the web"}]}}})).await;
@@ -907,7 +1049,7 @@ mod tests {
     #[tokio::test]
     async fn thought_chunks_emit_thought_events_not_summary_text() {
         let prompt = Prompt { text: "hello".into(), ..Default::default() };
-        let h = run_fixture(prompt, None, |_lines, mut w, prompt_id| async move {
+        let h = run_fixture(prompt, None, |_lines, mut w, prompt_id, _wt| async move {
             for msg in [
                 serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{
                     "sessionId":"acp-abc","update":{"sessionUpdate":"agent_thought_chunk",
@@ -948,7 +1090,7 @@ mod tests {
             Some(Box::new(|events, approvals| {
                 spawn_resolver(events, approvals, "ok-once", Some("still streaming"))
             })),
-            |mut lines, mut w, prompt_id| async move {
+            |mut lines, mut w, prompt_id, _wt| async move {
                 // Permission request, then MORE streaming — proving no head-of-line block.
                 for msg in [
                     serde_json::json!({"jsonrpc":"2.0","id":41,"method":"session/request_permission","params":{
@@ -1003,7 +1145,7 @@ mod tests {
         let h = run_fixture(
             prompt,
             Some(Box::new(spawn_canceller)),
-            |mut lines, mut w, prompt_id| async move {
+            |mut lines, mut w, prompt_id, _wt| async move {
                 let msg = serde_json::json!({"jsonrpc":"2.0","id":41,"method":"session/request_permission","params":{
                     "sessionId":"acp-abc","toolCall":{"toolCallId":"t1","title":"Edit main.rs","rawInput":{"path":"main.rs"}},
                     "options":[{"optionId":"ok-once","name":"Allow once","kind":"allow_once"},
@@ -1031,9 +1173,11 @@ mod tests {
             text: "hello".into(),
             ..Default::default()
         };
-        let h = run_fixture(prompt, None, |mut lines, mut w, prompt_id| async move {
-            let msg = serde_json::json!({"jsonrpc":"2.0","id":7,"method":"fs/read_text_file",
-                "params":{"sessionId":"acp-abc","path":"/etc/passwd"}});
+        let h = run_fixture(prompt, None, |mut lines, mut w, prompt_id, _wt| async move {
+            // A real ACP method Kineloop doesn't implement (fs/* IS handled now
+            // that M4 wires the proxy — see the fs_* fixtures below).
+            let msg = serde_json::json!({"jsonrpc":"2.0","id":7,"method":"terminal/create",
+                "params":{"sessionId":"acp-abc"}});
             w.write_all(format!("{msg}\n").as_bytes()).await.unwrap();
             let ans: serde_json::Value =
                 serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
@@ -1050,13 +1194,119 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn slice_lines_handles_one_based_start_and_limit() {
+        let content = "l1\nl2\nl3\nl4\n";
+        assert_eq!(slice_lines(content, Some(2), Some(2)), "l2\nl3");
+        assert_eq!(slice_lines(content, None, None), content);
+        // 0 and 1 both mean "from the start".
+        assert_eq!(slice_lines(content, Some(0), None), "l1\nl2\nl3\nl4");
+        assert_eq!(slice_lines(content, Some(1), None), "l1\nl2\nl3\nl4");
+        // Out-of-range start line ⇒ nothing left to slice.
+        assert_eq!(slice_lines(content, Some(99), None), "");
+    }
+
+    #[tokio::test]
+    async fn fs_read_returns_file_content_with_line_slicing() {
+        let prompt = Prompt { text: "hello".into(), ..Default::default() };
+        let h = run_fixture(prompt, None, |mut lines, mut w, prompt_id, wt| async move {
+            std::fs::write(wt.join("notes.txt"), "l1\nl2\nl3\nl4\n").unwrap();
+            let msg = serde_json::json!({"jsonrpc":"2.0","id":7,"method":"fs/read_text_file",
+                "params":{"sessionId":"acp-abc",
+                    "path":wt.join("notes.txt").to_string_lossy().to_string(),
+                    "line":2,"limit":2}});
+            send_line(&mut w, msg).await;
+            let ans: serde_json::Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(ans["id"], 7);
+            assert_eq!(ans["result"]["content"], "l2\nl3");
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":prompt_id,
+                "result":{"stopReason":"completed"}}))
+            .await;
+        })
+        .await;
+        assert!(matches!(
+            h.events.lock().unwrap().last().unwrap(),
+            AgentEvent::Done { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn fs_write_creates_file_emits_file_write_and_answers_empty_object() {
+        let prompt = Prompt { text: "hello".into(), ..Default::default() };
+        let h = run_fixture(prompt, None, |mut lines, mut w, prompt_id, wt| async move {
+            // sub/ does not exist yet — parent dirs must be created by the write.
+            let target = wt.join("sub").join("new.txt");
+            let msg = serde_json::json!({"jsonrpc":"2.0","id":7,"method":"fs/write_text_file",
+                "params":{"sessionId":"acp-abc",
+                    "path":target.to_string_lossy().to_string(),"content":"hi"}});
+            send_line(&mut w, msg).await;
+            let ans: serde_json::Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(ans["id"], 7);
+            assert_eq!(ans["result"], serde_json::json!({}));
+            assert!(ans.get("error").is_none());
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":prompt_id,
+                "result":{"stopReason":"completed"}}))
+            .await;
+        })
+        .await;
+        assert_eq!(
+            std::fs::read_to_string(h.worktree.join("sub").join("new.txt")).unwrap(),
+            "hi"
+        );
+        let events = h.events.lock().unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::FileWrite { path } if path.ends_with("sub/new.txt")
+                    || path.ends_with("sub\\new.txt"))),
+            "expected a FileWrite event for sub/new.txt, got {events:?}"
+        );
+        assert!(matches!(events.last().unwrap(), AgentEvent::Done { .. }));
+    }
+
+    #[tokio::test]
+    async fn fs_escape_attempt_is_rejected_and_run_survives() {
+        let prompt = Prompt { text: "hello".into(), ..Default::default() };
+        let h = run_fixture(prompt, None, |mut lines, mut w, prompt_id, _wt| async move {
+            let msg = serde_json::json!({"jsonrpc":"2.0","id":7,"method":"fs/write_text_file",
+                "params":{"sessionId":"acp-abc","path":"../outside.txt","content":"x"}});
+            send_line(&mut w, msg).await;
+            let ans: serde_json::Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(ans["id"], 7);
+            assert_eq!(ans["error"]["code"], -32602);
+            // The escape rejection must not kill the run: streaming continues.
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{
+                "sessionId":"acp-abc","update":{"sessionUpdate":"agent_message_chunk",
+                "content":{"type":"text","text":"still ok"}}}}))
+            .await;
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":prompt_id,
+                "result":{"stopReason":"completed"}}))
+            .await;
+        })
+        .await;
+        let outside = h.worktree.parent().unwrap().join("outside.txt");
+        assert!(!outside.exists(), "escape write must never land on disk");
+        let events = h.events.lock().unwrap();
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Token { text } if text == "still ok")));
+        assert!(matches!(events.last().unwrap(), AgentEvent::Done { .. }));
+        assert!(
+            !events.iter().any(|e| matches!(e, AgentEvent::FileWrite { .. })),
+            "a rejected write must never emit FileWrite"
+        );
+    }
+
     #[tokio::test]
     async fn drive_session_resumes_via_session_load_when_supported() {
         let prompt = Prompt {
             text: "continue".into(),
             ..Default::default()
         };
-        let h = run_agent_fixture(prompt, Some("acp-abc".into()), None, |mut lines, mut w| async move {
+        let h = run_agent_fixture(prompt, Some("acp-abc".into()), None, |mut lines, mut w, worktree| async move {
             let req = next_request(&mut lines, "initialize").await;
             send_line(
                 &mut w,
@@ -1067,7 +1317,7 @@ mod tests {
             // loadSession:true + a resume id ⇒ session/load, NOT session/new.
             let req = next_request(&mut lines, "session/load").await;
             assert_eq!(req["params"]["sessionId"], "acp-abc");
-            assert_eq!(req["params"]["cwd"], "/wt");
+            assert_eq!(req["params"]["cwd"], worktree.to_string_lossy().as_ref());
             // The spec REQUIRES the agent to replay the entire prior conversation
             // as session/update notifications before answering session/load.
             // None of it may resurface as live events.
@@ -1127,7 +1377,7 @@ mod tests {
             text: "continue".into(),
             ..Default::default()
         };
-        let h = run_agent_fixture(prompt, Some("acp-gone".into()), None, |mut lines, mut w| async move {
+        let h = run_agent_fixture(prompt, Some("acp-gone".into()), None, |mut lines, mut w, _wt| async move {
             let req = next_request(&mut lines, "initialize").await;
             send_line(
                 &mut w,
@@ -1177,7 +1427,7 @@ mod tests {
             text: "hello".into(),
             ..Default::default()
         };
-        let h = run_fixture(prompt, None, |_lines, mut w, prompt_id| async move {
+        let h = run_fixture(prompt, None, |_lines, mut w, prompt_id, _wt| async move {
             send_line(
                 &mut w,
                 serde_json::json!({"jsonrpc":"2.0","id":prompt_id,
