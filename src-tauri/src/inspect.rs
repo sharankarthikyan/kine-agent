@@ -7,6 +7,14 @@ pub enum InspectError {
     Forbidden(String),
     #[error("content too large (max 1 MiB)")]
     ContentTooLarge,
+    #[error("invalid name: {0}")]
+    InvalidName(String),
+    #[error("already exists: {0}")]
+    AlreadyExists(String),
+    #[error("not found: {0}")]
+    NotFound(String),
+    #[error("invalid config: {0}")]
+    InvalidConfig(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -71,7 +79,7 @@ pub fn rule_candidates(worktree: &Path) -> Vec<RuleFile> {
     out
 }
 
-/// Build the set of paths that both `read_text_file` and `write_project_text_file` are
+/// Build the set of paths that both `read_text_file` and `write_customization_file` are
 /// permitted to access. Keeping this in one place ensures the two operations share
 /// identical validation — a drift between them would create a security gap.
 ///
@@ -191,10 +199,14 @@ pub fn read_text_file(path: &str, worktree: &Path) -> Result<String, InspectErro
     Ok(String::from_utf8_lossy(&buf).to_string())
 }
 
-/// Write only project-local customization files. Global agent configuration and
-/// user-level capabilities are intentionally read-only from IPC because a compromised
-/// renderer could otherwise persist behavior changes outside the current repository.
-pub fn write_project_text_file(
+/// Overwrite an existing customization file. Writable targets are exactly the files
+/// the read allowlist already surfaces: rule/config files and discovered capabilities
+/// resolving inside the worktree OR the user's `~/.claude` tree (plus the known global
+/// config files). Editing a user-scope (`~/.claude`) customization is intentionally
+/// permitted — the user asked to manage their global customizations — but every write
+/// still passes the canonicalized allowlist check, so a compromised renderer cannot
+/// reach an arbitrary path outside those roots.
+pub fn write_customization_file(
     path: &str,
     content: &str,
     worktree: &Path,
@@ -202,13 +214,135 @@ pub fn write_project_text_file(
     let target = std::fs::canonicalize(path)?;
     let canonical_worktree = std::fs::canonicalize(worktree)?;
     let allowed = allowed_read_write_paths(worktree, &canonical_worktree);
-    if !target.starts_with(&canonical_worktree) || !allowed.contains(&target) {
+    if !allowed.contains(&target) {
         return Err(InspectError::Forbidden(path.to_string()));
     }
     if content.len() > 1024 * 1024 {
         return Err(InspectError::ContentTooLarge);
     }
     std::fs::write(&target, content)?;
+    Ok(())
+}
+
+/// A creatable capability category and its on-disk shape under a `.claude` root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapabilityKind {
+    /// `agents/<name>.md`
+    Agent,
+    /// `skills/<name>/SKILL.md`
+    Skill,
+    /// `commands/<name>.md`
+    Command,
+}
+
+impl CapabilityKind {
+    pub fn parse(kind: &str) -> Result<Self, InspectError> {
+        match kind {
+            "agent" => Ok(Self::Agent),
+            "skill" => Ok(Self::Skill),
+            "command" => Ok(Self::Command),
+            other => Err(InspectError::InvalidName(format!("unknown kind: {other}"))),
+        }
+    }
+}
+
+/// Validate a user-supplied capability name. Must be a single path component made of
+/// `[A-Za-z0-9._-]`, starting alphanumeric, at most 64 chars — this blocks path
+/// separators, `..` traversal, absolute paths, and hidden dotfiles before the name is
+/// ever joined onto a filesystem root.
+fn validate_customization_name(name: &str) -> Result<(), InspectError> {
+    let invalid = |reason: &str| Err(InspectError::InvalidName(format!("{name:?}: {reason}")));
+    if name.is_empty() {
+        return invalid("empty");
+    }
+    if name.len() > 64 {
+        return invalid("longer than 64 characters");
+    }
+    let mut chars = name.chars();
+    let first = chars.next().unwrap();
+    if !first.is_ascii_alphanumeric() {
+        return invalid("must start with a letter or digit");
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    {
+        return invalid("only letters, digits, '.', '_', '-' allowed");
+    }
+    Ok(())
+}
+
+/// Scaffold body for a freshly created capability, so it validates as soon as it's saved.
+fn scaffold_for(kind: CapabilityKind, name: &str) -> String {
+    match kind {
+        CapabilityKind::Agent => format!(
+            "---\nname: {name}\ndescription: Describe when this subagent should be used.\n---\n\nWrite the subagent's system prompt here.\n"
+        ),
+        CapabilityKind::Skill => format!(
+            "---\nname: {name}\ndescription: Describe when this skill should be used.\n---\n\n# {name}\n\nWrite the skill instructions here.\n"
+        ),
+        CapabilityKind::Command => {
+            "---\ndescription: Describe what this command does.\n---\n\nWrite the command prompt here. Use $ARGUMENTS for user input.\n".to_string()
+        }
+    }
+}
+
+/// Create a new capability file under `claude_root` (a worktree's `.claude` or the user's
+/// `~/.claude`). Returns the absolute path of the created backing file. Rejects invalid
+/// names and refuses to overwrite an existing capability.
+pub fn create_capability(
+    claude_root: &Path,
+    kind: CapabilityKind,
+    name: &str,
+) -> Result<String, InspectError> {
+    validate_customization_name(name)?;
+    let (dir, file): (PathBuf, PathBuf) = match kind {
+        CapabilityKind::Agent => {
+            let d = claude_root.join("agents");
+            (d.clone(), d.join(format!("{name}.md")))
+        }
+        CapabilityKind::Skill => {
+            let d = claude_root.join("skills").join(name);
+            (d.clone(), d.join("SKILL.md"))
+        }
+        CapabilityKind::Command => {
+            let d = claude_root.join("commands");
+            (d.clone(), d.join(format!("{name}.md")))
+        }
+    };
+    if file.exists() {
+        return Err(InspectError::AlreadyExists(file.display().to_string()));
+    }
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(&file, scaffold_for(kind, name))?;
+    Ok(file.display().to_string())
+}
+
+/// Delete an existing capability, validated against the same allowlist as reads/writes.
+/// A skill is stored as a directory (`skills/<name>/SKILL.md` plus references), so deleting
+/// its `SKILL.md` removes the whole skill directory; agents and commands are single files.
+/// Rule/config files are NOT deletable here — only discovered capabilities.
+pub fn delete_capability(path: &str, worktree: &Path) -> Result<(), InspectError> {
+    let target = std::fs::canonicalize(path)?;
+    let canonical_worktree = std::fs::canonicalize(worktree)?;
+    if !allowed_read_write_paths(worktree, &canonical_worktree).contains(&target) {
+        return Err(InspectError::Forbidden(path.to_string()));
+    }
+    // A SKILL.md whose grandparent directory is named `skills` identifies a skill; remove
+    // the containing `<name>` directory so the skill disappears entirely. The grandparent
+    // check keeps us from ever deleting the shared `skills` root itself.
+    let is_skill_md = target.file_name().and_then(|f| f.to_str()) == Some("SKILL.md");
+    let skill_dir = target.parent();
+    let under_skills_root = skill_dir
+        .and_then(|d| d.parent())
+        .and_then(|g| g.file_name())
+        .and_then(|f| f.to_str())
+        == Some("skills");
+    if is_skill_md && under_skills_root {
+        std::fs::remove_dir_all(skill_dir.unwrap())?;
+    } else {
+        std::fs::remove_file(&target)?;
+    }
     Ok(())
 }
 
@@ -622,6 +756,206 @@ fn list_plugins_with_home(home: Option<&Path>) -> Vec<PluginEntry> {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Hooks & MCP mutation (config-fragment editing)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Read a JSON file into its top-level object, or an empty object when the file is absent.
+/// A present-but-non-object (or unparseable) file is rejected rather than silently
+/// clobbered, so a hand-edited config is never destroyed by a mutation.
+fn read_json_object(path: &Path) -> Result<serde_json::Map<String, serde_json::Value>, InspectError> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                return Ok(serde_json::Map::new());
+            }
+            let value: serde_json::Value = serde_json::from_str(trimmed)
+                .map_err(|e| InspectError::InvalidConfig(format!("{}: {e}", path.display())))?;
+            match value {
+                serde_json::Value::Object(map) => Ok(map),
+                _ => Err(InspectError::InvalidConfig(format!(
+                    "{}: top level is not a JSON object",
+                    path.display()
+                ))),
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(serde_json::Map::new()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Pretty-print a JSON object back to disk (2-space indent + trailing newline), creating
+/// parent directories as needed.
+fn write_json_object(
+    path: &Path,
+    map: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), InspectError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut text = serde_json::to_string_pretty(&serde_json::Value::Object(map.clone()))
+        .map_err(|e| InspectError::InvalidConfig(e.to_string()))?;
+    text.push('\n');
+    std::fs::write(path, text)?;
+    Ok(())
+}
+
+/// Append a hook command to a Claude settings JSON file as its own group under `event`.
+/// Creates the file (and parent dirs) when absent; preserves every other key. The shape
+/// mirrors what `parse_hooks_from_settings` reads back.
+pub fn add_hook(
+    settings_path: &Path,
+    event: &str,
+    matcher: Option<&str>,
+    command: &str,
+) -> Result<(), InspectError> {
+    if event.trim().is_empty() {
+        return Err(InspectError::InvalidName("hook event is empty".into()));
+    }
+    if command.trim().is_empty() {
+        return Err(InspectError::InvalidName("hook command is empty".into()));
+    }
+    let mut root = read_json_object(settings_path)?;
+    let hooks = root
+        .entry("hooks")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    let hooks = hooks
+        .as_object_mut()
+        .ok_or_else(|| InspectError::InvalidConfig("`hooks` is not an object".into()))?;
+    let groups = hooks
+        .entry(event.to_string())
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    let groups = groups
+        .as_array_mut()
+        .ok_or_else(|| InspectError::InvalidConfig(format!("`hooks.{event}` is not an array")))?;
+
+    let mut group = serde_json::Map::new();
+    if let Some(m) = matcher.filter(|m| !m.is_empty()) {
+        group.insert("matcher".into(), serde_json::Value::String(m.to_string()));
+    }
+    group.insert(
+        "hooks".into(),
+        serde_json::json!([{ "type": "command", "command": command }]),
+    );
+    groups.push(serde_json::Value::Object(group));
+
+    write_json_object(settings_path, &root)
+}
+
+/// Remove the first hook leaf matching `(event, matcher, command)` from a settings file,
+/// pruning any group and event key left empty. Returns `NotFound` when nothing matches.
+pub fn delete_hook(
+    settings_path: &Path,
+    event: &str,
+    matcher: Option<&str>,
+    command: &str,
+) -> Result<(), InspectError> {
+    let mut root = read_json_object(settings_path)?;
+    let removed = (|| {
+        let groups = root
+            .get_mut("hooks")?
+            .as_object_mut()?
+            .get_mut(event)?
+            .as_array_mut()?;
+        let mut removed = false;
+        for group in groups.iter_mut() {
+            let group_matcher = group.get("matcher").and_then(|m| m.as_str());
+            // A leaf's effective matcher is its group's matcher; both `None` also matches.
+            if group_matcher != matcher {
+                continue;
+            }
+            if let Some(leaves) = group.get_mut("hooks").and_then(|h| h.as_array_mut()) {
+                let before = leaves.len();
+                leaves.retain(|h| h.get("command").and_then(|c| c.as_str()) != Some(command));
+                if leaves.len() != before {
+                    removed = true;
+                    break;
+                }
+            }
+        }
+        Some(removed)
+    })()
+    .unwrap_or(false);
+
+    if !removed {
+        return Err(InspectError::NotFound(format!("hook {event}: {command}")));
+    }
+    prune_empty_hook_groups(&mut root, event);
+    write_json_object(settings_path, &root)
+}
+
+/// After a leaf removal, drop any hook group with no remaining leaves and any event with
+/// no remaining groups.
+fn prune_empty_hook_groups(root: &mut serde_json::Map<String, serde_json::Value>, event: &str) {
+    let Some(hooks) = root.get_mut("hooks").and_then(|h| h.as_object_mut()) else {
+        return;
+    };
+    if let Some(groups) = hooks.get_mut(event).and_then(|g| g.as_array_mut()) {
+        groups.retain(|g| {
+            g.get("hooks")
+                .and_then(|h| h.as_array())
+                .map(|a| !a.is_empty())
+                .unwrap_or(false)
+        });
+        if groups.is_empty() {
+            hooks.remove(event);
+        }
+    }
+}
+
+/// Add an stdio MCP server (`command` + optional `args`) under `mcpServers` in an MCP JSON
+/// file. Rejects a duplicate name; creates the file when absent; preserves other keys.
+pub fn add_mcp_server(
+    mcp_path: &Path,
+    name: &str,
+    command: &str,
+    args: &[String],
+) -> Result<(), InspectError> {
+    validate_customization_name(name)?;
+    if command.trim().is_empty() {
+        return Err(InspectError::InvalidName("server command is empty".into()));
+    }
+    let mut root = read_json_object(mcp_path)?;
+    let servers = root
+        .entry("mcpServers")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    let servers = servers
+        .as_object_mut()
+        .ok_or_else(|| InspectError::InvalidConfig("`mcpServers` is not an object".into()))?;
+    if servers.contains_key(name) {
+        return Err(InspectError::AlreadyExists(name.to_string()));
+    }
+    let mut config = serde_json::Map::new();
+    config.insert("command".into(), serde_json::Value::String(command.to_string()));
+    if !args.is_empty() {
+        config.insert(
+            "args".into(),
+            serde_json::Value::Array(
+                args.iter()
+                    .map(|a| serde_json::Value::String(a.clone()))
+                    .collect(),
+            ),
+        );
+    }
+    servers.insert(name.to_string(), serde_json::Value::Object(config));
+    write_json_object(mcp_path, &root)
+}
+
+/// Remove an MCP server by name from an MCP JSON file. Returns `NotFound` when absent.
+pub fn delete_mcp_server(mcp_path: &Path, name: &str) -> Result<(), InspectError> {
+    let mut root = read_json_object(mcp_path)?;
+    let removed = root
+        .get_mut("mcpServers")
+        .and_then(|s| s.as_object_mut())
+        .map(|servers| servers.remove(name).is_some())
+        .unwrap_or(false);
+    if !removed {
+        return Err(InspectError::NotFound(name.to_string()));
+    }
+    write_json_object(mcp_path, &root)
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Customization counts
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -1025,7 +1359,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // ── write_project_text_file tests (the IPC write path) ───────────────────
+    // ── write_customization_file tests (the IPC write path) ───────────────────
 
     #[test]
     fn write_succeeds_for_discovered_capability_file() {
@@ -1036,7 +1370,7 @@ mod tests {
         std::fs::write(&agent_file, "original content").unwrap();
 
         let new_content = "updated agent instructions";
-        write_project_text_file(&agent_file.display().to_string(), new_content, &dir).unwrap();
+        write_customization_file(&agent_file.display().to_string(), new_content, &dir).unwrap();
 
         // Verify the new content was written by reading back from disk directly.
         let on_disk = std::fs::read_to_string(&agent_file).unwrap();
@@ -1055,7 +1389,7 @@ mod tests {
 
         assert!(
             matches!(
-                write_project_text_file(&arbitrary.display().to_string(), "new content", &dir),
+                write_customization_file(&arbitrary.display().to_string(), "new content", &dir),
                 Err(InspectError::Forbidden(_))
             ),
             "expected Forbidden for a file not in the allowlist"
@@ -1161,7 +1495,7 @@ mod tests {
 
         assert!(
             matches!(
-                write_project_text_file(&link.display().to_string(), "injected", &dir),
+                write_customization_file(&link.display().to_string(), "injected", &dir),
                 Err(InspectError::Forbidden(_))
             ),
             "expected Forbidden for a write via a symlink escaping the worktree / ~/.claude"
@@ -1187,11 +1521,236 @@ mod tests {
         let oversized = "x".repeat(1024 * 1024 + 1);
         assert!(
             matches!(
-                write_project_text_file(&target.display().to_string(), &oversized, &dir),
+                write_customization_file(&target.display().to_string(), &oversized, &dir),
                 Err(InspectError::ContentTooLarge)
             ),
             "expected ContentTooLarge for payload exceeding 1 MiB"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── create_capability / delete_capability tests ──────────────────────────
+
+    #[test]
+    fn create_capability_scaffolds_each_kind() {
+        let dir = std::env::temp_dir().join(format!("ae-create-{}", std::process::id()));
+        let claude = dir.join(".claude");
+        std::fs::create_dir_all(&claude).unwrap();
+
+        let agent = create_capability(&claude, CapabilityKind::Agent, "reviewer").unwrap();
+        assert!(agent.ends_with("/.claude/agents/reviewer.md"), "{agent}");
+        assert!(std::fs::read_to_string(&agent).unwrap().contains("name: reviewer"));
+
+        let skill = create_capability(&claude, CapabilityKind::Skill, "deploy").unwrap();
+        assert!(skill.ends_with("/.claude/skills/deploy/SKILL.md"), "{skill}");
+        assert!(std::fs::read_to_string(&skill).unwrap().contains("description:"));
+
+        let cmd = create_capability(&claude, CapabilityKind::Command, "ship").unwrap();
+        assert!(cmd.ends_with("/.claude/commands/ship.md"), "{cmd}");
+
+        // Freshly created capabilities are discoverable by list_capabilities.
+        let caps = list_capabilities("claude", &dir);
+        assert!(caps.subagents.iter().any(|c| c.name == "reviewer"));
+        assert!(caps.skills.iter().any(|c| c.name == "deploy"));
+        assert!(caps.commands.iter().any(|c| c.name == "ship"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn create_capability_rejects_existing_and_bad_names() {
+        let dir = std::env::temp_dir().join(format!("ae-create2-{}", std::process::id()));
+        let claude = dir.join(".claude");
+        std::fs::create_dir_all(&claude).unwrap();
+
+        create_capability(&claude, CapabilityKind::Agent, "foo").unwrap();
+        assert!(matches!(
+            create_capability(&claude, CapabilityKind::Agent, "foo"),
+            Err(InspectError::AlreadyExists(_))
+        ));
+
+        for bad in ["../escape", "a/b", "", ".hidden", "with space"] {
+            assert!(
+                matches!(
+                    create_capability(&claude, CapabilityKind::Skill, bad),
+                    Err(InspectError::InvalidName(_))
+                ),
+                "expected InvalidName for {bad:?}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delete_capability_removes_file_and_whole_skill_dir() {
+        let dir = std::env::temp_dir().join(format!("ae-del-{}", std::process::id()));
+        let claude = dir.join(".claude");
+        std::fs::create_dir_all(&claude).unwrap();
+
+        let agent = create_capability(&claude, CapabilityKind::Agent, "gone").unwrap();
+        assert!(Path::new(&agent).exists());
+        delete_capability(&agent, &dir).unwrap();
+        assert!(!Path::new(&agent).exists(), "agent file should be gone");
+
+        let skill = create_capability(&claude, CapabilityKind::Skill, "removeme").unwrap();
+        let skill_dir = Path::new(&skill).parent().unwrap().to_path_buf();
+        // Add a sibling reference file the skill owns — deleting must take the whole dir.
+        std::fs::write(skill_dir.join("helper.py"), "print('x')").unwrap();
+        delete_capability(&skill, &dir).unwrap();
+        assert!(!skill_dir.exists(), "whole skill directory should be gone");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delete_capability_forbidden_for_non_capability() {
+        let dir = std::env::temp_dir().join(format!("ae-del2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let arbitrary = dir.join("arbitrary.txt");
+        std::fs::write(&arbitrary, "keep me").unwrap();
+
+        assert!(matches!(
+            delete_capability(&arbitrary.display().to_string(), &dir),
+            Err(InspectError::Forbidden(_))
+        ));
+        assert!(arbitrary.exists(), "arbitrary file must not be deleted");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── add_hook / delete_hook tests ─────────────────────────────────────────
+
+    #[test]
+    fn add_hook_creates_file_and_roundtrips_via_list() {
+        let dir = std::env::temp_dir().join(format!("ae-addhook-{}", std::process::id()));
+        let claude = dir.join(".claude");
+        std::fs::create_dir_all(&claude).unwrap();
+        let settings = claude.join("settings.json");
+
+        add_hook(&settings, "SessionStart", None, "echo start").unwrap();
+        add_hook(&settings, "PreToolUse", Some("Bash"), "echo bash").unwrap();
+
+        // Reads back through the same parser the UI uses.
+        let entries = list_hooks_with_home(&dir, None);
+        assert_eq!(entries.len(), 2, "{entries:?}");
+        assert!(entries
+            .iter()
+            .any(|e| e.event == "SessionStart" && e.command == "echo start" && e.matcher.is_none()));
+        assert!(entries
+            .iter()
+            .any(|e| e.event == "PreToolUse" && e.command == "echo bash"
+                && e.matcher.as_deref() == Some("Bash")));
+
+        // Preserves unrelated existing keys.
+        let raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+        assert!(raw.get("hooks").is_some());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn add_hook_preserves_other_settings_keys() {
+        let dir = std::env::temp_dir().join(format!("ae-addhook2-{}", std::process::id()));
+        let claude = dir.join(".claude");
+        std::fs::create_dir_all(&claude).unwrap();
+        let settings = claude.join("settings.json");
+        std::fs::write(&settings, r#"{"model":"opus","permissions":{"allow":["Bash"]}}"#).unwrap();
+
+        add_hook(&settings, "Stop", None, "echo done").unwrap();
+
+        let raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+        assert_eq!(raw.get("model").and_then(|v| v.as_str()), Some("opus"));
+        assert!(raw.get("permissions").is_some());
+        assert!(raw.get("hooks").is_some());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delete_hook_removes_matching_leaf_and_prunes() {
+        let dir = std::env::temp_dir().join(format!("ae-delhook-{}", std::process::id()));
+        let claude = dir.join(".claude");
+        std::fs::create_dir_all(&claude).unwrap();
+        let settings = claude.join("settings.json");
+
+        add_hook(&settings, "SessionStart", None, "echo one").unwrap();
+        add_hook(&settings, "SessionStart", None, "echo two").unwrap();
+        assert_eq!(list_hooks_with_home(&dir, None).len(), 2);
+
+        delete_hook(&settings, "SessionStart", None, "echo one").unwrap();
+        let after = list_hooks_with_home(&dir, None);
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].command, "echo two");
+
+        // Removing the last one prunes the event key entirely.
+        delete_hook(&settings, "SessionStart", None, "echo two").unwrap();
+        assert!(list_hooks_with_home(&dir, None).is_empty());
+        let raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+        assert!(raw
+            .get("hooks")
+            .and_then(|h| h.as_object())
+            .map(|o| !o.contains_key("SessionStart"))
+            .unwrap_or(true));
+
+        // Deleting a non-existent hook reports NotFound.
+        assert!(matches!(
+            delete_hook(&settings, "SessionStart", None, "nope"),
+            Err(InspectError::NotFound(_))
+        ));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── add_mcp_server / delete_mcp_server tests ─────────────────────────────
+
+    #[test]
+    fn add_mcp_server_roundtrips_and_rejects_dupes() {
+        let dir = std::env::temp_dir().join(format!("ae-addmcp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mcp = dir.join(".mcp.json");
+
+        add_mcp_server(&mcp, "my-server", "node", &["server.js".to_string()]).unwrap();
+        let entries = list_mcp_servers_with_home(&dir, None);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "my-server");
+        assert_eq!(entries[0].detail.as_deref(), Some("node"));
+
+        // Duplicate name rejected.
+        assert!(matches!(
+            add_mcp_server(&mcp, "my-server", "python", &[]),
+            Err(InspectError::AlreadyExists(_))
+        ));
+        // Bad name rejected.
+        assert!(matches!(
+            add_mcp_server(&mcp, "../evil", "node", &[]),
+            Err(InspectError::InvalidName(_))
+        ));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delete_mcp_server_removes_and_reports_missing() {
+        let dir = std::env::temp_dir().join(format!("ae-delmcp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mcp = dir.join(".mcp.json");
+        add_mcp_server(&mcp, "keep", "node", &[]).unwrap();
+        add_mcp_server(&mcp, "drop", "python", &[]).unwrap();
+
+        delete_mcp_server(&mcp, "drop").unwrap();
+        let entries = list_mcp_servers_with_home(&dir, None);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "keep");
+
+        assert!(matches!(
+            delete_mcp_server(&mcp, "missing"),
+            Err(InspectError::NotFound(_))
+        ));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

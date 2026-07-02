@@ -563,6 +563,67 @@ fn ensure_scope_dir(scope: &Path) -> Result<(), String> {
     std::fs::create_dir_all(scope).map_err(|e| e.to_string())
 }
 
+/// The `.claude` root that owns creatable customizations for a resolved scope. The global
+/// `.global-scope` sentinel maps to the user's real `~/.claude` (so a new global capability
+/// lands where `list_capabilities` will discover it); a session worktree maps to its own
+/// `.claude`.
+fn customization_claude_root(scope: &Path) -> PathBuf {
+    if scope.file_name().and_then(|f| f.to_str()) == Some(".global-scope") {
+        crate::agent_paths::claude_config_dir().unwrap_or_else(|| scope.join(".claude"))
+    } else {
+        scope.join(".claude")
+    }
+}
+
+/// Whether a scope+source pair refers to a session's own project files or the user's home.
+/// The wire vocabulary is `"project"` / `"user"`; anything else is rejected at the boundary.
+enum ConfigTarget {
+    Project,
+    User,
+}
+
+impl ConfigTarget {
+    fn parse(source: &str) -> Result<Self, String> {
+        match source {
+            "project" => Ok(Self::Project),
+            "user" => Ok(Self::User),
+            other => Err(format!("unsupported source: {other}")),
+        }
+    }
+}
+
+/// The source a *newly added* hook/MCP entry lands in: an active session writes to its
+/// project config, the global-scope view writes to the user's home config.
+fn add_source(session_id: &Option<String>) -> &'static str {
+    match session_id {
+        Some(s) if !s.is_empty() => "project",
+        _ => "user",
+    }
+}
+
+/// Resolve the Claude `settings.json` (which holds `hooks`) for a scope + source.
+/// Project → `<worktree>/.claude/settings.json`; user → `~/.claude/settings.json`
+/// (matching `list_hooks`, which reads the home dir, not `CLAUDE_CONFIG_DIR`).
+fn hook_settings_path(scope: &Path, source: &str) -> Result<PathBuf, String> {
+    match ConfigTarget::parse(source)? {
+        ConfigTarget::Project => Ok(scope.join(".claude/settings.json")),
+        ConfigTarget::User => crate::agent_paths::home_dir()
+            .map(|h| h.join(".claude/settings.json"))
+            .ok_or_else(|| "no home directory".to_string()),
+    }
+}
+
+/// Resolve the MCP config file for a scope + source. Project → `<worktree>/.mcp.json`;
+/// user → `~/.claude.json` (matching `list_mcp_servers`).
+fn mcp_json_path(scope: &Path, source: &str) -> Result<PathBuf, String> {
+    match ConfigTarget::parse(source)? {
+        ConfigTarget::Project => Ok(scope.join(".mcp.json")),
+        ConfigTarget::User => crate::agent_paths::home_dir()
+            .map(|h| h.join(".claude.json"))
+            .ok_or_else(|| "no home directory".to_string()),
+    }
+}
+
 /// Validate the unified permission-mode id from the (untrusted) IPC boundary. Accepts the
 /// wire vocabulary the frontend emits (`default`, `acceptEdits`, `plan`, `full`, `dontAsk`)
 /// or `None` (defer to the CLI default). Raw per-CLI spellings like `bypassPermissions` are
@@ -1342,21 +1403,147 @@ pub async fn read_text_file(session_id: Option<String>, path: String) -> Result<
     .map_err(|e| e.to_string())?
 }
 
-/// Write `content` to a rule/config or capability file that is already within the
-/// allowed set for this session's worktree. Uses the identical allowlist as
-/// `read_text_file` — only files discovered by `rule_candidates` or
-/// `list_capabilities` (filtered to the worktree / `~/.claude` roots) may be written.
+/// Write `content` to a rule/config or capability file already within the allowed set for
+/// this scope. Uses the identical allowlist as `read_text_file`: only files discovered by
+/// `rule_candidates` or `list_capabilities` (resolved inside the worktree or `~/.claude`)
+/// may be written. `session_id` `None`/empty targets the user's global `~/.claude` scope.
 /// Content larger than 1 MiB or a path not in the allowlist is rejected.
 #[tauri::command]
 pub async fn write_text_file(
-    session_id: String,
+    session_id: Option<String>,
     path: String,
     content: String,
 ) -> Result<(), String> {
-    let root = worktree_root_for(&session_id);
+    let root = worktree_root_for_opt(session_id.as_deref());
     tokio::task::spawn_blocking(move || {
-        let wt = crate::worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
-        inspect::write_project_text_file(&path, &content, &wt.path).map_err(|e| e.to_string())
+        let scope = inspect_scope(&root, session_id)?;
+        ensure_scope_dir(&scope)?;
+        inspect::write_customization_file(&path, &content, &scope).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Create a new capability (agent/skill/command) under the given scope, returning the
+/// absolute path of the created backing file. `session_id` `None`/empty creates in the
+/// user's global `~/.claude`; otherwise in the session worktree's `.claude`. The name is
+/// validated server-side (single safe path component) and an existing capability is never
+/// overwritten.
+#[tauri::command]
+pub async fn create_customization(
+    session_id: Option<String>,
+    kind: String,
+    name: String,
+) -> Result<String, String> {
+    let root = worktree_root_for_opt(session_id.as_deref());
+    tokio::task::spawn_blocking(move || {
+        let scope = inspect_scope(&root, session_id)?;
+        ensure_scope_dir(&scope)?;
+        let kind = inspect::CapabilityKind::parse(&kind).map_err(|e| e.to_string())?;
+        let claude_root = customization_claude_root(&scope);
+        inspect::create_capability(&claude_root, kind, &name).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Delete an existing capability (agent/skill/command). Validated against the same
+/// allowlist as reads/writes; a skill's whole directory is removed. `session_id`
+/// `None`/empty operates on the user's global `~/.claude` scope.
+#[tauri::command]
+pub async fn delete_customization(
+    session_id: Option<String>,
+    path: String,
+) -> Result<(), String> {
+    let root = worktree_root_for_opt(session_id.as_deref());
+    tokio::task::spawn_blocking(move || {
+        let scope = inspect_scope(&root, session_id)?;
+        ensure_scope_dir(&scope)?;
+        inspect::delete_capability(&path, &scope).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Append a hook command to the scope's Claude `settings.json`. An active session writes
+/// to its project config; the global-scope view (`session_id` `None`/empty) writes to
+/// `~/.claude/settings.json`.
+#[tauri::command]
+pub async fn add_hook(
+    session_id: Option<String>,
+    event: String,
+    matcher: Option<String>,
+    command: String,
+) -> Result<(), String> {
+    let root = worktree_root_for_opt(session_id.as_deref());
+    let source = add_source(&session_id);
+    tokio::task::spawn_blocking(move || {
+        let scope = inspect_scope(&root, session_id)?;
+        ensure_scope_dir(&scope)?;
+        let path = hook_settings_path(&scope, source)?;
+        inspect::add_hook(&path, &event, matcher.as_deref(), &command).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Remove a hook leaf matching `(event, matcher, command)` from the settings file for the
+/// given `source` (`"project"` or `"user"` — taken from the entry the user is deleting).
+#[tauri::command]
+pub async fn delete_hook(
+    session_id: Option<String>,
+    source: String,
+    event: String,
+    matcher: Option<String>,
+    command: String,
+) -> Result<(), String> {
+    let root = worktree_root_for_opt(session_id.as_deref());
+    tokio::task::spawn_blocking(move || {
+        let scope = inspect_scope(&root, session_id)?;
+        ensure_scope_dir(&scope)?;
+        let path = hook_settings_path(&scope, &source)?;
+        inspect::delete_hook(&path, &event, matcher.as_deref(), &command).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Add an stdio MCP server (`command` + optional `args`) to the scope's MCP config. An
+/// active session writes to `<worktree>/.mcp.json`; the global-scope view writes to
+/// `~/.claude.json`.
+#[tauri::command]
+pub async fn add_mcp_server(
+    session_id: Option<String>,
+    name: String,
+    command: String,
+    args: Vec<String>,
+) -> Result<(), String> {
+    let root = worktree_root_for_opt(session_id.as_deref());
+    let source = add_source(&session_id);
+    tokio::task::spawn_blocking(move || {
+        let scope = inspect_scope(&root, session_id)?;
+        ensure_scope_dir(&scope)?;
+        let path = mcp_json_path(&scope, source)?;
+        inspect::add_mcp_server(&path, &name, &command, &args).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Remove an MCP server by name from the config file for the given `source`
+/// (`"project"` or `"user"` — taken from the entry the user is deleting).
+#[tauri::command]
+pub async fn delete_mcp_server(
+    session_id: Option<String>,
+    source: String,
+    name: String,
+) -> Result<(), String> {
+    let root = worktree_root_for_opt(session_id.as_deref());
+    tokio::task::spawn_blocking(move || {
+        let scope = inspect_scope(&root, session_id)?;
+        ensure_scope_dir(&scope)?;
+        let path = mcp_json_path(&scope, &source)?;
+        inspect::delete_mcp_server(&path, &name).map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())?
