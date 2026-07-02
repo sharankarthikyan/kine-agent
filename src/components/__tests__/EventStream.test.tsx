@@ -140,7 +140,7 @@ test("renders an approvalNeeded event with its prompt", () => {
 
 test("shows a read-only notice (no buttons) when no answer handler is wired", () => {
   render(<EventStream events={[APPROVAL]} />);
-  expect(screen.queryByRole("button", { name: "Approve" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Allow" })).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Deny" })).not.toBeInTheDocument();
 });
 

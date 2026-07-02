@@ -532,19 +532,39 @@ mod tests {
         Harness { events, captured, approvals }
     }
 
-    /// Concurrently: wait until an ApprovalNeeded lands in `events`, then resolve
-    /// it on the registry with `option_id`. Used by interactive-approval tests.
+    /// Concurrently: wait until an ApprovalNeeded lands in `events` — and, when
+    /// `wait_for_token` is set, until that Token text has streamed in too — then
+    /// resolve the request on the registry with `option_id`. Requiring the token
+    /// BEFORE resolving is the no-head-of-line-blocking proof: an implementation
+    /// that awaited the decision inline in the drive loop could never process
+    /// the token while blocked, so this resolver would spin forever (deadlock →
+    /// test failure) instead of the regression silently passing.
     fn spawn_resolver(
         events: Arc<Mutex<Vec<AgentEvent>>>,
         approvals: crate::approval::ApprovalRegistry,
         option_id: &'static str,
+        wait_for_token: Option<&'static str>,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             loop {
-                let pending = events.lock().unwrap().iter().find_map(|e| match e {
-                    AgentEvent::ApprovalNeeded { request_id, .. } => Some(request_id.clone()),
-                    _ => None,
-                });
+                let pending = {
+                    let events = events.lock().unwrap();
+                    let token_seen = wait_for_token.is_none_or(|wanted| {
+                        events
+                            .iter()
+                            .any(|e| matches!(e, AgentEvent::Token { text } if text == wanted))
+                    });
+                    if token_seen {
+                        events.iter().find_map(|e| match e {
+                            AgentEvent::ApprovalNeeded { request_id, .. } => {
+                                Some(request_id.clone())
+                            }
+                            _ => None,
+                        })
+                    } else {
+                        None
+                    }
+                };
                 if let Some(request_id) = pending {
                     let decision = crate::approval::ApprovalDecision {
                         allow: true,
@@ -750,7 +770,12 @@ mod tests {
         };
         let h = run_fixture(
             prompt,
-            Some(Box::new(|events, approvals| spawn_resolver(events, approvals, "ok-once"))),
+            // Resolve only after the "still streaming" token has ALSO been
+            // processed — an inline-await regression deadlocks here instead of
+            // passing (see spawn_resolver).
+            Some(Box::new(|events, approvals| {
+                spawn_resolver(events, approvals, "ok-once", Some("still streaming"))
+            })),
             |mut lines, mut w, prompt_id| async move {
                 // Permission request, then MORE streaming — proving no head-of-line block.
                 for msg in [
