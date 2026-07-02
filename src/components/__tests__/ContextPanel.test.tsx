@@ -11,12 +11,12 @@ const base = {
   onOpenRule: () => {},
 };
 
-test("shows 'Usage unavailable' when no usage", () => {
+test("explains usage availability when no usage has arrived", () => {
   render(<ContextPanel {...base} />);
-  expect(screen.getByText(/usage unavailable/i)).toBeInTheDocument();
+  expect(screen.getByText(/usage appears after the agent finishes a turn/i)).toBeInTheDocument();
 });
 
-test("renders window usage with total tokens, progress, and cost", () => {
+test("renders context usage with window pressure, output, cache, and cost", () => {
   render(
     <ContextPanel
       {...base}
@@ -28,6 +28,25 @@ test("renders window usage with total tokens, progress, and cost", () => {
         costUsd: 0.12,
         model: "opus",
       }}
+      usageSummary={{
+        latest: {
+          inputTokens: 50000,
+          outputTokens: 1000,
+          cacheReadTokens: 0,
+          cacheCreationTokens: 0,
+          costUsd: 0.12,
+          model: "opus",
+        },
+        totals: {
+          inputTokens: 50000,
+          outputTokens: 1000,
+          cacheReadTokens: 0,
+          cacheCreationTokens: 0,
+          costUsd: 0.12,
+          model: "opus",
+        },
+        eventCount: 10,
+      }}
       model={{
         value: "opus",
         label: "Claude Opus",
@@ -36,11 +55,67 @@ test("renders window usage with total tokens, progress, and cost", () => {
         disabled: false,
         contextWindow: 200000,
       }}
+      sessionTurnCount={4}
     />,
   );
   expect(screen.getByRole("progressbar")).toBeInTheDocument();
+  expect(screen.getByText("10 usage samples")).toBeInTheDocument();
+  expect(screen.getByText("Conversation turns")).toBeInTheDocument();
+  expect(screen.getByText("4")).toBeInTheDocument();
   expect(screen.getByText(/\$0\.12/)).toBeInTheDocument();
-  expect(screen.getByText(/51,000|51000/)).toBeInTheDocument(); // total tokens
+  expect(screen.getByText(/25% of window/i)).toBeInTheDocument();
+  expect(screen.getByText(/50,000 \/ 200,000|50000 \/ 200000/)).toBeInTheDocument();
+  expect(screen.getByText("Generated output")).toBeInTheDocument();
+  expect(screen.getAllByText(/1,000|1000/).length).toBeGreaterThan(0);
+  expect(screen.getByText("Cache read")).toBeInTheDocument();
+});
+
+test("states Antigravity telemetry limits instead of showing fake usage", () => {
+  render(<ContextPanel {...base} agent="antigravity" />);
+  expect(screen.getByText(/antigravity does not emit token usage/i)).toBeInTheDocument();
+  expect(screen.queryByText("Session output")).not.toBeInTheDocument();
+});
+
+test("renders real session settings", () => {
+  render(
+    <ContextPanel
+      {...base}
+      agent="codex"
+      permissionMode="acceptEdits"
+      sandboxTerminal
+      model={{
+        value: "gpt-5.5",
+        label: "GPT-5.5",
+        agent: "codex",
+        description: "gpt-5.5",
+        disabled: false,
+        contextWindow: 272000,
+      }}
+    />,
+  );
+  expect(screen.getByText("codex")).toBeInTheDocument();
+  expect(screen.getByText("GPT-5.5")).toBeInTheDocument();
+  expect(screen.getByText("Auto-edit")).toBeInTheDocument();
+  expect(screen.getByText("On")).toBeInTheDocument();
+});
+
+test("renders estimated context source footprint", () => {
+  render(
+    <ContextPanel
+      {...base}
+      contextFootprint={{
+        totalTokens: 70,
+        items: [
+          { id: "rules", label: "Rules & config", tokens: 40, detail: "1 files" },
+          { id: "tools", label: "Tool calls", tokens: 30, detail: "Observed tool arguments" },
+        ],
+      }}
+    />,
+  );
+  expect(screen.getByText("Estimated footprint")).toBeInTheDocument();
+  expect(screen.getAllByText("Rules & config").length).toBeGreaterThan(0);
+  expect(screen.getByText("Tool calls")).toBeInTheDocument();
+  expect(screen.getByText("70")).toBeInTheDocument();
 });
 
 test("shows changed files up front and collapses reads behind a toggle", async () => {
@@ -84,7 +159,7 @@ test("lists existing rules and calls onOpenRule on click", async () => {
   expect(onOpenRule).toHaveBeenCalled();
 });
 
-test("renders capability names", () => {
+test("does not duplicate available capability inventory in the context panel", () => {
   render(
     <ContextPanel
       {...base}
@@ -95,12 +170,6 @@ test("renders capability names", () => {
       }}
     />,
   );
-  expect(screen.getByText("shadcn")).toBeInTheDocument();
-});
-
-test("shows 'No capabilities found' when capabilities present but all empty", () => {
-  render(
-    <ContextPanel {...base} capabilities={{ skills: [], subagents: [], commands: [] }} />,
-  );
-  expect(screen.getByText(/no capabilities found/i)).toBeInTheDocument();
+  expect(screen.queryByText("shadcn")).not.toBeInTheDocument();
+  expect(screen.queryByText(/no capabilities found/i)).not.toBeInTheDocument();
 });

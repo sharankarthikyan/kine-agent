@@ -183,7 +183,8 @@ pub async fn spawn_and_stream(
     sink: Box<dyn EventSink>,
     captured_thread: Arc<Mutex<Option<String>>>,
 ) -> Result<(), SessionError> {
-    let model = prompt.model.as_deref();
+    let selected_model = prompt.model.clone();
+    let model = selected_model.as_deref();
     // Headless `codex exec` has no interactive approval prompt, so the sandbox tier (or a
     // full bypass) is the only blast-radius control. Default `read-only`: "ask before
     // edits" genuinely doesn't write when there's no live approver. Unknown/None ⇒ Default.
@@ -283,6 +284,24 @@ pub async fn spawn_and_stream(
                     }
                 }
                 for event in parse_line(&line) {
+                    let event = match event {
+                        AgentEvent::Usage {
+                            input_tokens,
+                            output_tokens,
+                            cache_read_tokens,
+                            cache_creation_tokens,
+                            cost_usd,
+                            model: None,
+                        } => AgentEvent::Usage {
+                            input_tokens,
+                            output_tokens,
+                            cache_read_tokens,
+                            cache_creation_tokens,
+                            cost_usd,
+                            model: selected_model.clone(),
+                        },
+                        other => other,
+                    };
                     sink.emit(event);
                 }
             }

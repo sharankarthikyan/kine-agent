@@ -33,12 +33,24 @@ pub struct Prompt {
 pub enum SessionError {
     #[error("failed to spawn agent: {0}")]
     Spawn(String),
+    /// The agent process launched but its handshake/protocol failed (e.g. an ACP
+    /// initialize or session/new error) — distinct from `Spawn` so the UI can one
+    /// day say "install Node" vs "the agent misbehaved".
+    #[error("agent protocol error: {0}")]
+    Protocol(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }
 
 /// One sink for normalized events. The IPC command supplies a real impl;
 /// tests supply a collecting impl.
+///
+/// NOTE: the trait is `Send` but NOT `Sync`. Adapters whose `run` future must be
+/// `Send` therefore may not hold a `&dyn EventSink` across an `.await` — emit
+/// synchronously, then await (see `adapters::acp::handle_notification`). If an
+/// adapter ever genuinely needs to emit-await-emit while borrowing the sink
+/// (e.g. M3's interactive ACP approvals), add `Sync` here instead of fighting
+/// the borrow — both current impls are already `Sync` in practice.
 pub trait EventSink: Send {
     fn emit(&self, event: crate::events::AgentEvent);
 }

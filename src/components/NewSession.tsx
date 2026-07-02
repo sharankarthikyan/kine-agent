@@ -7,7 +7,9 @@ import {
   Paperclip,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { PermissionModeSelect } from "@/components/PermissionModeSelect";
 import { type PermissionMode } from "@/lib/permissions";
@@ -20,6 +22,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { type Engine } from "@/lib/agent";
 import { type AgentInfo, type ModelInfo, isAgentSpawnable } from "@/lib/models";
 import { AgentLogo } from "./AgentLogo";
 
@@ -32,6 +35,8 @@ interface NewSessionProps {
   model: ModelInfo | null;
   permissionMode: PermissionMode;
   sandboxTerminal: boolean;
+  /** Streaming engine: "pipe" (default, CLI adapters) | "acp" (beta, claude only). */
+  engine: Engine;
   running: boolean;
   onPickRepo: () => void;
   onPickRecent: (path: string) => void;
@@ -39,6 +44,7 @@ interface NewSessionProps {
   onModelChange: (m: ModelInfo) => void;
   onPermissionModeChange: (mode: PermissionMode) => void;
   onSandboxTerminalChange: (v: boolean) => void;
+  onEngineChange: (engine: Engine) => void;
   onStart: (text: string) => void;
 }
 
@@ -72,6 +78,7 @@ export function NewSession({
   model,
   permissionMode,
   sandboxTerminal,
+  engine,
   running,
   onPickRepo,
   onPickRecent,
@@ -79,6 +86,7 @@ export function NewSession({
   onModelChange,
   onPermissionModeChange,
   onSandboxTerminalChange,
+  onEngineChange,
   onStart,
 }: NewSessionProps) {
   const [text, setText] = useState("");
@@ -292,6 +300,20 @@ export function NewSession({
                 sandboxTerminal={sandboxTerminal}
                 onSandboxTerminalChange={onSandboxTerminalChange}
               />
+
+              {/* ACP streaming engine (M1: claude only, default off ⇒ pipe adapter). */}
+              {agent?.id === "claude" && (
+                <label className="flex shrink-0 cursor-pointer select-none items-center gap-1.5 whitespace-nowrap text-xs text-muted-foreground">
+                  <Switch
+                    checked={engine === "acp"}
+                    onCheckedChange={(on) => onEngineChange(on ? "acp" : "pipe")}
+                    disabled={running}
+                    aria-label="ACP streaming (beta — requires Node.js)"
+                  />
+                  <span>ACP streaming</span>
+                  <Badge variant="outline">beta</Badge>
+                </label>
+              )}
             </div>
 
             {/* RIGHT: attach (inert stub) + send */}

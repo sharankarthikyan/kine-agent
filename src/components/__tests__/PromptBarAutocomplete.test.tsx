@@ -119,10 +119,17 @@ test("typing / at line start lists commands + skills for claude", async () => {
   expect(await screen.findByRole("option", { name: /\/review/ })).toBeInTheDocument();
 });
 
-test("does not open the command menu for a / typed mid-line", async () => {
+test("opens the command menu for a / typed after an @ mention", async () => {
   setup();
-  await userEvent.type(screen.getByPlaceholderText(PLACEHOLDER), "run /re");
-  // brief settle; no options should appear for a mid-line slash
+  // The reported bug: "@agent-… /command" must still autocomplete the command.
+  await userEvent.type(screen.getByPlaceholderText(PLACEHOLDER), "@agent-code-reviewer /re");
+  expect(await screen.findByRole("option", { name: /\/review/ })).toBeInTheDocument();
+});
+
+test("does not open the command menu for an absolute path (interior slash)", async () => {
+  setup();
+  await userEvent.type(screen.getByPlaceholderText(PLACEHOLDER), "/usr/re");
+  // brief settle; an interior slash marks a path, not a command
   await new Promise((r) => setTimeout(r, 0));
   expect(screen.queryByRole("option")).not.toBeInTheDocument();
 });

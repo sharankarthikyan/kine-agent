@@ -77,7 +77,13 @@ pub async fn spawn_and_stream(
     // Antigravity is project-based and otherwise ignores the process cwd, which would
     // let it operate on the wrong repo. `--add-dir <worktree>` scopes its workspace to
     // this session's isolated worktree. (We intentionally avoid `--new-project`, which
-    // triggers project-scaffolding behavior.)
+    // both triggers project-scaffolding behavior AND hangs headlessly under `--print`.)
+    //
+    // CRITICAL: this only works when `cwd` has NO hidden (dot-prefixed) path component.
+    // `agy` silently refuses to adopt a hidden-path workspace and falls back to its default
+    // `scratch` project, so unqualified edits would land outside the worktree, breaking
+    // isolation. That's why `commands::worktrees_root` puts worktrees under a VISIBLE
+    // `~/Kineloop` rather than `~/.kineloop`. (Verified 2026-07-01 via `agy --print`.)
     command.arg("--add-dir").arg(&cwd);
     if let Some(m) = prompt.model.as_deref() {
         command.arg("--model").arg(m);

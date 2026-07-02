@@ -41,10 +41,12 @@ import {
   listTrustedRepos,
   pickRepository,
   respondToApproval,
+  engineForAgentSwitch,
   startSession,
   sendMessage,
   stopSession,
   type AgentEvent,
+  type Engine,
 } from "./lib/agent";
 import {
   detectAgents,
@@ -69,7 +71,15 @@ import {
   DEFAULT_PERMISSION_MODE,
   type PermissionMode,
 } from "./lib/permissions";
-import { filesFromEvents, latestUsage } from "./lib/contextDerive";
+import {
+  activityCountsFromEvents,
+  contextFootprintFromSources,
+  contextLoadTokens,
+  estimateTokens,
+  filesFromEvents,
+  usageSummaryFromEvents,
+} from "./lib/contextDerive";
+import { detectTuiOnlyCommand } from "./lib/tuiCommands";
 import {
   inspectRules,
   readTextFile,
@@ -127,6 +137,8 @@ type PaneDraft = {
   modelValue: string | null;
   permissionMode: PermissionMode;
   sandbox: boolean;
+  /** Streaming engine: "pipe" (default, CLI adapters) | "acp" (beta, claude only). */
+  engine: Engine;
 };
 type EventPageState = {
   nextOffset: number;
@@ -280,6 +292,7 @@ export default function App() {
   const [hooks, setHooks] = useState<HookEntry[]>([]);
   const [mcpServers, setMcpServers] = useState<McpServerEntry[]>([]);
   const [plugins, setPlugins] = useState<PluginEntry[]>([]);
+  const [contextResourceTokens, setContextResourceTokens] = useState<Record<string, number>>({});
   // Customizations dialog state — section defaults to "overview" until set by the sidebar row click.
   const [custDialogOpen, setCustDialogOpen] = useState(false);
   const [custSection, setCustSection] =
@@ -344,6 +357,7 @@ export default function App() {
     setHooks([]);
     setMcpServers([]);
     setPlugins([]);
+    setContextResourceTokens({});
   }
 
   function setSessionLoading(sessionId: string, loading: boolean) {
@@ -384,13 +398,43 @@ export default function App() {
     kind: string,
     payload: Record<string, unknown>,
   ) {
+    const ts = Date.now();
+    const cachedEvents = eventsBySession[sessionId] ?? [];
+    setSessions((rows) =>
+      rows.map((row) => {
+        if (row.id !== sessionId) return row;
+        const nextRow = { ...row, updatedAt: ts };
+        if (kind === "prompt") {
+          nextRow.turnCount = (row.turnCount ?? 0) + 1;
+        } else if (kind === "toolCall") {
+          nextRow.toolCallCount = (row.toolCallCount ?? 0) + 1;
+        } else if (kind === "fileWrite") {
+          const path = typeof payload.path === "string" ? payload.path : "";
+          const alreadySeen =
+            path !== "" &&
+            cachedEvents.some((event) => {
+              if (event.kind !== "fileWrite") return false;
+              try {
+                return JSON.parse(event.payloadJson)?.path === path;
+              } catch {
+                return false;
+              }
+            });
+          if (!alreadySeen) {
+            nextRow.fileActionCount = (row.fileActionCount ?? 0) + 1;
+          }
+        }
+        return nextRow;
+      }),
+    );
+
     setEventsBySession((prev) => {
       const current = prev[sessionId] ?? [];
       const nextEvent: StoredEvent = {
         seq: current.length,
         kind,
         payloadJson: JSON.stringify(payload),
-        ts: Date.now(),
+        ts,
       };
       const next = [...current, nextEvent];
       if (activeSessionIdRef.current === sessionId) setStoredEvents(next);
@@ -608,7 +652,12 @@ export default function App() {
   function modelForAgent(agentId: string, preferredValue?: string): ModelInfo | null {
     const agentModels = models.filter((m) => m.agent === agentId);
     if (preferredValue) {
-      const preferred = agentModels.find((m) => m.value === preferredValue);
+      const preferred = agentModels.find(
+        (m) =>
+          m.value === preferredValue ||
+          m.label === preferredValue ||
+          m.description === preferredValue,
+      );
       if (preferred) return preferred;
     }
     return agentModels[0] ?? null;
@@ -619,7 +668,7 @@ export default function App() {
     const agentId = isAgentSpawnable(session.agent)
       ? session.agent
       : (selectedModel?.agent ?? models[0]?.agent ?? "claude");
-    return modelForAgent(agentId, sessionModelValues[session.id]);
+    return modelForAgent(agentId, sessionModelValues[session.id] ?? session.branch);
   }
 
   function handleSessionModelChange(sessionId: string, model: ModelInfo) {
@@ -657,6 +706,7 @@ export default function App() {
       modelValue: selectedModel?.agent === agentId ? (selectedModel?.value ?? null) : null,
       permissionMode: newSessionPermissionMode,
       sandbox: newSessionSandbox,
+      engine: "pipe",
     };
   }
 
@@ -687,13 +737,24 @@ export default function App() {
         `${a.label} doesn't support "${permissionModeLabel(cur.permissionMode)}"; using "${permissionModeLabel(mode)}".`,
       );
     }
-    updatePaneDraft(paneId, { agentId: a.id, modelValue, permissionMode: mode });
+    updatePaneDraft(paneId, {
+      agentId: a.id,
+      modelValue,
+      permissionMode: mode,
+      engine: engineForAgentSwitch(a.id, cur.engine),
+    });
   }
 
   function paneModelChange(paneId: string, m: ModelInfo) {
     const cur = draftFor(paneId);
     const { mode } = coercePermissionMode(cur.permissionMode, m.agent);
-    updatePaneDraft(paneId, { modelValue: m.value, agentId: m.agent, permissionMode: mode });
+    updatePaneDraft(paneId, {
+      modelValue: m.value,
+      agentId: m.agent,
+      permissionMode: mode,
+      // Picking another agent's model also switches agents — same ACP reset rule.
+      engine: engineForAgentSwitch(m.agent, cur.engine),
+    });
   }
 
   function panePermissionChange(paneId: string, mode: PermissionMode) {
@@ -1041,27 +1102,53 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [rightTab]);
 
-  // Fetch rules + capabilities whenever the Context tab becomes active for a session.
+  // Fetch rules/config, lightweight capability metadata, and local token estimates
+  // whenever the Context tab becomes active for a session. Capability inventory
+  // belongs in Customizations; the Context tab only uses metadata to match consumed
+  // agents/skills/commands that appear in the transcript.
   // Captures sessionId at effect-run time so the cross-session ref guard works correctly
   // even if the user switches sessions while awaiting IPC calls.
   useEffect(() => {
     if (rightTab !== "context" || !activeSessionId) return;
     const sessionId = activeSessionId;
     (async () => {
+      let nextRules: RuleFile[] = [];
+      let nextCapabilities: Capabilities | null = null;
+
       try {
-        const r = await inspectRules(sessionId);
-        if (activeSessionIdRef.current === sessionId) setRules(r);
+        nextRules = await inspectRules(sessionId);
       } catch {
-        if (activeSessionIdRef.current === sessionId) setRules([]);
+        nextRules = [];
       }
+
       try {
         const session = sessions.find((s) => s.id === sessionId) ?? null;
         const agentId = session?.agent ?? selectedModel?.agent ?? "claude";
-        const c = await listCapabilities(sessionId, agentId);
-        if (activeSessionIdRef.current === sessionId) setCapabilities(c);
+        nextCapabilities = await listCapabilities(sessionId, agentId);
       } catch {
-        if (activeSessionIdRef.current === sessionId) setCapabilities(null);
+        nextCapabilities = null;
       }
+
+      const resourcePaths = Array.from(
+        new Set(
+          nextRules.filter((rule) => rule.exists).map((rule) => rule.path).filter(Boolean),
+        ),
+      );
+      const tokenEntries = await Promise.all(
+        resourcePaths.map(async (path) => {
+          try {
+            const content = await readTextFile(sessionId, path);
+            return [path, estimateTokens(content)] as const;
+          } catch {
+            return [path, 0] as const;
+          }
+        }),
+      );
+
+      if (activeSessionIdRef.current !== sessionId) return;
+      setRules(nextRules);
+      setCapabilities(nextCapabilities);
+      setContextResourceTokens(Object.fromEntries(tokenEntries.filter(([, tokens]) => tokens > 0)));
     })();
   }, [rightTab, activeSessionId, selectedModel?.agent, sessions]);
 
@@ -1202,6 +1289,8 @@ export default function App() {
       permissionMode?: PermissionMode;
       sandboxTerminal?: boolean;
       agent?: string;
+      /** Streaming engine for NEW sessions only; follow-ups reuse the persisted engine. */
+      engine?: Engine;
       sessionId?: string | null;
       paneId?: string;
     },
@@ -1238,6 +1327,31 @@ export default function App() {
     const startAgent = isAgentSpawnable(preferredAgent)
       ? preferredAgent
       : (selectedModel?.agent ?? "claude");
+    // TUI-only built-ins (e.g. /status, /model) open interactive screens that a
+    // headless `claude -p` spawn rejects — hint instead of burning a turn.
+    if (startAgent === "claude") {
+      const customNames = [
+        ...(capabilities?.skills.map((s) => s.name) ?? []),
+        ...(capabilities?.commands.map((c) => c.name) ?? []),
+      ];
+      const tuiCommand = detectTuiOnlyCommand(text, customNames);
+      if (tuiCommand) {
+        toast.info(`/${tuiCommand} needs Claude Code's interactive terminal`, {
+          description:
+            "Headless sessions can't open its screen. Run `claude` in a terminal for that — model, permission mode, and usage live in Kineloop's Context panel.",
+        });
+        return;
+      }
+    }
+    // ACP M1 auto-answers permission requests from the mode instead of asking:
+    // "Ask before edits" therefore DECLINES gated actions. Nudge once at start so
+    // an auto-rejected edit reads as expected behavior, not a broken feature.
+    if (opts?.engine === "acp" && effectivePermissionMode === "default") {
+      toast.info("ACP streaming with “Ask before edits”", {
+        description:
+          "This beta auto-declines gated actions instead of asking. Switch the session to “Edit automatically” to let the agent change files.",
+      });
+    }
     // Set the ref synchronously before the first await so the cross-session guard
     // is exact for new sessions (id now known up front, not after startSession resolves).
     setActive(sessionId);
@@ -1319,6 +1433,7 @@ export default function App() {
           model: modelArg,
           permissionMode: effectivePermissionMode,
           sandboxTerminal: effectiveSandbox,
+          engine: opts?.engine,
           onEvent,
         });
       } else {
@@ -1367,6 +1482,7 @@ export default function App() {
       repo: draft.repo ?? ".",
       permissionMode: draft.permissionMode,
       sandboxTerminal: draft.sandbox,
+      engine: draft.engine,
       agent: agentId,
       sessionId: null,
       paneId,
@@ -1471,7 +1587,9 @@ export default function App() {
   }
 
   const files = filesFromEvents(storedEvents);
-  const usage = latestUsage(storedEvents);
+  const usageSummary = usageSummaryFromEvents(storedEvents);
+  const usage = usageSummary.latest;
+  const loadedActivityCounts = activityCountsFromEvents(storedEvents);
 
   // Derived: active session object and its display values for TitleBar + SessionHeader.
   const activeSession = sessions.find((s) => s.id === activeSessionId) ?? null;
@@ -1481,6 +1599,30 @@ export default function App() {
     : null;
   const activeIsExternal = activeSession?.source === "external";
   const activePanelModel = modelForSession(activeSession);
+  const activePermissionMode = permissionModeForSession(activeSession);
+  const activeSandboxTerminal = sandboxForSession(activeSession);
+  const activePageState = activeSessionId ? eventPagesBySession[activeSessionId] : undefined;
+  const activeTranscriptComplete = !(activePageState?.hasMore ?? false);
+  const contextFootprint = contextFootprintFromSources({
+    events: storedEvents,
+    files,
+    rules,
+    capabilities,
+    mcpServers,
+    resourceTokens: contextResourceTokens,
+    measuredContextTokens: usage
+      ? contextLoadTokens(usage, activeSession?.agent ?? activePanelModel?.agent ?? "claude")
+      : null,
+  });
+  const activeTurnCount = activeTranscriptComplete
+    ? loadedActivityCounts.turnCount
+    : (activeSession?.turnCount ?? loadedActivityCounts.turnCount);
+  const activeToolCallCount = activeTranscriptComplete
+    ? loadedActivityCounts.toolCallCount
+    : (activeSession?.toolCallCount ?? loadedActivityCounts.toolCallCount);
+  const activeFileActionCount = activeTranscriptComplete
+    ? loadedActivityCounts.fileActionCount
+    : (activeSession?.fileActionCount ?? loadedActivityCounts.fileActionCount);
 
   // Search + status + source filters applied before grouping. Search is a
   // case-insensitive substring match on title; status/source are exact matches.
@@ -1691,6 +1833,7 @@ export default function App() {
                             model={draftModel}
                             permissionMode={draft?.permissionMode ?? DEFAULT_PERMISSION_MODE}
                             sandboxTerminal={draft?.sandbox ?? false}
+                            engine={draft?.engine ?? "pipe"}
                             running={false}
                             onPickRepo={() => void pickRepoForPane(pane.id)}
                             onPickRecent={(p) => updatePaneDraft(pane.id, { repo: p })}
@@ -1698,6 +1841,7 @@ export default function App() {
                             onModelChange={(m) => paneModelChange(pane.id, m)}
                             onPermissionModeChange={(mode) => panePermissionChange(pane.id, mode)}
                             onSandboxTerminalChange={(v) => updatePaneDraft(pane.id, { sandbox: v })}
+                            onEngineChange={(engine) => updatePaneDraft(pane.id, { engine })}
                             onStart={(text) => handleStartNewSession(text, pane.id)}
                           />
                         </div>
@@ -1900,10 +2044,20 @@ export default function App() {
                 >
                   <ContextPanel
                     usage={usage}
+                    usageSummary={usageSummary}
                     files={files}
                     rules={rules}
                     capabilities={capabilities}
                     model={activePanelModel}
+                    contextFootprint={contextFootprint}
+                    agent={activeSession?.agent}
+                    source={activeSession?.source}
+                    permissionMode={activePermissionMode}
+                    sandboxTerminal={activeSandboxTerminal}
+                    sessionTurnCount={activeTurnCount}
+                    sessionToolCallCount={activeToolCallCount}
+                    sessionFileActionCount={activeFileActionCount}
+                    transcriptComplete={activeTranscriptComplete}
                     onOpenRule={handleOpenRule}
                     onOpenFile={(path) => void handleOpenFile(path)}
                   />

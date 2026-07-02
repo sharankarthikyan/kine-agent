@@ -186,6 +186,18 @@ impl SessionStore {
                 }
             }
         }
+        // Per-session streaming engine ("pipe" = CLI adapters, "acp" = Agent Client
+        // Protocol). Same ALTER-tolerant pattern as the columns above.
+        if let Err(e) =
+            sqlx::query("ALTER TABLE sessions ADD COLUMN engine TEXT NOT NULL DEFAULT 'pipe'")
+                .execute(&self.pool)
+                .await
+        {
+            let msg = e.to_string().to_lowercase();
+            if !msg.contains("duplicate column") {
+                return Err(e.into());
+            }
+        }
         Ok(())
     }
 
@@ -249,6 +261,28 @@ impl SessionStore {
     ) -> Result<(), StoreError> {
         sqlx::query("UPDATE sessions SET external_thread_id = ?, updated_at = ? WHERE id = ?")
             .bind(thread_id)
+            .bind(now_ms())
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// The streaming engine recorded for a session ("pipe" | "acp"). Defaults to
+    /// "pipe" when the session is absent, so callers degrade to today's behavior.
+    pub async fn get_engine(&self, id: &str) -> Result<String, StoreError> {
+        // Column is NOT NULL, so only row absence needs a default (same shape as get_agent).
+        let v = sqlx::query_scalar::<_, String>("SELECT engine FROM sessions WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(v.unwrap_or_else(|| "pipe".to_string()))
+    }
+
+    /// Record the engine a session runs on. Bumps `updated_at`.
+    pub async fn set_engine(&self, id: &str, engine: &str) -> Result<(), StoreError> {
+        sqlx::query("UPDATE sessions SET engine = ?, updated_at = ? WHERE id = ?")
+            .bind(engine)
             .bind(now_ms())
             .bind(id)
             .execute(&self.pool)
@@ -631,6 +665,20 @@ mod tests {
         assert_eq!(sessions[0].title, "do the thing");
         assert_eq!(sessions[0].status, "running");
         assert_eq!(sessions[0].branch, "agent/s1");
+    }
+
+    #[tokio::test]
+    async fn engine_defaults_to_pipe_and_roundtrips() {
+        let store = SessionStore::connect_in_memory().await.unwrap();
+        store
+            .create_session("s1", "claude", "/repo", "/wt/s1", "agent/s1", "engine test")
+            .await
+            .unwrap();
+        assert_eq!(store.get_engine("s1").await.unwrap(), "pipe");
+        store.set_engine("s1", "acp").await.unwrap();
+        assert_eq!(store.get_engine("s1").await.unwrap(), "acp");
+        // Absent session degrades to the default, not an error.
+        assert_eq!(store.get_engine("nope").await.unwrap(), "pipe");
     }
 
     #[tokio::test]

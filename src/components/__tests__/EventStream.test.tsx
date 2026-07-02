@@ -19,6 +19,17 @@ test("renders a token event's text", () => {
   expect(screen.getByText("Hello")).toBeInTheDocument();
 });
 
+test("coalesces consecutive token chunks into one prose block", () => {
+  const events: AgentEvent[] = [
+    { kind: "token", data: { text: "Hello" } },
+    { kind: "token", data: { text: " " } },
+    { kind: "token", data: { text: "world" } },
+  ];
+  render(<EventStream events={events} />);
+  expect(screen.getByText("Hello world")).toBeInTheDocument();
+  expect(screen.queryByText("Hello")).not.toBeInTheDocument();
+});
+
 test("renders a transcript status event as inline text", () => {
   const events: AgentEvent[] = [{ kind: "status", data: { text: "Compacted" } }];
   render(<EventStream events={events} />);
@@ -78,4 +89,12 @@ test("Deny calls onApprovalRespond with the request id and false", async () => {
   render(<EventStream events={[APPROVAL]} onApprovalRespond={onApprovalRespond} />);
   await userEvent.click(screen.getByRole("button", { name: "Deny" }));
   expect(onApprovalRespond).toHaveBeenCalledWith("req-1", false);
+});
+
+test("renders nothing for an unknown event kind (forward compatibility)", () => {
+  // A newer backend may persist kinds this frontend build doesn't know (e.g. "thought").
+  const unknown = { kind: "thought", data: { text: "pondering" } } as unknown as AgentEvent;
+  const { container } = render(<EventStream events={[unknown]} />);
+  expect(container.textContent).not.toContain("pondering");
+  // Must not throw "Objects are not valid as a React child".
 });

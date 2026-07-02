@@ -52,7 +52,18 @@ export interface StartSessionArgs {
   permissionMode?: string;
   /** Antigravity-only: restrict terminal commands' network/disk access (`agy --sandbox`). */
   sandboxTerminal?: boolean;
+  /** Streaming engine: "pipe" (default, CLI adapters) | "acp" (beta, claude only). */
+  engine?: Engine;
   onEvent: (event: AgentEvent) => void;
+}
+
+/** Streaming engines a session can run on. Backend re-validates per agent. */
+export type Engine = "pipe" | "acp";
+
+/** ACP is claude-only (M1): switching a draft to any other agent drops it back
+ * to the pipe engine. Single home for the rule — M6/M7 widen it here. */
+export function engineForAgentSwitch(nextAgentId: string, currentEngine: Engine): Engine {
+  return nextAgentId === "claude" ? currentEngine : "pipe";
 }
 
 /**
@@ -61,11 +72,11 @@ export interface StartSessionArgs {
  * render an optimistic row immediately). The backend creates an isolated
  * worktree for the session and events stream back via `onEvent`.
  */
-export async function startSession({ prompt, repo, sessionId, agent, model, permissionMode, sandboxTerminal, onEvent }: StartSessionArgs): Promise<void> {
+export async function startSession({ prompt, repo, sessionId, agent, model, permissionMode, sandboxTerminal, engine, onEvent }: StartSessionArgs): Promise<void> {
   assertDesktop();
   const channel = new Channel<AgentEvent>();
   channel.onmessage = onEvent;
-  await invoke("start_session", { prompt, repo, sessionId, agent, model, permissionMode, sandboxTerminal, onEvent: channel });
+  await invoke("start_session", { prompt, repo, sessionId, agent, model, permissionMode, sandboxTerminal, engine, onEvent: channel });
 }
 
 /** Remove the worktree and branch for a finished session. */

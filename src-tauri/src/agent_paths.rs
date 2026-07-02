@@ -42,8 +42,12 @@ fn non_empty_env(key: &str) -> Option<OsString> {
     std::env::var_os(key).filter(|v| !v.is_empty())
 }
 
-/// Kineloop's own per-user data directory (`<home>/.kineloop`), holding the session DB
-/// and per-session git worktrees. Falls back to the temp dir if no home is available.
+/// Kineloop's own per-user data directory (`<home>/.kineloop`), holding the session DB.
+/// Falls back to the temp dir if no home is available. Per-session git worktrees do NOT
+/// live here: they need a non-hidden path (the Antigravity CLI refuses hidden-path
+/// workspaces), so they sit under a visible `<home>/Kineloop/worktrees`
+/// (`commands::worktrees_root`). Pre-relocation sessions still resolve to the legacy
+/// `<home>/.kineloop/worktrees`.
 pub fn data_dir() -> PathBuf {
     home_dir()
         .unwrap_or_else(std::env::temp_dir)

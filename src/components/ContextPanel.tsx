@@ -1,20 +1,37 @@
 import { useState } from "react";
-import type { SessionFile, UsageData } from "@/lib/contextDerive";
-import type { RuleFile, Capabilities, Capability } from "@/lib/inspect";
+import {
+  contextLoadTokens,
+  type ContextFootprint,
+  type SessionFile,
+  type UsageData,
+  type UsageSummary,
+} from "@/lib/contextDerive";
+import type { RuleFile, Capabilities } from "@/lib/inspect";
 import type { ModelInfo } from "@/lib/models";
+import { DEFAULT_PERMISSION_MODE, permissionModeLabel, type PermissionMode } from "@/lib/permissions";
 import { cn } from "@/lib/utils";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
-import { FileCode, FilePen, FilePlus, FileText } from "lucide-react";
+import { Activity, FileCode, FilePen, FilePlus, FileText } from "lucide-react";
 
 export interface ContextPanelProps {
   usage: UsageData | null;
+  usageSummary?: UsageSummary | null;
   files: SessionFile[];
   rules: RuleFile[];
   capabilities: Capabilities | null;
   model: ModelInfo | null;
+  contextFootprint?: ContextFootprint | null;
+  agent?: string;
+  source?: "kineloop" | "external";
+  permissionMode?: PermissionMode | null;
+  sandboxTerminal?: boolean;
+  sessionTurnCount?: number | null;
+  sessionToolCallCount?: number | null;
+  sessionFileActionCount?: number | null;
+  transcriptComplete?: boolean;
   onOpenRule: (rule: RuleFile) => void;
   onOpenFile?: (path: string) => void;
 }
@@ -51,110 +68,191 @@ function SectionCard({ children, className }: { children: React.ReactNode; class
 // ─── Window Usage ────────────────────────────────────────────────────────────
 
 interface WindowUsageProps {
-  usage: UsageData;
+  usage: UsageData | null;
+  summary: UsageSummary | null;
   model: ModelInfo | null;
+  agent: string;
+  conversationTurns?: number | null;
+  transcriptComplete?: boolean;
 }
 
-function WindowUsage({ usage, model }: WindowUsageProps) {
-  const total = usage.inputTokens + usage.outputTokens;
+function formatTokens(value: number): string {
+  return value.toLocaleString();
+}
+
+function usageTelemetryCopy(agent: string): string {
+  if (agent === "antigravity") {
+    return "Antigravity does not emit token usage in the current headless print stream.";
+  }
+  return "Usage appears after the agent finishes a turn.";
+}
+
+function cacheCopy(agent: string): string {
+  if (agent === "codex") {
+    return "Cache read is included in Codex input; it is shown separately as reuse, not added to the window meter.";
+  }
+  return "Cache read/write is reported separately and counts as loaded input for Claude turns.";
+}
+
+function WindowUsage({
+  usage,
+  summary,
+  model,
+  agent,
+  conversationTurns = null,
+  transcriptComplete = true,
+}: WindowUsageProps) {
   const contextWindow = model?.contextWindow ?? null;
+  const latestContextLoad = usage ? contextLoadTokens(usage, agent) : 0;
   const progressValue =
-    contextWindow !== null
-      ? Math.min(100, Math.round((100 * total) / contextWindow))
+    usage !== null && contextWindow !== null
+      ? Math.min(100, Math.round((100 * latestContextLoad) / contextWindow))
       : null;
+  const totalGenerated = summary?.totals.outputTokens ?? 0;
+  const totalCost = summary?.totals.costUsd ?? null;
 
   return (
-    <div className="flex flex-col gap-2">
-      {progressValue !== null ? (
-        <>
-          <Progress value={progressValue} className="h-1.5" />
-          <p className="text-xs text-muted-foreground tabular-nums">
-            {total.toLocaleString()} / {contextWindow!.toLocaleString()} tokens
+    <div className="flex flex-col gap-3">
+      <div className="flex min-w-0 items-center justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-sm font-medium">Context usage</p>
+          <p className="text-xs text-muted-foreground">
+            Latest model turn — local commands don't count
           </p>
-        </>
-      ) : (
-        <p className="text-xs text-muted-foreground tabular-nums">
-          {total.toLocaleString()} tokens
-        </p>
-      )}
-
-      {/* Token breakdown grid */}
-      <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-xs">
-        <span className="text-muted-foreground">Input</span>
-        <span className="tabular-nums text-right">
-          {usage.inputTokens.toLocaleString()}
-        </span>
-        <span className="text-muted-foreground">Output</span>
-        <span className="tabular-nums text-right">
-          {usage.outputTokens.toLocaleString()}
-        </span>
-        <span className="text-muted-foreground">Cache read</span>
-        <span className="tabular-nums text-right">
-          {usage.cacheReadTokens.toLocaleString()}
-        </span>
+        </div>
+        <Badge variant={usage === null ? "outline" : "secondary"} className="shrink-0">
+          {usage === null
+            ? "Waiting"
+            : `${summary?.eventCount ?? 1} usage ${(summary?.eventCount ?? 1) === 1 ? "sample" : "samples"}`}
+        </Badge>
       </div>
 
-      {usage.costUsd !== null && (
-        <p className="text-xs tabular-nums font-medium">
-          ${usage.costUsd < 0.01 ? usage.costUsd.toFixed(4) : usage.costUsd.toFixed(2)}
-        </p>
+      {usage === null ? (
+        <div className="flex items-start gap-2 rounded-md bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
+          <Activity className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+          <span>{usageTelemetryCopy(agent)}</span>
+        </div>
+      ) : (
+        <>
+          {progressValue !== null ? (
+            <>
+              <Progress value={progressValue} className="h-1.5" />
+              <div className="flex items-center justify-between gap-3 text-xs text-muted-foreground tabular-nums">
+                <span>{progressValue}% of window</span>
+                <span>
+                  {formatTokens(latestContextLoad)} / {formatTokens(contextWindow!)}
+                </span>
+              </div>
+            </>
+          ) : (
+            <p className="text-xs text-muted-foreground tabular-nums">
+              {formatTokens(latestContextLoad)} loaded input tokens
+            </p>
+          )}
+
+          <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-1 text-xs">
+            <span className="text-muted-foreground">Loaded input</span>
+            <span className="tabular-nums text-right">{formatTokens(latestContextLoad)}</span>
+            <span className="text-muted-foreground">Generated output</span>
+            <span className="tabular-nums text-right">{formatTokens(usage.outputTokens)}</span>
+            <span className="text-muted-foreground">Cache read</span>
+            <span className="tabular-nums text-right">{formatTokens(usage.cacheReadTokens)}</span>
+            <span className="text-muted-foreground">Cache written</span>
+            <span className="tabular-nums text-right">{formatTokens(usage.cacheCreationTokens)}</span>
+          </div>
+
+          <p className="text-xs text-muted-foreground">{cacheCopy(agent)}</p>
+        </>
       )}
+
+      <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-1 border-t border-border/60 pt-3 text-xs">
+        {conversationTurns !== null && (
+          <>
+            <span className="text-muted-foreground">Conversation turns</span>
+            <span className="tabular-nums text-right">{formatTokens(conversationTurns)}</span>
+          </>
+        )}
+        <span className="text-muted-foreground">Context window</span>
+        <span className="tabular-nums text-right">
+          {contextWindow === null ? "Unknown" : formatTokens(contextWindow)}
+        </span>
+        {!transcriptComplete && (
+          <>
+            <span className="text-muted-foreground">Transcript range</span>
+            <span className="text-right">Recent page</span>
+          </>
+        )}
+        {summary !== null && summary.eventCount > 0 && (
+          <>
+            <span className="text-muted-foreground">Session output</span>
+            <span className="tabular-nums text-right">{formatTokens(totalGenerated)}</span>
+          </>
+        )}
+        {summary !== null && summary.eventCount > 0 && totalCost !== null && (
+          <>
+            <span className="text-muted-foreground">Session cost</span>
+            <span className="tabular-nums text-right font-medium">
+              ${totalCost < 0.01 ? totalCost.toFixed(4) : totalCost.toFixed(2)}
+            </span>
+          </>
+        )}
+      </div>
     </div>
   );
 }
 
-// ─── Capability Subsection ────────────────────────────────────────────────────
+function ContextFootprintView({ footprint }: { footprint: ContextFootprint | null | undefined }) {
+  const maxTokens = Math.max(
+    1,
+    ...(footprint?.items.map((item) => item.tokens) ?? [1]),
+  );
 
-interface CapabilitySubsectionProps {
-  label: string;
-  items: Capability[];
-}
-
-// Progressive disclosure: long capability lists collapse to a handful with a
-// "Show all" toggle, so the panel stays scannable (research: don't dump
-// everything; reveal complexity on demand).
-const CAPABILITY_PREVIEW = 6;
-
-function CapabilitySubsection({ label, items }: CapabilitySubsectionProps) {
-  const [showAll, setShowAll] = useState(false);
-  const visible = showAll ? items : items.slice(0, CAPABILITY_PREVIEW);
-  const hiddenCount = items.length - visible.length;
+  if (!footprint || footprint.items.length === 0) {
+    return (
+      <p className="px-3 py-2 text-sm text-muted-foreground">
+        No context sources observed yet.
+      </p>
+    );
+  }
 
   return (
-    <div className="flex flex-col gap-1">
-      <p className="text-xs text-muted-foreground">
-        {label}{" "}
-        <span className="tabular-nums opacity-60">{items.length}</span>
-      </p>
-      {visible.map((cap) => (
-        <div
-          key={cap.name}
-          className="grid min-w-0 grid-cols-[minmax(0,12rem)_minmax(0,1fr)_auto] items-center gap-2 rounded-md px-1 py-0.5"
-        >
-          <span className="min-w-0 truncate text-xs font-medium" title={cap.name}>
-            {cap.name}
-          </span>
-          <span
-            className="min-w-0 truncate text-xs text-muted-foreground"
-            title={cap.description ?? undefined}
-          >
-            {cap.description ?? ""}
-          </span>
-          <Badge variant="outline" className="ml-auto shrink-0 text-xs">
-            {cap.source}
-          </Badge>
+    <div className="flex min-w-0 flex-col gap-3 p-3">
+      <div className="flex min-w-0 items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-sm font-medium">Estimated footprint</p>
+          <p className="text-xs text-muted-foreground">
+            Loaded or observed in this session
+          </p>
         </div>
-      ))}
-      {items.length > CAPABILITY_PREVIEW && (
-        <button
-          type="button"
-          onClick={() => setShowAll((v) => !v)}
-          className="self-start px-1 py-0.5 text-xs text-muted-foreground hover:text-foreground"
-        >
-          {showAll ? "Show less" : `Show all ${items.length}`}
-          {!showAll && hiddenCount > 0 ? ` (+${hiddenCount})` : ""}
-        </button>
-      )}
+        <span className="shrink-0 text-sm font-medium tabular-nums">
+          {formatTokens(footprint.totalTokens)}
+        </span>
+      </div>
+
+      <div className="flex min-w-0 flex-col gap-2">
+        {footprint.items.map((item) => {
+          const width = Math.max(4, Math.round((100 * item.tokens) / maxTokens));
+          return (
+            <div key={item.id} className="min-w-0">
+              <div className="flex min-w-0 items-baseline justify-between gap-3 text-xs">
+                <span className="min-w-0 truncate font-medium">{item.label}</span>
+                <span className="shrink-0 text-muted-foreground tabular-nums">
+                  {formatTokens(item.tokens)}
+                </span>
+              </div>
+              <p className="truncate text-xs text-muted-foreground" title={item.detail}>
+                {item.detail}
+              </p>
+              <div className="mt-1 h-1 rounded-full bg-muted">
+                <div
+                  className="h-full rounded-full bg-muted-foreground/40"
+                  style={{ width: `${width}%` }}
+                />
+              </div>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -222,34 +320,61 @@ export function FilesThisSession({ files, onOpenFile }: FilesThisSessionProps) {
 
 export function ContextPanel({
   usage,
+  usageSummary,
   files,
   rules,
-  capabilities,
   model,
+  contextFootprint,
+  agent,
+  source = "kineloop",
+  permissionMode = DEFAULT_PERMISSION_MODE,
+  sandboxTerminal = false,
+  sessionTurnCount = null,
+  sessionToolCallCount = null,
+  sessionFileActionCount = null,
+  transcriptComplete = true,
   onOpenRule,
   onOpenFile,
 }: ContextPanelProps) {
+  const agentId = agent ?? model?.agent ?? "claude";
+  const summary = usageSummary ?? {
+    latest: usage,
+    totals: usage ?? {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      costUsd: null,
+      model: null,
+    },
+    eventCount: usage === null ? 0 : 1,
+  };
   const existingRules = rules.filter((r) => r.exists);
-  const hasCapabilities =
-    capabilities !== null &&
-    (capabilities.skills.length > 0 ||
-      capabilities.subagents.length > 0 ||
-      capabilities.commands.length > 0);
 
   return (
     <ScrollArea className="h-full min-w-0">
       <div className="flex min-w-0 flex-col gap-4 p-3">
         {/* ── Window usage ─────────────────────────── */}
         <section className="flex flex-col gap-1.5">
-          <SectionHeading>Window usage</SectionHeading>
+          <SectionHeading>Context usage</SectionHeading>
           <SectionCard>
-            {usage === null ? (
-              <p className="px-3 py-2 text-sm text-muted-foreground">Usage unavailable</p>
-            ) : (
-              <div className="p-3">
-                <WindowUsage usage={usage} model={model} />
-              </div>
-            )}
+            <div className="p-3">
+              <WindowUsage
+                usage={usage}
+                summary={summary}
+                model={model}
+                agent={agentId}
+                conversationTurns={sessionTurnCount}
+                transcriptComplete={transcriptComplete}
+              />
+            </div>
+          </SectionCard>
+        </section>
+
+        <section className="flex flex-col gap-1.5">
+          <SectionHeading>Context sources</SectionHeading>
+          <SectionCard>
+            <ContextFootprintView footprint={contextFootprint} />
           </SectionCard>
         </section>
 
@@ -294,39 +419,53 @@ export function ContextPanel({
           </SectionCard>
         </section>
 
-        {/* ── Capabilities ──────────────────────────── */}
-        <section className="flex flex-col gap-1.5">
-          <SectionHeading>Capabilities</SectionHeading>
-          <SectionCard>
-            {!hasCapabilities ? (
-              <p className="px-3 py-2 text-sm text-muted-foreground">No capabilities found</p>
-            ) : (
-              <div className="flex min-w-0 flex-col gap-3 p-3">
-                {capabilities!.skills.length > 0 && (
-                  <CapabilitySubsection label="Skills" items={capabilities!.skills} />
-                )}
-                {capabilities!.subagents.length > 0 && (
-                  <CapabilitySubsection label="Subagents" items={capabilities!.subagents} />
-                )}
-                {capabilities!.commands.length > 0 && (
-                  <CapabilitySubsection label="Commands" items={capabilities!.commands} />
-                )}
-              </div>
-            )}
-          </SectionCard>
-        </section>
-
         {/* ── Settings ─────────────────────────────── */}
         <section className="flex flex-col gap-1.5">
           <SectionHeading>Settings</SectionHeading>
           <SectionCard className="p-3 flex flex-col gap-1 text-sm">
             <div className="flex min-w-0 items-center gap-2">
-              <span className="text-muted-foreground">Model</span>
-              <span className="min-w-0 truncate font-medium">{model?.label ?? "—"}</span>
+              <span className="text-muted-foreground">Agent</span>
+              <span className="min-w-0 truncate font-medium">{agentId}</span>
             </div>
-            <p className="text-xs text-muted-foreground">
-              Autonomy: default · Sandbox: default
-            </p>
+            <div className="flex min-w-0 items-center gap-2">
+              <span className="text-muted-foreground">Model</span>
+              <span className="min-w-0 truncate font-medium">
+                {model?.label ?? usage?.model ?? "—"}
+              </span>
+            </div>
+            {usage?.model && usage.model !== model?.value && usage.model !== model?.label && (
+              <p className="text-xs text-muted-foreground">
+                Reported by CLI: <span className="font-mono">{usage.model}</span>
+              </p>
+            )}
+            <div className="flex min-w-0 items-center gap-2">
+              <span className="text-muted-foreground">Permission</span>
+              <span className="min-w-0 truncate font-medium">
+                {source === "external" ? "CLI history" : permissionModeLabel(permissionMode ?? DEFAULT_PERMISSION_MODE)}
+              </span>
+            </div>
+            {sessionToolCallCount !== null && (
+              <div className="flex min-w-0 items-center gap-2">
+                <span className="text-muted-foreground">Tool calls</span>
+                <span className="min-w-0 truncate font-medium tabular-nums">
+                  {formatTokens(sessionToolCallCount)}
+                </span>
+              </div>
+            )}
+            {sessionFileActionCount !== null && (
+              <div className="flex min-w-0 items-center gap-2">
+                <span className="text-muted-foreground">Files observed</span>
+                <span className="min-w-0 truncate font-medium tabular-nums">
+                  {formatTokens(sessionFileActionCount)}
+                </span>
+              </div>
+            )}
+            <div className="flex min-w-0 items-center gap-2">
+              <span className="text-muted-foreground">Terminal sandbox</span>
+              <span className="min-w-0 truncate font-medium">
+                {sandboxTerminal ? "On" : "Off"}
+              </span>
+            </div>
           </SectionCard>
         </section>
       </div>

@@ -622,6 +622,14 @@ fn codex_event_pairs(value: &Value) -> Vec<(String, Value)> {
             }
             _ => {}
         },
+        Some("turn.completed") => {
+            if let Some(usage) = value.get("usage") {
+                events.push((
+                    "usage".to_string(),
+                    codex_usage_payload(usage, value.get("model").and_then(Value::as_str)),
+                ));
+            }
+        }
         _ => {}
     }
     events
@@ -1236,6 +1244,17 @@ fn usage_payload(usage: &Value, model: Option<&str>) -> Value {
     })
 }
 
+fn codex_usage_payload(usage: &Value, model: Option<&str>) -> Value {
+    serde_json::json!({
+        "inputTokens": usage.get("input_tokens").and_then(Value::as_u64).unwrap_or(0),
+        "outputTokens": usage.get("output_tokens").and_then(Value::as_u64).unwrap_or(0),
+        "cacheReadTokens": usage.get("cached_input_tokens").and_then(Value::as_u64).unwrap_or(0),
+        "cacheCreationTokens": 0,
+        "costUsd": null,
+        "model": model,
+    })
+}
+
 fn slice_recent_events(events: Vec<StoredEvent>, offset: usize, limit: usize) -> Vec<StoredEvent> {
     if limit == 0 || offset >= events.len() {
         return Vec::new();
@@ -1579,6 +1598,8 @@ mod tests {
                 + r#"{"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"test\"}"}}"#
                 + "\n"
                 + r#"{"type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","input":"*** Begin Patch\n*** Update File: src/App.tsx\n@@\n-old\n+new\n*** End Patch"}}"#
+                + "\n"
+                + r#"{"type":"turn.completed","model":"gpt-5","usage":{"input_tokens":120,"cached_input_tokens":30,"output_tokens":7}}"#
                 + "\n",
         )
         .unwrap();
@@ -1596,6 +1617,10 @@ mod tests {
         assert_eq!(events[0].kind, "prompt");
         assert!(events.iter().any(|e| e.kind == "token"));
         assert!(events.iter().any(|e| e.kind == "toolCall"));
+        let usage = events.iter().find(|e| e.kind == "usage").unwrap();
+        assert!(usage.payload_json.contains(r#""inputTokens":120"#));
+        assert!(usage.payload_json.contains(r#""cacheReadTokens":30"#));
+        assert!(usage.payload_json.contains(r#""model":"gpt-5""#));
 
         let _ = fs::remove_dir_all(home);
     }

@@ -37,7 +37,7 @@ export function EventStream({ events, onOpenFile, onApprovalRespond }: EventStre
     );
   }
   const hasProse = events.some((e) => e.kind === "token");
-  const groups = groupChipRuns(events);
+  const groups = groupEventRuns(events);
   return (
     <div className="flex flex-col items-start gap-3">
       {groups.map((group, i) =>
@@ -51,6 +51,8 @@ export function EventStream({ events, onOpenFile, onApprovalRespond }: EventStre
               </Fragment>
             ))}
           </div>
+        ) : group.kind === "prose" ? (
+          <Markdown key={i}>{group.text}</Markdown>
         ) : (
           <Fragment key={i}>
             {renderEvent(group.event, hasProse, onOpenFile, onApprovalRespond)}
@@ -63,15 +65,20 @@ export function EventStream({ events, onOpenFile, onApprovalRespond }: EventStre
 
 type ChipGroup =
   | { kind: "chips"; events: AgentEvent[] }
+  | { kind: "prose"; text: string }
   | { kind: "single"; event: AgentEvent };
 
-/** Coalesce consecutive tool/file-write events into one wrapping chip cluster. */
-function groupChipRuns(events: AgentEvent[]): ChipGroup[] {
+/** Coalesce streaming text and chip bursts so a live turn reads as one stable flow. */
+function groupEventRuns(events: AgentEvent[]): ChipGroup[] {
   const groups: ChipGroup[] = [];
   for (const event of events) {
     const isChip = event.kind === "toolCall" || event.kind === "fileWrite";
     const last = groups[groups.length - 1];
-    if (isChip && last && last.kind === "chips") {
+    if (event.kind === "token" && last && last.kind === "prose") {
+      last.text += event.data.text;
+    } else if (event.kind === "token") {
+      groups.push({ kind: "prose", text: event.data.text });
+    } else if (isChip && last && last.kind === "chips") {
       last.events.push(event);
     } else if (isChip) {
       groups.push({ kind: "chips", events: [event] });
@@ -90,7 +97,9 @@ function renderEvent(
 ) {
   switch (event.kind) {
     case "token":
-      // Agent prose is Markdown and is the dominant element of the turn.
+      // Unreachable in practice: groupEventRuns coalesces every token run into a
+      // "prose" group rendered directly. Kept because removing the case would send
+      // "token" into the default arm and break its `never` exhaustiveness check.
       return <Markdown>{event.data.text}</Markdown>;
 
     case "status":
@@ -201,10 +210,12 @@ function renderEvent(
       return null;
 
     default: {
-      // Exhaustiveness guard: a new AgentEvent variant without a case becomes a
-      // compile error here instead of silently rendering nothing.
+      // Compile-time exhaustiveness stays (a new union member without a case is a
+      // type error on the next line), but at RUNTIME an unknown persisted kind —
+      // written by a newer backend — must degrade to nothing, not crash the render.
       const _exhaustive: never = event;
-      return _exhaustive;
+      void _exhaustive;
+      return null;
     }
   }
 }

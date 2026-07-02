@@ -48,14 +48,22 @@ describe("detectTrigger", () => {
     expect(detectTrigger("a@b", 3)).toBeNull();
   });
 
-  test("opens / only at line start", () => {
+  test("opens / for a bare command token anywhere", () => {
     expect(detectTrigger("/dep", 4)).toEqual({ trigger: "/", query: "dep", start: 0, end: 4 });
     expect(detectTrigger("\n/dep", 5)).toEqual({ trigger: "/", query: "dep", start: 1, end: 5 });
+    // mid-line after an @ mention — the reported bug: "@agent-code-reviewer /sada"
+    expect(detectTrigger("@agent-code-reviewer /dep", 25)).toEqual({
+      trigger: "/",
+      query: "dep",
+      start: 21,
+      end: 25,
+    });
+    expect(detectTrigger("run /dep", 8)).toEqual({ trigger: "/", query: "dep", start: 4, end: 8 });
   });
 
-  test("does not open / mid-line", () => {
-    expect(detectTrigger("run /dep", 8)).toBeNull();
-    expect(detectTrigger("a/b", 3)).toBeNull();
+  test("does not open / for an absolute path or a non-slash word", () => {
+    expect(detectTrigger("/usr/bin", 8)).toBeNull(); // interior slash → path, not a command
+    expect(detectTrigger("a/b", 3)).toBeNull(); // word doesn't start with /
   });
 
   test("returns null when caret sits after whitespace", () => {
