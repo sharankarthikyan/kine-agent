@@ -761,11 +761,30 @@ fn validate_agent(agent: Option<String>) -> Result<String, String> {
     }
 }
 
+/// The engine a NEW session runs on when the caller doesn't choose one. ACP is
+/// the primary path for the agents that support it (spec decision, live-verified
+/// M1–M8); pipe remains the opt-out and the only engine for everything else.
+pub(crate) fn default_engine_for(agent: &str) -> &'static str {
+    match agent {
+        "claude" | "codex" => store::ENGINE_ACP,
+        _ => store::ENGINE_PIPE,
+    }
+}
+
+/// Whether Node.js (npx) is on PATH — the frontend uses this to decide the
+/// default engine for new-session drafts (ACP agents are npx-launched). Cheap:
+/// a PATH scan via `which`, no process spawn, no package probe.
+#[tauri::command]
+pub fn node_available() -> bool {
+    which::which("npx").is_ok()
+}
+
 /// Engine matrix (spec §Engine selection). M1 enables acp for claude only;
 /// codex joins in M6, gemini (acp-only) in M7, antigravity never.
 fn validate_engine(engine: Option<String>, agent: &str) -> Result<String, String> {
     match engine.as_deref() {
-        None | Some(store::ENGINE_PIPE) => Ok(store::ENGINE_PIPE.to_string()),
+        None => Ok(default_engine_for(agent).to_string()),
+        Some(store::ENGINE_PIPE) => Ok(store::ENGINE_PIPE.to_string()),
         Some(store::ENGINE_ACP) if agent == "claude" || agent == "codex" => {
             Ok(store::ENGINE_ACP.to_string())
         }
@@ -1979,10 +1998,11 @@ pub async fn commit_session(session_id: String, message: String) -> Result<Commi
 #[cfg(test)]
 mod tests {
     use super::{
-        build_resume_transcript, normalize_title, resolve_worktree_root, truncate_transcript_tail,
-        validate_engine, validate_permission_mode, validate_prompt, StoredEvent, MAX_PROMPT_BYTES,
-        MAX_TRANSCRIPT_BYTES,
+        build_resume_transcript, default_engine_for, normalize_title, resolve_worktree_root,
+        truncate_transcript_tail, validate_engine, validate_permission_mode, validate_prompt,
+        StoredEvent, MAX_PROMPT_BYTES, MAX_TRANSCRIPT_BYTES,
     };
+    use crate::store;
 
     fn stored(kind: &str, payload: serde_json::Value) -> StoredEvent {
         StoredEvent {
@@ -2127,11 +2147,22 @@ mod tests {
     }
 
     #[test]
+    fn default_engine_follows_the_acp_matrix() {
+        assert_eq!(default_engine_for("claude"), store::ENGINE_ACP);
+        assert_eq!(default_engine_for("codex"), store::ENGINE_ACP);
+        assert_eq!(default_engine_for("antigravity"), store::ENGINE_PIPE);
+        assert_eq!(default_engine_for("gemini"), store::ENGINE_PIPE);
+    }
+
+    #[test]
     fn engine_matrix_validates_per_agent() {
-        // M1: pipe for all spawnable agents; acp for claude only.
-        assert_eq!(validate_engine(None, "claude").unwrap(), "pipe");
+        // ACP is the DEFAULT for claude/codex since the M1–M8 rollout completed;
+        // pipe remains the explicit opt-out and the only engine elsewhere.
+        assert_eq!(validate_engine(None, "claude").unwrap(), "acp");
+        assert_eq!(validate_engine(None, "codex").unwrap(), "acp");
+        assert_eq!(validate_engine(None, "antigravity").unwrap(), "pipe");
         assert_eq!(
-            validate_engine(Some("pipe".into()), "codex").unwrap(),
+            validate_engine(Some("pipe".into()), "claude").unwrap(),
             "pipe"
         );
         assert_eq!(

@@ -69,6 +69,7 @@ pub fn run() {
             commands::detect_agents,
             commands::list_models,
             commands::refresh_models,
+            commands::node_available,
             commands::inspect_rules,
             commands::read_text_file,
             commands::write_text_file,
