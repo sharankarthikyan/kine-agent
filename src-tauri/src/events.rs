@@ -68,6 +68,12 @@ pub enum AgentEvent {
     Error {
         message: String,
     },
+    /// A user-facing, non-error notice from an adapter (e.g. "native resume
+    /// unsupported — transcript context replayed"). Rendered as a muted
+    /// transcript row and toasted once per session; never flips run status.
+    Notice {
+        message: String,
+    },
     /// The agent's live task plan (ACP `plan`). `entries_json` is the raw JSON
     /// array of `{content, status, priority}` entries; agents resend the full
     /// list on every change, so the UI renders only the latest event.
@@ -248,6 +254,13 @@ mod tests {
             serde_json::to_string(&ev).unwrap(),
             r#"{"kind":"approvalResolved","data":{"requestId":"ar-1","selectedOptionId":"allow"}}"#
         );
+    }
+
+    #[test]
+    fn serializes_notice_as_tagged_camelcase() {
+        let ev = AgentEvent::Notice { message: "heads up".into() };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert_eq!(json, r#"{"kind":"notice","data":{"message":"heads up"}}"#);
     }
 
     #[test]

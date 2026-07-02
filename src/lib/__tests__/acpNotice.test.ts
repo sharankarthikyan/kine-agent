@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { shouldShowAcpDownloadNotice } from "../acpNotice";
+import { shouldShowAcpDownloadNotice, shouldToastSessionNotice } from "../acpNotice";
 
 function memoryStorage() {
   const map = new Map<string, string>();
@@ -14,5 +14,13 @@ describe("shouldShowAcpDownloadNotice", () => {
     const storage = memoryStorage();
     expect(shouldShowAcpDownloadNotice(storage)).toBe(true);
     expect(shouldShowAcpDownloadNotice(storage)).toBe(false);
+  });
+});
+
+describe("shouldToastSessionNotice", () => {
+  it("is true once per session id, then false", () => {
+    expect(shouldToastSessionNotice("s-toast-1")).toBe(true);
+    expect(shouldToastSessionNotice("s-toast-1")).toBe(false);
+    expect(shouldToastSessionNotice("s-toast-2")).toBe(true);
   });
 });

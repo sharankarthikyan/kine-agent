@@ -287,6 +287,13 @@ function renderEvent(
         </Alert>
       );
 
+    case "notice":
+      // Adapter-surfaced note (e.g. resume fallback). Quiet by design — it is
+      // context, not an error.
+      return (
+        <p className="text-xs italic text-muted-foreground">{event.data.message}</p>
+      );
+
     case "usage":
       // Rendered by the Context panel, not the chat stream. Ignore here.
       return null;

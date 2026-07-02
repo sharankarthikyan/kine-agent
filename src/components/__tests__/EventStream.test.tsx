@@ -236,6 +236,14 @@ test("renders nothing for an unknown event kind (forward compatibility)", () => 
   // Must not throw "Objects are not valid as a React child".
 });
 
+test("renders a notice event as a muted inline note", () => {
+  const events: AgentEvent[] = [
+    { kind: "notice", data: { message: "Native resume unavailable — context replayed." } },
+  ];
+  render(<EventStream events={events} />);
+  expect(screen.getByText("Native resume unavailable — context replayed.")).toBeInTheDocument();
+});
+
 test("coalesces consecutive thought chunks into one collapsed Thinking block", () => {
   const events = [
     { kind: "thought", data: { text: "step one " } },

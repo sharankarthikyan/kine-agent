@@ -71,7 +71,7 @@ import {
   DEFAULT_PERMISSION_MODE,
   type PermissionMode,
 } from "./lib/permissions";
-import { shouldShowAcpDownloadNotice } from "./lib/acpNotice";
+import { shouldShowAcpDownloadNotice, shouldToastSessionNotice } from "./lib/acpNotice";
 import {
   activityCountsFromEvents,
   contextFootprintFromSources,
@@ -1405,6 +1405,9 @@ export default function App() {
     // Streaming output is scoped to the session cache so panes can update in parallel
     // even when focus moves to another visible session.
     const onEvent = (event: AgentEvent) => {
+      if (event.kind === "notice" && shouldToastSessionNotice(sessionId)) {
+        toast.info(event.data.message);
+      }
       appendToLastTurn(sessionId, event);
     };
     // Forward the selected model verbatim (alias for Claude, concrete id for
