@@ -20,6 +20,11 @@ use tokio::process::Command;
 /// bump must be a deliberate, tested upgrade — not a runtime surprise.
 pub const CLAUDE_ACP_PACKAGE: &str = "@agentclientprotocol/claude-agent-acp@0.54.1";
 
+/// Emitted when a resume request degrades to a fresh session WITH replayed context.
+const RESUME_NOTICE_WITH_CONTEXT: &str = "This agent can't restore the previous session natively — Kineloop replayed recent conversation context into this turn.";
+/// Emitted when a resume request degrades to a fresh session with NO context to replay.
+const RESUME_NOTICE_NO_CONTEXT: &str = "This agent can't restore the previous session natively — this turn starts without prior context.";
+
 /// Adapter that drives an ACP agent (Claude in M1) as a subprocess.
 ///
 /// The agent mints its own ACP session id in `session/new`; we capture it into
@@ -177,27 +182,59 @@ pub async fn drive_session(
         .map_err(|e| SessionError::Protocol(format!("ACP initialize failed: {e}")))?;
 
     // Resume when the agent supports it; a failed/unsupported load degrades to a
-    // fresh session (M5 adds the transcript-replay fallback so conversation
-    // context isn't silently lost).
-    let (acp_session_id, modes) = match resume_session {
-        Some(id) if can_load => match load_discarding_replay(&peer, &mut inbound, &id, &cwd, fs_root.as_deref()).await
-        {
-            Ok((modes, replay_events)) => {
-                for event in replay_events {
-                    sink.emit(event); // sync emit — the load await already resolved
+    // fresh session. fallback=true ⇒ this turn was supposed to resume but
+    // couldn't natively: compose the transcript-replay prompt and surface a
+    // Notice (M5's transcript-replay fallback, so conversation context isn't
+    // silently lost).
+    let (acp_session_id, modes, fallback) = match resume_session {
+        Some(id) if can_load => {
+            match load_discarding_replay(&peer, &mut inbound, &id, &cwd, fs_root.as_deref()).await
+            {
+                Ok((modes, replay_events)) => {
+                    for event in replay_events {
+                        sink.emit(event); // sync emit — the load await already resolved
+                    }
+                    (id, modes, false)
                 }
-                (id, modes)
+                Err(e) => {
+                    eprintln!("acp: session/load failed ({e}); falling back to a fresh session");
+                    let (id, modes) = new_session(&peer, &cwd).await?;
+                    (id, modes, true)
+                }
             }
-            Err(e) => {
-                eprintln!("acp: session/load failed ({e}); starting a fresh session");
-                new_session(&peer, &cwd).await?
-            }
-        },
-        _ => new_session(&peer, &cwd).await?,
+        }
+        Some(_) => {
+            // Resume requested but the agent can't load sessions at all.
+            let (id, modes) = new_session(&peer, &cwd).await?;
+            (id, modes, true)
+        }
+        None => {
+            let (id, modes) = new_session(&peer, &cwd).await?;
+            (id, modes, false)
+        }
     };
     if let Ok(mut guard) = captured_session.lock() {
         *guard = Some(acp_session_id.clone());
     }
+
+    let prompt_text = if fallback {
+        match prompt.resume_transcript.as_deref() {
+            Some(transcript) => {
+                sink.emit(AgentEvent::Notice {
+                    message: RESUME_NOTICE_WITH_CONTEXT.to_string(),
+                });
+                compose_resume_fallback_prompt(transcript, &prompt.text)
+            }
+            None => {
+                sink.emit(AgentEvent::Notice {
+                    message: RESUME_NOTICE_NO_CONTEXT.to_string(),
+                });
+                prompt.text.clone()
+            }
+        }
+    } else {
+        prompt.text.clone()
+    };
 
     let permission_mode = prompt.permission_mode.clone();
 
@@ -214,7 +251,7 @@ pub async fn drive_session(
     }
 
     let mut final_text = String::new();
-    let prompt_fut = client::session_prompt(&peer, &acp_session_id, &prompt.text);
+    let prompt_fut = client::session_prompt(&peer, &acp_session_id, &prompt_text);
     tokio::pin!(prompt_fut);
 
     loop {
@@ -540,6 +577,23 @@ fn prepare_fs_answer(
         }
     };
     Some(answer)
+}
+
+/// The prompt sent when native resume is unavailable: the persisted transcript
+/// tail as explicit prior context, then the user's actual request. Only the
+/// fallback path composes this — native session/load sends the raw text.
+fn compose_resume_fallback_prompt(transcript: &str, user_prompt: &str) -> String {
+    format!(
+        "You are continuing a previous Kineloop session with this agent. \
+         Native session resume is unavailable, so the transcript below restores your context. \
+         Treat it as prior conversation. Do not assume any earlier process is still alive. \
+         Continue from the user's new request using the current repository state.\n\n\
+         --- Prior transcript ---\n\
+         {transcript}\n\
+         --- End prior transcript ---\n\n\
+         New user request:\n\
+         {user_prompt}"
+    )
 }
 
 /// 1-based `line` + `limit` slicing for fs/read_text_file. 0 and 1 both mean
@@ -1526,6 +1580,10 @@ mod tests {
         );
     }
 
+    /// A load error must degrade to a fresh session instead of failing the run.
+    /// With no `resume_transcript` on the prompt, the fallback also surfaces
+    /// the no-context Notice (see `fallback_without_transcript_notices_no_context`
+    /// for the transcript-present variant).
     #[tokio::test]
     async fn drive_session_falls_back_to_new_session_when_load_fails() {
         let prompt = Prompt {
@@ -1570,10 +1628,134 @@ mod tests {
         })
         .await;
         assert_eq!(h.captured.lock().unwrap().as_deref(), Some("acp-fresh"));
-        assert!(matches!(
-            h.events.lock().unwrap().last().unwrap(),
-            AgentEvent::Done { .. }
-        ));
+        let events = h.events.lock().unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Notice { message } if message == RESUME_NOTICE_NO_CONTEXT)),
+            "no-transcript fallback still notices, got {events:?}"
+        );
+        assert!(matches!(events.last().unwrap(), AgentEvent::Done { .. }));
+    }
+
+    /// Agent lacks loadSession + resume requested ⇒ session/new, transcript
+    /// replayed into the prompt, Notice emitted. THE M5 headline behavior.
+    #[tokio::test]
+    async fn resume_without_load_support_replays_transcript_and_notices() {
+        let prompt = Prompt {
+            text: "and now add tests".into(),
+            resume_transcript: Some("User: add a helper\n\nAssistant: added helper()".into()),
+            ..Default::default()
+        };
+        let h = run_agent_fixture(prompt, Some("acp-old".into()), None, |mut lines, mut w, _wt| async move {
+            let req = next_request(&mut lines, "initialize").await;
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":false}}})).await;
+            // No session/load may be attempted — the next request is session/new.
+            let req = next_request(&mut lines, "session/new").await;
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"sessionId":"acp-fresh","modes":{"currentModeId":"default",
+                    "availableModes":[{"id":"default"}]}}})).await;
+            let req = next_request(&mut lines, "session/prompt").await;
+            let text = req["params"]["prompt"][0]["text"].as_str().unwrap().to_string();
+            assert!(text.contains("Assistant: added helper()"), "transcript replayed: {text}");
+            assert!(text.contains("and now add tests"), "user request present: {text}");
+            assert!(
+                text.contains("Native session resume is unavailable"),
+                "framing present: {text}"
+            );
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"stopReason":"completed"}})).await;
+        })
+        .await;
+        assert_eq!(h.captured.lock().unwrap().as_deref(), Some("acp-fresh"));
+        let events = h.events.lock().unwrap();
+        assert!(
+            events.iter().any(|e| matches!(e, AgentEvent::Notice { message } if message == RESUME_NOTICE_WITH_CONTEXT)),
+            "notice emitted, got {events:?}"
+        );
+    }
+
+    /// session/load fails ⇒ same fallback: fresh session + replay + notice.
+    #[tokio::test]
+    async fn failed_load_replays_transcript_and_notices() {
+        let prompt = Prompt {
+            text: "continue".into(),
+            resume_transcript: Some("User: earlier work".into()),
+            ..Default::default()
+        };
+        let h = run_agent_fixture(prompt, Some("acp-gone".into()), None, |mut lines, mut w, _wt| async move {
+            let req = next_request(&mut lines, "initialize").await;
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}})).await;
+            let req = next_request(&mut lines, "session/load").await;
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "error":{"code":-32603,"message":"session not found"}})).await;
+            let req = next_request(&mut lines, "session/new").await;
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"sessionId":"acp-fresh","modes":{"currentModeId":"default",
+                    "availableModes":[{"id":"default"}]}}})).await;
+            let req = next_request(&mut lines, "session/prompt").await;
+            let text = req["params"]["prompt"][0]["text"].as_str().unwrap().to_string();
+            assert!(text.contains("User: earlier work"), "transcript replayed: {text}");
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"stopReason":"completed"}})).await;
+        })
+        .await;
+        let events = h.events.lock().unwrap();
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::Notice { message } if message == RESUME_NOTICE_WITH_CONTEXT)));
+        assert!(matches!(events.last().unwrap(), AgentEvent::Done { .. }));
+    }
+
+    /// Fallback without a transcript still surfaces the (no-context) notice.
+    #[tokio::test]
+    async fn fallback_without_transcript_notices_no_context() {
+        let prompt = Prompt { text: "continue".into(), ..Default::default() };
+        let h = run_agent_fixture(prompt, Some("acp-old".into()), None, |mut lines, mut w, _wt| async move {
+            let req = next_request(&mut lines, "initialize").await;
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":false}}})).await;
+            let req = next_request(&mut lines, "session/new").await;
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"sessionId":"acp-fresh","modes":{"currentModeId":"default",
+                    "availableModes":[{"id":"default"}]}}})).await;
+            let req = next_request(&mut lines, "session/prompt").await;
+            assert_eq!(req["params"]["prompt"][0]["text"], "continue", "no replay block");
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"stopReason":"completed"}})).await;
+        })
+        .await;
+        let events = h.events.lock().unwrap();
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::Notice { message } if message == RESUME_NOTICE_NO_CONTEXT)));
+    }
+
+    /// Native load succeeding must NOT engage the fallback: prompt text stays
+    /// verbatim, no Notice.
+    #[tokio::test]
+    async fn native_load_ignores_the_resume_transcript() {
+        let prompt = Prompt {
+            text: "continue".into(),
+            resume_transcript: Some("User: earlier work".into()),
+            ..Default::default()
+        };
+        let h = run_agent_fixture(prompt, Some("acp-abc".into()), None, |mut lines, mut w, _wt| async move {
+            let req = next_request(&mut lines, "initialize").await;
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}})).await;
+            let req = next_request(&mut lines, "session/load").await;
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"modes":{"currentModeId":"default","availableModes":[{"id":"default"}]}}})).await;
+            let req = next_request(&mut lines, "session/prompt").await;
+            assert_eq!(req["params"]["prompt"][0]["text"], "continue", "verbatim prompt");
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"stopReason":"completed"}})).await;
+        })
+        .await;
+        let events = h.events.lock().unwrap();
+        assert!(
+            !events.iter().any(|e| matches!(e, AgentEvent::Notice { .. })),
+            "native resume must be silent, got {events:?}"
+        );
     }
 
     #[tokio::test]

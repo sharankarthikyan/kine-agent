@@ -426,12 +426,35 @@ fn external_event_excerpt(event: &StoredEvent) -> Option<String> {
             })
         }
         "fileWrite" => json_string(&payload, "path").map(|path| format!("File changed: {path}")),
-        "done" => {
-            json_string(&payload, "summary").map(|summary| format!("Assistant summary: {summary}"))
-        }
+        "done" => json_string(&payload, "summary").map(|summary| format!("Assistant: {summary}")),
         "error" => json_string(&payload, "message").map(|message| format!("Error: {message}")),
         _ => None,
     }
+}
+
+/// One replay line for a NATIVE session's stored event. Unlike
+/// `external_event_excerpt` this skips `token` chunks — native sessions persist
+/// tokens chunk-by-chunk, and the turn's `done.summary` already carries the
+/// full assistant text (chunks would fragment and duplicate it).
+fn native_event_excerpt(event: &StoredEvent) -> Option<String> {
+    if event.kind == "token" {
+        return None;
+    }
+    external_event_excerpt(event)
+}
+
+/// The budgeted transcript tail replayed into an ACP turn when the agent can't
+/// resume natively. `None` when nothing replayable exists (fresh session).
+fn build_resume_transcript(events: &[StoredEvent]) -> Option<String> {
+    let transcript = events
+        .iter()
+        .filter_map(native_event_excerpt)
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    if transcript.is_empty() {
+        return None;
+    }
+    Some(truncate_transcript_tail(transcript))
 }
 
 fn build_external_continuation_prompt(
@@ -848,6 +871,7 @@ async fn create_session_and_run(
             permission_mode,
             sandbox_terminal,
             approval: None,
+            resume_transcript: None,
         },
         wt.path,
         cancel_rx,
@@ -1060,6 +1084,20 @@ pub async fn send_message(
         .get_external_thread_id(&session_id)
         .await
         .map_err(|e| e.to_string())?;
+    // ACP resume insurance: if this turn can't resume natively (agent lacks
+    // loadSession, load fails, or no thread id was ever captured), the adapter
+    // replays this budgeted tail into the prompt instead of silently starting
+    // from amnesia. Built before the new prompt event is appended so the
+    // current request isn't replayed to itself. Pipe engines never need it.
+    let resume_transcript = if engine == store::ENGINE_ACP {
+        let events = store
+            .session_events(&session_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        build_resume_transcript(&events)
+    } else {
+        None
+    };
     let root = worktree_root_for(&session_id);
     let sid = session_id.clone();
     let wt_path = tokio::task::spawn_blocking(move || -> Result<PathBuf, String> {
@@ -1103,6 +1141,7 @@ pub async fn send_message(
             permission_mode,
             sandbox_terminal,
             approval: None,
+            resume_transcript,
         },
         wt_path,
         cancel_rx,
@@ -1856,9 +1895,75 @@ pub async fn commit_session(session_id: String, message: String) -> Result<Commi
 #[cfg(test)]
 mod tests {
     use super::{
-        normalize_title, resolve_worktree_root, truncate_transcript_tail, validate_engine,
-        validate_permission_mode, validate_prompt, MAX_PROMPT_BYTES, MAX_TRANSCRIPT_BYTES,
+        build_resume_transcript, normalize_title, resolve_worktree_root, truncate_transcript_tail,
+        validate_engine, validate_permission_mode, validate_prompt, StoredEvent, MAX_PROMPT_BYTES,
+        MAX_TRANSCRIPT_BYTES,
     };
+
+    fn stored(kind: &str, payload: serde_json::Value) -> StoredEvent {
+        StoredEvent {
+            seq: 0,
+            kind: kind.into(),
+            payload_json: payload.to_string(),
+            ts: 0,
+        }
+    }
+
+    #[test]
+    fn resume_transcript_uses_turn_summaries_not_token_chunks() {
+        let events = vec![
+            stored("prompt", serde_json::json!({"text": "add a test"})),
+            stored("token", serde_json::json!({"text": "Sure"})),
+            stored("token", serde_json::json!({"text": ", adding"})),
+            stored(
+                "toolCall",
+                serde_json::json!({"name": "Edit", "input": "{\"path\":\"a.rs\"}"}),
+            ),
+            stored("fileWrite", serde_json::json!({"path": "/w/a.rs"})),
+            stored("done", serde_json::json!({"summary": "Sure, adding"})),
+            stored("thought", serde_json::json!({"text": "internal"})),
+        ];
+        let t = build_resume_transcript(&events).expect("events present ⇒ Some");
+        assert!(t.contains("User: add a test"));
+        assert!(
+            t.contains("Assistant: Sure, adding"),
+            "done summary is the turn text"
+        );
+        assert!(t.contains("Tool call: Edit"));
+        assert!(t.contains("File changed: /w/a.rs"));
+        // Chunk-level tokens would fragment + duplicate the summary line.
+        assert!(
+            !t.contains("Assistant: Sure\n"),
+            "token chunks must be skipped: {t}"
+        );
+        assert!(!t.contains("internal"), "thoughts never leak into a replay prompt");
+    }
+
+    #[test]
+    fn resume_transcript_is_none_for_no_replayable_events() {
+        assert_eq!(build_resume_transcript(&[]), None);
+        let only_noise = vec![stored("usage", serde_json::json!({"inputTokens": 1}))];
+        assert_eq!(build_resume_transcript(&only_noise), None);
+    }
+
+    #[test]
+    fn resume_transcript_is_budgeted_to_the_tail() {
+        let events: Vec<StoredEvent> = (0..4000)
+            .map(|i| {
+                stored(
+                    "done",
+                    serde_json::json!({"summary": format!("turn {i} {}", "x".repeat(100))}),
+                )
+            })
+            .collect();
+        let t = build_resume_transcript(&events).unwrap();
+        assert!(
+            t.len() <= MAX_TRANSCRIPT_BYTES + 200,
+            "budget respected (+ truncation note)"
+        );
+        assert!(t.contains("turn 3999"), "most recent tail retained");
+        assert!(!t.contains("turn 0 "), "oldest entries dropped");
+    }
 
     // Worktree-root resolution: prefer the visible root, fall back to the legacy hidden
     // root only for pre-relocation sessions that physically live there, and default to the

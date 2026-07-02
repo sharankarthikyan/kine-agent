@@ -25,6 +25,12 @@ pub struct Prompt {
     pub permission_mode: Option<String>,
     pub sandbox_terminal: bool,
     pub approval: Option<crate::approval::ApprovalLaunch>,
+    /// Budgeted tail of the session's own persisted transcript (pre-rendered
+    /// text block, not a full prompt). ACP-only: consumed when the adapter
+    /// cannot natively resume (`session/load` unsupported/failed) so a fresh
+    /// agent session still starts with conversation context. Other adapters
+    /// ignore it. `None` for new sessions and pipe engines.
+    pub resume_transcript: Option<String>,
 }
 
 /// Fatal session-level failure (the agent never ran or died). In-band errors the
