@@ -723,6 +723,9 @@ test("Add in Agents section scaffolds a capability then opens it in the editor",
 
   await userEvent.click(screen.getByRole("button", { name: /^add$/i }));
   await userEvent.type(screen.getByPlaceholderText(/new agent name/i), "triage");
+  // Scope has no default — a session-active Create stays disabled until one is picked.
+  expect(screen.getByRole("button", { name: /^create$/i })).toBeDisabled();
+  await userEvent.click(screen.getByRole("button", { name: /^project$/i }));
   await userEvent.click(screen.getByRole("button", { name: /^create$/i }));
 
   await waitFor(() =>
@@ -790,6 +793,7 @@ test("Add hook submits event/matcher/command and refreshes", async () => {
   await userEvent.type(screen.getByPlaceholderText(/event/i), "PreToolUse");
   await userEvent.type(screen.getByPlaceholderText(/matcher/i), "Bash");
   await userEvent.type(screen.getByPlaceholderText(/command to run/i), "echo hi");
+  await userEvent.click(screen.getByRole("button", { name: /^project$/i }));
   await userEvent.click(screen.getByRole("button", { name: /^add$/i }));
 
   await waitFor(() => expect(addHook).toHaveBeenCalledWith("s1", "PreToolUse", "Bash", "echo hi"));
@@ -821,8 +825,9 @@ test("Add MCP server splits args on whitespace and refreshes", async () => {
 
   await userEvent.click(screen.getByRole("button", { name: /^add$/i }));
   await userEvent.type(screen.getByPlaceholderText(/server name/i), "ctx");
-  await userEvent.type(screen.getByPlaceholderText(/command/i), "npx");
+  await userEvent.type(screen.getByPlaceholderText(/^command/i), "npx");
   await userEvent.type(screen.getByPlaceholderText(/args/i), "-y @context7/mcp");
+  await userEvent.click(screen.getByRole("button", { name: /^project$/i }));
   await userEvent.click(screen.getByRole("button", { name: /^add$/i }));
 
   await waitFor(() =>

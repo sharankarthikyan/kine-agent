@@ -498,36 +498,48 @@ function CapabilityRow({
 type Scope = "project" | "user";
 
 // Where a newly added item is written. Only meaningful when there is an active session
-// (project files exist); on the global-scope view everything is user scope, so the toggle
-// is hidden and callers force `user`.
-function ScopeToggle({ value, onChange }: { value: Scope; onChange: (s: Scope) => void }) {
+// (project files exist); on the global-scope view everything is user scope, so the picker
+// is hidden and callers force `user`. `value` is `null` until the user picks — there is no
+// default, so nothing lands in the wrong scope by accident.
+function ScopeToggle({ value, onChange }: { value: Scope | null; onChange: (s: Scope) => void }) {
   return (
-    <div className="flex items-center gap-0.5 rounded-md border border-border p-0.5 shrink-0">
-      {(["project", "user"] as const).map((s) => (
-        <button
-          key={s}
-          type="button"
-          onClick={() => onChange(s)}
-          className={cn(
-            "px-2 py-1 text-xs rounded transition-colors",
-            value === s
-              ? "bg-muted text-foreground font-medium"
-              : "text-muted-foreground hover:text-foreground"
-          )}
-        >
-          {s === "project" ? "Project" : "Global"}
-        </button>
-      ))}
+    <div className="flex items-center gap-1 shrink-0">
+      <span className="text-xs text-muted-foreground">Scope</span>
+      <div className="flex items-center gap-0.5 rounded-md border border-border p-0.5">
+        {(["project", "user"] as const).map((s) => (
+          <button
+            key={s}
+            type="button"
+            aria-pressed={value === s}
+            onClick={() => onChange(s)}
+            className={cn(
+              "px-2 py-1 text-xs rounded transition-colors",
+              value === s
+                ? "bg-muted text-foreground font-medium"
+                : "text-muted-foreground hover:text-foreground"
+            )}
+          >
+            {s === "project" ? "Project" : "Global"}
+          </button>
+        ))}
+      </div>
     </div>
   );
 }
 
 // Resolve the session id a mutation should target for a chosen scope: project keeps the
 // active session (its worktree), user forces `null` (the global ~/.claude scope). With no
-// active session there is only global scope.
-function scopedSessionId(sessionId: string | null, scope: Scope): string | null {
+// active session there is only global scope, so the scope argument is irrelevant.
+function scopedSessionId(sessionId: string | null, scope: Scope | null): string | null {
   if (sessionId === null) return null;
   return scope === "project" ? sessionId : null;
+}
+
+// A create/add form's scope is settled when there is no session (always global) or the
+// user has explicitly picked one. Used to gate the submit button so nothing is created
+// without a deliberate scope choice.
+function scopeChosen(sessionId: string | null, scope: Scope | null): boolean {
+  return sessionId === null || scope !== null;
 }
 
 // ─── New-capability inline form ───────────────────────────────────────────────
@@ -547,12 +559,13 @@ function NewCapabilityForm({
   onCancel: () => void;
 }) {
   const [name, setName] = useState("");
-  const [scope, setScope] = useState<Scope>("project");
+  const [scope, setScope] = useState<Scope | null>(null);
   const [busy, setBusy] = useState(false);
+  const valid = name.trim() !== "" && scopeChosen(sessionId, scope);
 
   async function submit() {
+    if (!valid) return;
     const trimmed = name.trim();
-    if (!trimmed) return;
     setBusy(true);
     try {
       const path = await createCustomization(scopedSessionId(sessionId, scope), kind, trimmed);
@@ -580,7 +593,7 @@ function NewCapabilityForm({
         disabled={busy}
       />
       {sessionId !== null && <ScopeToggle value={scope} onChange={setScope} />}
-      <Button size="sm" onClick={() => void submit()} disabled={busy || !name.trim()}>
+      <Button size="sm" onClick={() => void submit()} disabled={busy || !valid}>
         {busy ? "Creating…" : "Create"}
       </Button>
       <Button variant="ghost" size="sm" onClick={onCancel} disabled={busy}>
@@ -663,7 +676,7 @@ function CapabilitySection({
         <div className="flex flex-col gap-0.5 px-2">
           {filtered.map((cap) => (
             <CapabilityRow
-              key={`${cap.source}-${cap.name}`}
+              key={cap.path || `${cap.source}-${cap.name}`}
               capability={cap}
               onOpen={cap.path ? () => onOpenDetail(cap.name, cap.path, true) : undefined}
               onDelete={cap.path ? () => onDelete(cap.path) : undefined}
@@ -835,9 +848,10 @@ function HookForm({
   const [event, setEvent] = useState("");
   const [matcher, setMatcher] = useState("");
   const [command, setCommand] = useState("");
-  const [scope, setScope] = useState<Scope>("project");
+  const [scope, setScope] = useState<Scope | null>(null);
   const [busy, setBusy] = useState(false);
-  const valid = event.trim() !== "" && command.trim() !== "";
+  const valid =
+    event.trim() !== "" && command.trim() !== "" && scopeChosen(sessionId, scope);
 
   async function submit() {
     if (!valid) return;
@@ -1005,9 +1019,10 @@ function McpForm({
   const [name, setName] = useState("");
   const [command, setCommand] = useState("");
   const [args, setArgs] = useState("");
-  const [scope, setScope] = useState<Scope>("project");
+  const [scope, setScope] = useState<Scope | null>(null);
   const [busy, setBusy] = useState(false);
-  const valid = name.trim() !== "" && command.trim() !== "";
+  const valid =
+    name.trim() !== "" && command.trim() !== "" && scopeChosen(sessionId, scope);
 
   async function submit() {
     if (!valid) return;

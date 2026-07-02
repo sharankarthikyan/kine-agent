@@ -407,17 +407,22 @@ pub fn list_capabilities(agent: &str, worktree: &Path) -> Capabilities {
     let mut skills = Vec::new();
     let mut commands = Vec::new();
 
-    collect_md(&worktree_claude.join("agents"), "project", &mut subagents);
+    // Subagents: their authoritative identity is the frontmatter `name` field, not the
+    // filename (Claude Code invokes the agent by `name`; the filename is irrelevant). So we
+    // display `name`, falling back to the file stem only when it is absent.
+    collect_md(&worktree_claude.join("agents"), "project", true, &mut subagents);
     if let Some(c) = &user_claude {
-        collect_md(&c.join("agents"), "user", &mut subagents);
+        collect_md(&c.join("agents"), "user", true, &mut subagents);
     }
     collect_skill_dirs(&worktree_claude.join("skills"), "project", &mut skills);
     if let Some(c) = &user_claude {
         collect_skill_dirs(&c.join("skills"), "user", &mut skills);
     }
-    collect_md(&worktree_claude.join("commands"), "project", &mut commands);
+    // Slash commands are invoked by their filename (`/<stem>`), so the file stem is the
+    // authoritative identifier — no frontmatter `name` override.
+    collect_md(&worktree_claude.join("commands"), "project", false, &mut commands);
     if let Some(c) = &user_claude {
-        collect_md(&c.join("commands"), "user", &mut commands);
+        collect_md(&c.join("commands"), "user", false, &mut commands);
     }
 
     subagents.sort_by(|a, b| a.name.cmp(&b.name));
@@ -431,9 +436,12 @@ pub fn list_capabilities(agent: &str, worktree: &Path) -> Capabilities {
     }
 }
 
-/// Push one `Capability` per `*.md` file found in `dir`.
-/// Name = file stem; description is extracted best-effort; path is the absolute file path.
-fn collect_md(dir: &Path, source: &str, out: &mut Vec<Capability>) {
+/// Push one `Capability` per `*.md` file found in `dir`. Description is extracted
+/// best-effort; path is the absolute file path. When `use_frontmatter_name` is set, the
+/// display name is the file's frontmatter `name:` (the single source of truth for
+/// subagents), falling back to the file stem when it is absent; otherwise the file stem is
+/// used directly (slash commands, invoked by filename).
+fn collect_md(dir: &Path, source: &str, use_frontmatter_name: bool, out: &mut Vec<Capability>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -442,11 +450,16 @@ fn collect_md(dir: &Path, source: &str, out: &mut Vec<Capability>) {
         if path.extension().and_then(|e| e.to_str()) != Some("md") {
             continue;
         }
-        let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
             continue;
         };
+        let name = if use_frontmatter_name {
+            frontmatter_name(&path).unwrap_or_else(|| stem.to_string())
+        } else {
+            stem.to_string()
+        };
         out.push(Capability {
-            name: name.to_string(),
+            name,
             description: first_description(&path),
             source: source.to_string(),
             path: path.display().to_string(),
@@ -455,7 +468,9 @@ fn collect_md(dir: &Path, source: &str, out: &mut Vec<Capability>) {
 }
 
 /// Push one `Capability` per subdirectory of `dir` that contains a `SKILL.md`.
-/// The `path` field is set to the absolute path of the `SKILL.md` file.
+/// The `path` field is set to the absolute path of the `SKILL.md` file. The display name
+/// is the frontmatter `name:` when present (the label Claude shows in skill listings),
+/// falling back to the directory name (which remains the `/`-invocation identifier).
 fn collect_skill_dirs(dir: &Path, source: &str, out: &mut Vec<Capability>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -465,7 +480,7 @@ fn collect_skill_dirs(dir: &Path, source: &str, out: &mut Vec<Capability>) {
         if !skill_md.is_file() {
             continue;
         }
-        let Some(name) = entry
+        let Some(dir_name) = entry
             .path()
             .file_name()
             .and_then(|s| s.to_str())
@@ -473,6 +488,7 @@ fn collect_skill_dirs(dir: &Path, source: &str, out: &mut Vec<Capability>) {
         else {
             continue;
         };
+        let name = frontmatter_name(&skill_md).unwrap_or(dir_name);
         out.push(Capability {
             name,
             description: first_description(&skill_md),
@@ -480,6 +496,32 @@ fn collect_skill_dirs(dir: &Path, source: &str, out: &mut Vec<Capability>) {
             path: skill_md.display().to_string(),
         });
     }
+}
+
+/// Extract the `name:` scalar from a file's leading YAML frontmatter block (`---` … `---`),
+/// stripping surrounding quotes. Returns `None` when there is no frontmatter, no `name:`
+/// key inside it, or the value is empty. Restricting the scan to the frontmatter block
+/// avoids matching a stray `name:` in the document body.
+fn frontmatter_name(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut lines = text.lines();
+    // Frontmatter must open on the first line with a `---` fence.
+    if lines.next().map(str::trim) != Some("---") {
+        return None;
+    }
+    for line in lines {
+        let trimmed = line.trim_end();
+        if trimmed.trim() == "---" {
+            break; // end of frontmatter
+        }
+        if let Some(rest) = trimmed.trim_start().strip_prefix("name:") {
+            let value = rest.trim().trim_matches(|c| c == '"' || c == '\'').trim();
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
 }
 
 /// Extract the first useful description line from a markdown or frontmatter file.
@@ -1195,6 +1237,71 @@ mod tests {
             .expect("skill 'bar' not found");
         assert_eq!(bar.description.as_deref(), Some("Bar skill"));
         assert_eq!(bar.source, "project");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn subagent_display_name_comes_from_frontmatter_not_filename() {
+        // SSOT: the file is `dummy.md` but declares `name: real-reviewer`. Claude Code
+        // invokes the agent by its frontmatter name, so the UI must display "real-reviewer",
+        // never the filename — otherwise the list could show a name the file doesn't back.
+        let dir = std::env::temp_dir().join(format!("ae-ssot-agent-{}", std::process::id()));
+        let agents_dir = dir.join(".claude/agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(
+            agents_dir.join("dummy.md"),
+            "---\nname: real-reviewer\ndescription: Reviews code\n---\n",
+        )
+        .unwrap();
+
+        let caps = list_capabilities("claude", &dir);
+        assert!(
+            caps.subagents.iter().any(|c| c.name == "real-reviewer"),
+            "expected display name from frontmatter, got {:?}",
+            caps.subagents.iter().map(|c| &c.name).collect::<Vec<_>>()
+        );
+        assert!(
+            !caps.subagents.iter().any(|c| c.name == "dummy"),
+            "filename must not be shown when frontmatter declares a name"
+        );
+        // The backing path still points at the real file for read/edit/delete.
+        let cap = caps.subagents.iter().find(|c| c.name == "real-reviewer").unwrap();
+        assert!(cap.path.ends_with("/dummy.md"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn subagent_falls_back_to_filename_without_frontmatter_name() {
+        let dir = std::env::temp_dir().join(format!("ae-ssot-agent2-{}", std::process::id()));
+        let agents_dir = dir.join(".claude/agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(agents_dir.join("solo.md"), "just a body, no frontmatter\n").unwrap();
+
+        let caps = list_capabilities("claude", &dir);
+        assert!(caps.subagents.iter().any(|c| c.name == "solo"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn skill_display_name_prefers_frontmatter_over_dirname() {
+        // Skill dir is `dummy` but its SKILL.md label is `shiny-skill`; the listing shows
+        // the frontmatter label (matching Claude's skill listing), while the dir name
+        // remains the invocation id via the backing path.
+        let dir = std::env::temp_dir().join(format!("ae-ssot-skill-{}", std::process::id()));
+        let skill_dir = dir.join(".claude/skills/dummy");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: shiny-skill\ndescription: Does shiny things\n---\n",
+        )
+        .unwrap();
+
+        let caps = list_capabilities("claude", &dir);
+        assert!(caps.skills.iter().any(|c| c.name == "shiny-skill"));
+        assert!(!caps.skills.iter().any(|c| c.name == "dummy"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
