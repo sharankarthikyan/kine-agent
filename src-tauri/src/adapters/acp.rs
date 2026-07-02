@@ -174,7 +174,7 @@ pub async fn drive_session(
     // Canonicalized once: every fs/* request is contained against this root.
     // Canonicalization also survives macOS /tmp symlinks and Windows \\?\ paths.
     // A canonicalize failure leaves `None` — every fs request is then rejected
-    // with -32602, never served unguarded.
+    // with -32603, never served unguarded.
     let fs_root = std::fs::canonicalize(&cwd).ok();
 
     let can_load = client::initialize(&peer)

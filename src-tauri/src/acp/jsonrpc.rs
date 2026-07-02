@@ -247,8 +247,12 @@ fn salvage_id_and_method(head: &str) -> (Option<Value>, Option<String>) {
             .next()?
             .ok()
     }
-    // Everything from the first `result`/`params` key onward is payload.
-    let payload_pos = ["\"result\"", "\"params\""]
+    // Everything from the first `result`/`params`/`error` key onward is payload.
+    // `error` matters for oversized ERROR responses (no result/params key): a
+    // `"method"` nested in error.data must not be trusted. Safe as a fence:
+    // requests never carry a top-level `error` key before `method`, and the
+    // quoted-key match can't hit a bare word inside a value.
+    let payload_pos = ["\"result\"", "\"params\"", "\"error\""]
         .iter()
         .filter_map(|key| head.find(key))
         .min()
@@ -295,7 +299,13 @@ async fn handle_oversized(
                 ))));
             }
         }
-        _ => eprintln!("acp: oversized line was unsalvageable — no id/method in its head"),
+        (None, Some(method)) => {
+            // A notification — nothing is waiting on it, so dropping is enough.
+            eprintln!("acp: oversized {method} notification dropped (no answer needed)");
+        }
+        (None, None) => {
+            eprintln!("acp: oversized line was unsalvageable — no id/method in its head");
+        }
     }
 }
 
@@ -565,6 +575,13 @@ mod tests {
         let (id, method) = salvage_id_and_method(head);
         assert_eq!(id, None, "payload-nested id must be untrusted");
         assert_eq!(method.as_deref(), Some("n"));
+
+        // An ERROR response is a payload boundary too: a `method` nested in
+        // `error.data` must not turn the response into a request.
+        let head = r#"{"jsonrpc":"2.0","id":12,"error":{"code":-32000,"message":"m","data":{"method":"GET","blob":"AAAA"#;
+        let (id, method) = salvage_id_and_method(head);
+        assert_eq!(id, Some(serde_json::json!(12)));
+        assert_eq!(method, None, "error-payload-nested method must be untrusted");
     }
 
     #[tokio::test]
@@ -637,6 +654,37 @@ mod tests {
             let blob = "A".repeat(MAX_LINE_BYTES + 1024);
             let resp = format!(
                 "{{\"jsonrpc\":\"2.0\",\"id\":{},\"result\":{{\"items\":[{{\"id\":\"x\",\"method\":\"GET\"}},\"{blob}\"]}}}}\n",
+                req["id"]
+            );
+            agent_tx.write_all(resp.as_bytes()).await.unwrap();
+            // A misclassification would write an unsolicited error line back to
+            // the "agent"; the pending request would then hang until timeout.
+            agent_rx
+        });
+        let err = tokio::time::timeout(std::time::Duration::from_secs(10), fut)
+            .await
+            .expect("must not hang — response branch must fire")
+            .unwrap_err();
+        assert!(matches!(err, RpcError::Protocol(_)), "got {err:?}");
+        let _ = agent_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn oversized_error_response_with_nested_method_key_still_fails_the_pending_request() {
+        // An ERROR response has no result/params key — the `error` key itself
+        // must fence the payload, or a `"method"` inside error.data would be
+        // trusted, misclassifying the response as a request (unsolicited -32600
+        // line + this pending request dangling).
+        let (peer, agent) = harness();
+        let (r, mut agent_tx) = tokio::io::split(agent);
+        let mut agent_rx = BufReader::new(r).lines();
+        let fut = peer.request("x", serde_json::json!({}));
+        let agent_task = tokio::spawn(async move {
+            let line = agent_rx.next_line().await.unwrap().unwrap();
+            let req: serde_json::Value = serde_json::from_str(&line).unwrap();
+            let blob = "A".repeat(MAX_LINE_BYTES + 1024);
+            let resp = format!(
+                "{{\"jsonrpc\":\"2.0\",\"id\":{},\"error\":{{\"code\":-32000,\"message\":\"m\",\"data\":{{\"method\":\"GET\",\"blob\":\"{blob}\"}}}}}}\n",
                 req["id"]
             );
             agent_tx.write_all(resp.as_bytes()).await.unwrap();
