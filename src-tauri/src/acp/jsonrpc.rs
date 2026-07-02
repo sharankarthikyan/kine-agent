@@ -86,7 +86,11 @@ impl RpcPeer {
         // oversized inbound requests inline instead of leaving them dangling.
         let writer: Arc<tokio::sync::Mutex<Box<dyn AsyncWrite + Unpin + Send>>> =
             Arc::new(tokio::sync::Mutex::new(Box::new(write)));
-        let reader_writer = Arc::clone(&writer);
+        // Weak, NOT a strong clone: the reader task outlives peer clones until
+        // stdout EOF, and a strong clone would hold the child's stdin open —
+        // deadlocking shutdown against an orphaned child (e.g. npx's node
+        // grandchild, which survives our SIGKILL) that only exits on stdin EOF.
+        let reader_writer = Arc::downgrade(&writer);
         tokio::spawn(async move {
             let mut reader = BufReader::new(read);
             loop {
@@ -269,14 +273,22 @@ fn salvage_id_and_method(head: &str) -> (Option<Value>, Option<String>) {
 /// An oversized line was dropped — do NOT leave the protocol hanging. A salvaged
 /// request gets an error answer; a salvaged response fails its pending request;
 /// an unsalvageable line is logged and skipped (the pre-M5 behavior).
+///
+/// Takes the writer as a `Weak` (see the downgrade in [`RpcPeer::start`]): once
+/// every peer clone is gone there is nobody left to answer for, and holding the
+/// writer here would keep the child's stdin open.
 async fn handle_oversized(
     head: &str,
     total: usize,
     pending: &Pending,
-    writer: &tokio::sync::Mutex<Box<dyn AsyncWrite + Unpin + Send>>,
+    writer: &std::sync::Weak<tokio::sync::Mutex<Box<dyn AsyncWrite + Unpin + Send>>>,
 ) {
     match salvage_id_and_method(head) {
         (Some(id), Some(method)) => {
+            let Some(writer) = writer.upgrade() else {
+                eprintln!("acp: oversized request arrived after peer shutdown — dropping");
+                return;
+            };
             eprintln!("acp: answering oversized {method} request (id {id}) with an error");
             let msg = serde_json::json!({
                 "jsonrpc": "2.0", "id": id,
@@ -285,7 +297,7 @@ async fn handle_oversized(
                     MAX_LINE_BYTES / (1024 * 1024)
                 )}
             });
-            if let Err(e) = write_line_to(writer, &msg).await {
+            if let Err(e) = write_line_to(&writer, &msg).await {
                 eprintln!("acp: failed to answer oversized request: {e}");
             }
         }
@@ -698,6 +710,30 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, RpcError::Protocol(_)), "got {err:?}");
         let _ = agent_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropping_all_peer_clones_closes_the_writer_while_reader_still_lives() {
+        // The reader task must NOT keep the transport writable: a real agent
+        // (orphaned npx child) exits only on stdin EOF, and its stdout stays
+        // open until it exits — a strong writer clone in the reader is a
+        // shutdown deadlock (observed live in the M5 smoke).
+        //
+        // stdin and stdout are modeled as SEPARATE pipes, like a real child's
+        // fds. (Split halves of one duplex share the stream via an Arc'd inner,
+        // so the reader's ReadHalf would keep the write side open no matter
+        // what the peer does — that topology can't observe this fix.)
+        let (stdin_write, stdin_agent_read) = duplex(64 * 1024);
+        let (_stdout_agent_write, stdout_read) = duplex(64 * 1024); // held open: no stdout EOF
+        let peer = RpcPeer::start(stdout_read, stdin_write);
+        drop(peer); // all peer clones gone; reader task still alive (no stdout EOF)
+        let mut buf = Vec::new();
+        let eof = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::io::AsyncReadExt::read_to_end(&mut BufReader::new(stdin_agent_read), &mut buf),
+        )
+        .await;
+        assert!(eof.is_ok(), "agent must see stdin EOF once all peer clones drop");
     }
 
     #[tokio::test]

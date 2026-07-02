@@ -146,8 +146,20 @@ async fn spawn_and_drive(
     // Kill BEFORE awaiting the stderr tail: an ACP agent is a persistent server,
     // and the tail task only resolves at stderr EOF (child exit). Awaiting first
     // would hang whenever the agent ignores stdin EOF after the turn completes.
+    // The await is bounded too: the kill only reaches the direct child (npx),
+    // and a descendant that survives it keeps the stderr pipe open — its
+    // lifetime must never wedge the session.
     let _ = child.kill().await;
-    let stderr_tail = stderr_task.await.unwrap_or_default();
+    let stderr_tail =
+        match tokio::time::timeout(std::time::Duration::from_secs(2), stderr_task).await {
+            Ok(joined) => joined.unwrap_or_default(),
+            Err(_) => {
+                // A surviving descendant (e.g. an orphaned npx grandchild) still
+                // holds the stderr pipe. Don't let its lifetime wedge the session.
+                eprintln!("acp: stderr tail unavailable — a child process outlived the kill");
+                String::new()
+            }
+        };
     if result.is_err() && !stderr_tail.trim().is_empty() {
         eprintln!("acp agent stderr tail: {}", stderr_tail.trim());
     }
