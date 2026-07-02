@@ -22,6 +22,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { type Engine } from "@/lib/agent";
 import { type AgentInfo, type ModelInfo, isAgentSpawnable } from "@/lib/models";
 import { AgentLogo } from "./AgentLogo";
 
@@ -35,7 +36,7 @@ interface NewSessionProps {
   permissionMode: PermissionMode;
   sandboxTerminal: boolean;
   /** Streaming engine: "pipe" (default, CLI adapters) | "acp" (beta, claude only). */
-  engine: string;
+  engine: Engine;
   running: boolean;
   onPickRepo: () => void;
   onPickRecent: (path: string) => void;
@@ -43,7 +44,7 @@ interface NewSessionProps {
   onModelChange: (m: ModelInfo) => void;
   onPermissionModeChange: (mode: PermissionMode) => void;
   onSandboxTerminalChange: (v: boolean) => void;
-  onEngineChange: (engine: string) => void;
+  onEngineChange: (engine: Engine) => void;
   onStart: (text: string) => void;
 }
 

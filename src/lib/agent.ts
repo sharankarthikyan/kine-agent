@@ -53,8 +53,17 @@ export interface StartSessionArgs {
   /** Antigravity-only: restrict terminal commands' network/disk access (`agy --sandbox`). */
   sandboxTerminal?: boolean;
   /** Streaming engine: "pipe" (default, CLI adapters) | "acp" (beta, claude only). */
-  engine?: string;
+  engine?: Engine;
   onEvent: (event: AgentEvent) => void;
+}
+
+/** Streaming engines a session can run on. Backend re-validates per agent. */
+export type Engine = "pipe" | "acp";
+
+/** ACP is claude-only (M1): switching a draft to any other agent drops it back
+ * to the pipe engine. Single home for the rule — M6/M7 widen it here. */
+export function engineForAgentSwitch(nextAgentId: string, currentEngine: Engine): Engine {
+  return nextAgentId === "claude" ? currentEngine : "pipe";
 }
 
 /**

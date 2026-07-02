@@ -41,10 +41,12 @@ import {
   listTrustedRepos,
   pickRepository,
   respondToApproval,
+  engineForAgentSwitch,
   startSession,
   sendMessage,
   stopSession,
   type AgentEvent,
+  type Engine,
 } from "./lib/agent";
 import {
   detectAgents,
@@ -136,7 +138,7 @@ type PaneDraft = {
   permissionMode: PermissionMode;
   sandbox: boolean;
   /** Streaming engine: "pipe" (default, CLI adapters) | "acp" (beta, claude only). */
-  engine: string;
+  engine: Engine;
 };
 type EventPageState = {
   nextOffset: number;
@@ -739,8 +741,7 @@ export default function App() {
       agentId: a.id,
       modelValue,
       permissionMode: mode,
-      // ACP is claude-only (M1): leaving claude drops the draft back to the pipe engine.
-      engine: a.id === "claude" ? cur.engine : "pipe",
+      engine: engineForAgentSwitch(a.id, cur.engine),
     });
   }
 
@@ -752,7 +753,7 @@ export default function App() {
       agentId: m.agent,
       permissionMode: mode,
       // Picking another agent's model also switches agents — same ACP reset rule.
-      engine: m.agent === "claude" ? cur.engine : "pipe",
+      engine: engineForAgentSwitch(m.agent, cur.engine),
     });
   }
 
@@ -1289,7 +1290,7 @@ export default function App() {
       sandboxTerminal?: boolean;
       agent?: string;
       /** Streaming engine for NEW sessions only; follow-ups reuse the persisted engine. */
-      engine?: string;
+      engine?: Engine;
       sessionId?: string | null;
       paneId?: string;
     },
