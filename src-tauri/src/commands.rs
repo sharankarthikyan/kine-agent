@@ -171,6 +171,7 @@ async fn run_persisting(
     approvals: &ApprovalRegistry,
     session_id: String,
     agent: String,
+    engine: String,
     mut prompt: Prompt,
     cwd: PathBuf,
     resume: bool,
@@ -196,7 +197,12 @@ async fn run_persisting(
     // `approval_socket_setup` decides from the permission mode (gated for now by the
     // KINELOOP_APPROVAL safety switch until the live handshake is verified), sets the launch
     // flags on `prompt`, and returns the socket path; otherwise None and the launch is unchanged.
-    let approval_socket_path = approval_socket_setup(&agent, &session_id, &mut prompt);
+    // Pipe-only: under ACP, approvals arrive as protocol requests, not via the MCP socket.
+    let approval_socket_path = if engine == "pipe" {
+        approval_socket_setup(&agent, &session_id, &mut prompt)
+    } else {
+        None
+    };
 
     let (tx, mut rx) = mpsc::unbounded_channel::<AgentEvent>();
     // When approvals are on, register a per-session emitter so the socket bridge can surface
@@ -239,15 +245,24 @@ async fn run_persisting(
     // Kineloop session id); Claude always uses the Kineloop session id directly.
     let captured: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let run_future = async {
-        match agent.as_str() {
-            "codex" => {
+        match (agent.as_str(), engine.as_str()) {
+            ("claude", "acp") => {
+                // ACP resumes by the agent-minted session id captured on the first
+                // run — identical id plumbing to codex/antigravity.
+                let (adapter_id, do_resume) =
+                    resume_target(&session_id, resume, external_thread_id.as_deref());
+                crate::adapters::acp::AcpAdapter::new(captured.clone())
+                    .run(prompt, cwd, adapter_id, do_resume, sink)
+                    .await
+            }
+            ("codex", _) => {
                 let (adapter_id, do_resume) =
                     resume_target(&session_id, resume, external_thread_id.as_deref());
                 crate::adapters::codex::CodexAdapter::new(captured.clone())
                     .run(prompt, cwd, adapter_id, do_resume, sink)
                     .await
             }
-            "antigravity" => {
+            ("antigravity", _) => {
                 let (adapter_id, do_resume) =
                     resume_target(&session_id, resume, external_thread_id.as_deref());
                 crate::adapters::antigravity::AntigravityAdapter::new(captured.clone())
@@ -576,6 +591,17 @@ fn validate_agent(agent: Option<String>) -> Result<String, String> {
     }
 }
 
+/// Engine matrix (spec §Engine selection). M1 enables acp for claude only;
+/// codex joins in M6, gemini (acp-only) in M7, antigravity never.
+fn validate_engine(engine: Option<String>, agent: &str) -> Result<String, String> {
+    match engine.as_deref() {
+        None | Some("pipe") => Ok("pipe".to_string()),
+        Some("acp") if agent == "claude" => Ok("acp".to_string()),
+        Some("acp") => Err(format!("ACP engine is not yet supported for {agent}")),
+        Some(other) => Err(format!("unsupported engine: {other}")),
+    }
+}
+
 /// Pick the id + resume flag to hand an adapter that resumes by a CLI-native id.
 /// Resumes with the captured external id when available; otherwise starts fresh so a
 /// missing/never-captured id degrades to a new turn rather than an error.
@@ -679,6 +705,7 @@ async fn create_session_and_run(
     approvals: &ApprovalRegistry,
     session_id: String,
     agent: String,
+    engine: String,
     repo_path: PathBuf,
     repo: String,
     display_prompt: String,
@@ -716,6 +743,14 @@ async fn create_session_and_run(
         let _ = tokio::task::spawn_blocking(move || worktree::remove(&cleanup_repo, &wt)).await;
         return Err(e.to_string());
     }
+    // Persist the engine choice so follow-up turns (`send_message`, which takes no engine
+    // param) resume with the same engine. Best-effort, like permission mode; "pipe" is the
+    // stored default so only an opt-in needs a row update.
+    if engine != "pipe" {
+        if let Err(e) = store.set_engine(&session_id, &engine).await {
+            eprintln!("failed to persist engine for {session_id}: {e}");
+        }
+    }
     if let Err(e) = store
         .append_event(
             &session_id,
@@ -732,6 +767,7 @@ async fn create_session_and_run(
         approvals,
         session_id,
         agent,
+        engine,
         Prompt {
             text: agent_prompt,
             model,
@@ -766,6 +802,7 @@ pub async fn start_session(
     repo: String,
     session_id: String,
     agent: Option<String>,
+    engine: Option<String>,
     model: Option<String>,
     permission_mode: Option<String>,
     sandbox_terminal: Option<bool>,
@@ -777,6 +814,7 @@ pub async fn start_session(
     validate_prompt(&prompt)?;
     let (_guard, cancel_rx) = runs.acquire(&session_id)?;
     let agent = validate_agent(agent)?;
+    let engine = validate_engine(engine, &agent)?;
     let permission_mode = validate_permission_mode(permission_mode)?;
     let sandbox_terminal = sandbox_terminal.unwrap_or(false);
     let model = validate_model(model)?;
@@ -793,6 +831,7 @@ pub async fn start_session(
         &approvals,
         session_id,
         agent,
+        engine,
         repo_path,
         repo,
         prompt.clone(),
@@ -892,6 +931,9 @@ pub async fn continue_external_session(
         &approvals,
         session_id,
         agent,
+        // External CLI-history continuations always start on the pipe engine: the imported
+        // transcript came from a plain CLI run and the UI offers no engine choice here.
+        "pipe".to_string(),
         repo_path,
         repo,
         prompt,
@@ -930,12 +972,16 @@ pub async fn send_message(
     let permission_mode = validate_permission_mode(permission_mode)?;
     let sandbox_terminal = sandbox_terminal.unwrap_or(false);
     let model = validate_model(model)?;
-    // Resume uses the session's own agent + its captured CLI-native conversation id.
+    // Resume uses the session's own agent + engine + its captured CLI-native conversation id.
     let agent = store
         .get_agent(&session_id)
         .await
         .map_err(|e| e.to_string())?
         .unwrap_or_else(|| "claude".to_string());
+    let engine = store
+        .get_engine(&session_id)
+        .await
+        .map_err(|e| e.to_string())?;
     let external_thread_id = store
         .get_external_thread_id(&session_id)
         .await
@@ -972,6 +1018,7 @@ pub async fn send_message(
         &approvals,
         session_id,
         agent,
+        engine,
         Prompt {
             text: prompt,
             model,
@@ -1576,7 +1623,7 @@ pub async fn commit_session(session_id: String, message: String) -> Result<Commi
 #[cfg(test)]
 mod tests {
     use super::{
-        normalize_title, resolve_worktree_root, truncate_transcript_tail,
+        normalize_title, resolve_worktree_root, truncate_transcript_tail, validate_engine,
         validate_permission_mode, validate_prompt, MAX_PROMPT_BYTES, MAX_TRANSCRIPT_BYTES,
     };
 
@@ -1655,6 +1702,17 @@ mod tests {
         assert!(validate_permission_mode(Some("nonsense".to_string())).is_err());
         // `auto` is rejected: its classifier aborts under headless -p, so it's never offered.
         assert!(validate_permission_mode(Some("auto".to_string())).is_err());
+    }
+
+    #[test]
+    fn engine_matrix_validates_per_agent() {
+        // M1: pipe for all spawnable agents; acp for claude only.
+        assert_eq!(validate_engine(None, "claude").unwrap(), "pipe");
+        assert_eq!(validate_engine(Some("pipe".into()), "codex").unwrap(), "pipe");
+        assert_eq!(validate_engine(Some("acp".into()), "claude").unwrap(), "acp");
+        assert!(validate_engine(Some("acp".into()), "codex").is_err()); // M6
+        assert!(validate_engine(Some("acp".into()), "antigravity").is_err()); // never
+        assert!(validate_engine(Some("warp".into()), "claude").is_err());
     }
 
     #[test]
