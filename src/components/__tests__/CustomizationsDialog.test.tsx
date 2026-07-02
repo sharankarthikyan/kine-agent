@@ -897,3 +897,29 @@ test("editor header shows a Project badge for a project-scope rule", async () =>
   await userEvent.click(screen.getByText("CLAUDE.md")); // scope: project
   expect(await screen.findByText("Project")).toBeInTheDocument();
 });
+
+// ─── Scope is always surfaced on add forms ──────────────────────────────────────
+
+test("no-session add shows an explicit Global scope (no toggle) and creates globally", async () => {
+  render(<CustomizationsDialog {...defaultProps} sessionId={null} capabilities={capsWithPaths} />);
+  const nav = getNav();
+  await userEvent.click(within(nav).getByRole("button", { name: /skills/i }));
+  await userEvent.click(screen.getByRole("button", { name: /^add$/i }));
+  await userEvent.type(screen.getByPlaceholderText(/new skill name/i), "myskill");
+  // No Project/Global choice without a session — scope is fixed and shown as Global.
+  expect(screen.queryByRole("button", { name: /^project$/i })).toBeNull();
+  expect(screen.getByText("Global")).toBeInTheDocument();
+  // Create is enabled with no scope pick required, and targets global (null session).
+  await userEvent.click(screen.getByRole("button", { name: /^create$/i }));
+  await waitFor(() => expect(createCustomization).toHaveBeenCalledWith(null, "skill", "myskill"));
+});
+
+test("session add shows the Project/Global toggle for agents", async () => {
+  render(<CustomizationsDialog {...defaultProps} capabilities={capsWithPaths} />);
+  const nav = getNav();
+  await userEvent.click(within(nav).getByRole("button", { name: /agents/i }));
+  await userEvent.click(screen.getByRole("button", { name: /^add$/i }));
+  // With a session, both scope options are offered.
+  expect(screen.getByRole("button", { name: /^project$/i })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: /^global$/i })).toBeInTheDocument();
+});

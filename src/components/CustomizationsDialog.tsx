@@ -512,32 +512,53 @@ function CapabilityRow({
 
 type Scope = "project" | "user";
 
-// Where a newly added item is written. Only meaningful when there is an active session
-// (project files exist); on the global-scope view everything is user scope, so the picker
-// is hidden and callers force `user`. `value` is `null` until the user picks — there is no
-// default, so nothing lands in the wrong scope by accident.
+// The two-way toggle itself (no label). `value` is `null` until the user picks — there is
+// no default, so nothing lands in the wrong scope by accident.
 function ScopeToggle({ value, onChange }: { value: Scope | null; onChange: (s: Scope) => void }) {
   return (
-    <div className="flex items-center gap-1 shrink-0">
-      <span className="text-xs text-muted-foreground">Scope</span>
-      <div className="flex items-center gap-0.5 rounded-md border border-border p-0.5">
-        {(["project", "user"] as const).map((s) => (
-          <button
-            key={s}
-            type="button"
-            aria-pressed={value === s}
-            onClick={() => onChange(s)}
-            className={cn(
-              "px-2 py-1 text-xs rounded transition-colors",
-              value === s
-                ? "bg-muted text-foreground font-medium"
-                : "text-muted-foreground hover:text-foreground"
-            )}
-          >
-            {s === "project" ? "Project" : "Global"}
-          </button>
-        ))}
-      </div>
+    <div className="flex items-center gap-0.5 rounded-md border border-border p-0.5 shrink-0">
+      {(["project", "user"] as const).map((s) => (
+        <button
+          key={s}
+          type="button"
+          aria-pressed={value === s}
+          onClick={() => onChange(s)}
+          className={cn(
+            "px-2 py-1 text-xs rounded transition-colors",
+            value === s
+              ? "bg-muted text-foreground font-medium"
+              : "text-muted-foreground hover:text-foreground"
+          )}
+        >
+          {s === "project" ? "Project" : "Global"}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// Scope selector shown on every add form, so where an item lands is always explicit. With
+// an active session the user picks Project vs Global; with none, the only valid target is
+// the user's global ~/.claude, shown as a fixed "Global" chip (Project needs a worktree).
+function ScopeField({
+  sessionId,
+  value,
+  onChange,
+}: {
+  sessionId: string | null;
+  value: Scope | null;
+  onChange: (s: Scope) => void;
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      <span className="text-sm font-medium">Scope</span>
+      {sessionId === null ? (
+        <Badge variant="outline" className="text-xs font-normal" title="Open Customizations from a session to create project files">
+          Global
+        </Badge>
+      ) : (
+        <ScopeToggle value={value} onChange={onChange} />
+      )}
     </div>
   );
 }
@@ -608,7 +629,7 @@ function NewCapabilityForm({
         className="h-8 text-sm flex-1 min-w-0"
         disabled={busy}
       />
-      {sessionId !== null && <ScopeToggle value={scope} onChange={setScope} />}
+      <ScopeField sessionId={sessionId} value={scope} onChange={setScope} />
       <Button size="sm" onClick={() => void submit()} disabled={busy || !valid}>
         {busy ? "Creating…" : "Create"}
       </Button>
@@ -1146,11 +1167,7 @@ function HookAddPanel({
         />
       </Field>
 
-      {sessionId !== null && (
-        <Field label="Scope" hint="Where this hook is saved.">
-          <ScopeToggle value={scope} onChange={setScope} />
-        </Field>
-      )}
+      <ScopeField sessionId={sessionId} value={scope} onChange={setScope} />
     </AddPanelShell>
   );
 }
@@ -1258,11 +1275,7 @@ function McpAddPanel({
         </Field>
       )}
 
-      {sessionId !== null && (
-        <Field label="Scope" hint="Where this server is saved.">
-          <ScopeToggle value={scope} onChange={setScope} />
-        </Field>
-      )}
+      <ScopeField sessionId={sessionId} value={scope} onChange={setScope} />
     </AddPanelShell>
   );
 }
