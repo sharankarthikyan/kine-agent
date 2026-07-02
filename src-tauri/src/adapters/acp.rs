@@ -210,7 +210,11 @@ pub async fn drive_session(
         }
         None => {
             let (id, modes) = new_session(&peer, &cwd).await?;
-            (id, modes, false)
+            // resume_transcript is only populated for follow-up turns
+            // (send_message on an ACP session). Carrying one into a fresh
+            // session means the prior thread id was never captured — without
+            // the fallback, that context would silently vanish.
+            (id, modes, prompt.resume_transcript.is_some())
         }
     };
     if let Ok(mut guard) = captured_session.lock() {
@@ -1755,6 +1759,72 @@ mod tests {
         assert!(
             !events.iter().any(|e| matches!(e, AgentEvent::Notice { .. })),
             "native resume must be silent, got {events:?}"
+        );
+    }
+
+    /// The thread id was never captured (e.g. the first ACP spawn died before
+    /// session/new answered), so the command layer passes resume_session: None
+    /// but a populated resume_transcript. The fallback must still engage:
+    /// transcript replayed + Notice, regardless of loadSession support.
+    #[tokio::test]
+    async fn never_captured_thread_id_still_replays_transcript_and_notices() {
+        let prompt = Prompt {
+            text: "continue".into(),
+            resume_transcript: Some("User: earlier work".into()),
+            ..Default::default()
+        };
+        let h = run_agent_fixture(prompt, None, None, |mut lines, mut w, _wt| async move {
+            let req = next_request(&mut lines, "initialize").await;
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":false}}})).await;
+            // No thread id ⇒ no session/load may be attempted — straight to session/new.
+            let req = next_request(&mut lines, "session/new").await;
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"sessionId":"acp-fresh","modes":{"currentModeId":"default",
+                    "availableModes":[{"id":"default"}]}}})).await;
+            let req = next_request(&mut lines, "session/prompt").await;
+            let text = req["params"]["prompt"][0]["text"].as_str().unwrap().to_string();
+            assert!(text.contains("User: earlier work"), "transcript replayed: {text}");
+            assert!(
+                text.contains("Native session resume is unavailable"),
+                "framing present: {text}"
+            );
+            assert!(text.contains("continue"), "user request present: {text}");
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"stopReason":"completed"}})).await;
+        })
+        .await;
+        assert_eq!(h.captured.lock().unwrap().as_deref(), Some("acp-fresh"));
+        let events = h.events.lock().unwrap();
+        assert!(
+            events.iter().any(|e| matches!(e, AgentEvent::Notice { message } if message == RESUME_NOTICE_WITH_CONTEXT)),
+            "notice emitted, got {events:?}"
+        );
+    }
+
+    /// A true first turn (no resume id, no transcript) must stay silent: prompt
+    /// text verbatim, no Notice.
+    #[tokio::test]
+    async fn true_first_turn_stays_silent() {
+        let prompt = Prompt { text: "hello".into(), ..Default::default() };
+        let h = run_agent_fixture(prompt, None, None, |mut lines, mut w, _wt| async move {
+            let req = next_request(&mut lines, "initialize").await;
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":false}}})).await;
+            let req = next_request(&mut lines, "session/new").await;
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"sessionId":"acp-fresh","modes":{"currentModeId":"default",
+                    "availableModes":[{"id":"default"}]}}})).await;
+            let req = next_request(&mut lines, "session/prompt").await;
+            assert_eq!(req["params"]["prompt"][0]["text"], "hello", "verbatim prompt");
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"stopReason":"completed"}})).await;
+        })
+        .await;
+        let events = h.events.lock().unwrap();
+        assert!(
+            !events.iter().any(|e| matches!(e, AgentEvent::Notice { .. })),
+            "a genuine first turn must be silent, got {events:?}"
         );
     }
 
