@@ -165,20 +165,27 @@ fn approval_socket_setup(_agent: &str, _session_id: &str, _prompt: &mut Prompt) 
     None
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn run_persisting(
-    store: &SessionStore,
-    approvals: &ApprovalRegistry,
+/// Identity + routing for one persisted run. `agent` and `engine` were previously
+/// adjacent positional `String` params — a silent-swap hazard; named construction
+/// makes each call site self-checking.
+struct RunSpec {
     session_id: String,
     agent: String,
     engine: String,
-    mut prompt: Prompt,
-    cwd: PathBuf,
     resume: bool,
     external_thread_id: Option<String>,
+}
+
+async fn run_persisting(
+    store: &SessionStore,
+    approvals: &ApprovalRegistry,
+    spec: RunSpec,
+    mut prompt: Prompt,
+    cwd: PathBuf,
     mut cancel_rx: watch::Receiver<bool>,
     on_event: Channel<AgentEvent>,
 ) -> Result<(), String> {
+    let RunSpec { session_id, agent, engine, resume, external_thread_id } = spec;
     // Persist the permission mode + sandbox flag actually used for this run so the UI can
     // seed each session's control from its last choice (single place, covering both new
     // sessions and follow-up turns). Best-effort: a persistence hiccup must not abort a run.
@@ -198,7 +205,7 @@ async fn run_persisting(
     // KINELOOP_APPROVAL safety switch until the live handshake is verified), sets the launch
     // flags on `prompt`, and returns the socket path; otherwise None and the launch is unchanged.
     // Pipe-only: under ACP, approvals arrive as protocol requests, not via the MCP socket.
-    let approval_socket_path = if engine == "pipe" {
+    let approval_socket_path = if engine == store::ENGINE_PIPE {
         approval_socket_setup(&agent, &session_id, &mut prompt)
     } else {
         None
@@ -245,27 +252,23 @@ async fn run_persisting(
     // (not the Kineloop session id); only pipe Claude uses the Kineloop session id
     // directly.
     let captured: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    // Codex, Antigravity, and claude-over-ACP resume by the CLI-minted conversation
+    // id captured on a previous run; only pipe Claude uses the Kineloop session id.
+    let (adapter_id, do_resume) =
+        resume_target(&session_id, resume, external_thread_id.as_deref());
     let run_future = async {
         match (agent.as_str(), engine.as_str()) {
-            ("claude", "acp") => {
-                // ACP resumes by the agent-minted session id captured on the first
-                // run — identical id plumbing to codex/antigravity.
-                let (adapter_id, do_resume) =
-                    resume_target(&session_id, resume, external_thread_id.as_deref());
+            ("claude", store::ENGINE_ACP) => {
                 crate::adapters::acp::AcpAdapter::new(captured.clone())
                     .run(prompt, cwd, adapter_id, do_resume, sink)
                     .await
             }
             ("codex", _) => {
-                let (adapter_id, do_resume) =
-                    resume_target(&session_id, resume, external_thread_id.as_deref());
                 crate::adapters::codex::CodexAdapter::new(captured.clone())
                     .run(prompt, cwd, adapter_id, do_resume, sink)
                     .await
             }
             ("antigravity", _) => {
-                let (adapter_id, do_resume) =
-                    resume_target(&session_id, resume, external_thread_id.as_deref());
                 crate::adapters::antigravity::AntigravityAdapter::new(captured.clone())
                     .run(prompt, cwd, adapter_id, do_resume, sink)
                     .await
@@ -592,14 +595,14 @@ fn validate_agent(agent: Option<String>) -> Result<String, String> {
 /// codex joins in M6, gemini (acp-only) in M7, antigravity never.
 fn validate_engine(engine: Option<String>, agent: &str) -> Result<String, String> {
     match engine.as_deref() {
-        None | Some("pipe") => Ok("pipe".to_string()),
-        Some("acp") if agent == "claude" => Ok("acp".to_string()),
+        None | Some(store::ENGINE_PIPE) => Ok(store::ENGINE_PIPE.to_string()),
+        Some(store::ENGINE_ACP) if agent == "claude" => Ok(store::ENGINE_ACP.to_string()),
         // Antigravity has no ACP adapter at all (spec matrix: never), unlike
         // codex/gemini which are just later milestones.
-        Some("acp") if agent == "antigravity" => {
+        Some(store::ENGINE_ACP) if agent == "antigravity" => {
             Err("the Antigravity CLI has no ACP support".to_string())
         }
-        Some("acp") => Err(format!("ACP engine is not yet supported for {agent}")),
+        Some(store::ENGINE_ACP) => Err(format!("ACP engine is not yet supported for {agent}")),
         Some(other) => Err(format!("unsupported engine: {other}")),
     }
 }
@@ -748,7 +751,7 @@ async fn create_session_and_run(
     // Persist the engine choice so follow-up turns (`send_message`, which takes no engine
     // param) resume with the same engine. Best-effort, like permission mode; "pipe" is the
     // stored default so only an opt-in needs a row update.
-    if engine != "pipe" {
+    if engine != store::ENGINE_PIPE {
         if let Err(e) = store.set_engine(&session_id, &engine).await {
             eprintln!("failed to persist engine for {session_id}: {e}");
         }
@@ -767,9 +770,13 @@ async fn create_session_and_run(
     run_persisting(
         store,
         approvals,
-        session_id,
-        agent,
-        engine,
+        RunSpec {
+            session_id,
+            agent,
+            engine,
+            resume: false,
+            external_thread_id: None,
+        },
         Prompt {
             text: agent_prompt,
             model,
@@ -778,8 +785,6 @@ async fn create_session_and_run(
             approval: None,
         },
         wt.path,
-        false,
-        None,
         cancel_rx,
         on_event,
     )
@@ -1020,9 +1025,13 @@ pub async fn send_message(
     run_persisting(
         &store,
         &approvals,
-        session_id,
-        agent,
-        engine,
+        RunSpec {
+            session_id,
+            agent,
+            engine,
+            resume: true,
+            external_thread_id,
+        },
         Prompt {
             text: prompt,
             model,
@@ -1031,8 +1040,6 @@ pub async fn send_message(
             approval: None,
         },
         wt_path,
-        true,
-        external_thread_id,
         cancel_rx,
         on_event,
     )

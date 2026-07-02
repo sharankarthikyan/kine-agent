@@ -13,6 +13,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// convenience method against a runaway result set.
 const SESSION_EVENTS_CAP: i64 = 50_000;
 
+/// Streaming engine identifiers persisted in `sessions.engine`.
+/// "pipe" = CLI adapters (default), "acp" = Agent Client Protocol.
+pub const ENGINE_PIPE: &str = "pipe";
+pub const ENGINE_ACP: &str = "acp";
+
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     #[error("db error: {0}")]
@@ -276,7 +281,7 @@ impl SessionStore {
             .bind(id)
             .fetch_optional(&self.pool)
             .await?;
-        Ok(v.unwrap_or_else(|| "pipe".to_string()))
+        Ok(v.unwrap_or_else(|| ENGINE_PIPE.to_string()))
     }
 
     /// Record the engine a session runs on. Bumps `updated_at`.
