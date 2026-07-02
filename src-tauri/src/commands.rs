@@ -1515,23 +1515,36 @@ pub async fn delete_hook(
     .map_err(|e| e.to_string())?
 }
 
-/// Add an stdio MCP server (`command` + optional `args`) to the scope's MCP config. An
-/// active session writes to `<worktree>/.mcp.json`; the global-scope view writes to
-/// `~/.claude.json`.
+/// Add an MCP server to the scope's MCP config. `transport` is `"stdio"` (uses `command`
+/// + `args`) or `"http"`/`"sse"` (uses `url`). An active session writes to
+/// `<worktree>/.mcp.json`; the global-scope view writes to `~/.claude.json`.
 #[tauri::command]
 pub async fn add_mcp_server(
     session_id: Option<String>,
     name: String,
-    command: String,
+    transport: String,
+    command: Option<String>,
     args: Vec<String>,
+    url: Option<String>,
 ) -> Result<(), String> {
     let root = worktree_root_for_opt(session_id.as_deref());
     let source = add_source(&session_id);
+    let transport = match transport.as_str() {
+        "stdio" => inspect::McpTransport::Stdio {
+            command: command.unwrap_or_default(),
+            args,
+        },
+        "http" | "sse" => inspect::McpTransport::Remote {
+            kind: transport,
+            url: url.unwrap_or_default(),
+        },
+        other => return Err(format!("unsupported MCP transport: {other}")),
+    };
     tokio::task::spawn_blocking(move || {
         let scope = inspect_scope(&root, session_id)?;
         ensure_scope_dir(&scope)?;
         let path = mcp_json_path(&scope, source)?;
-        inspect::add_mcp_server(&path, &name, &command, &args).map_err(|e| e.to_string())
+        inspect::add_mcp_server(&path, &name, &transport).map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())?

@@ -785,19 +785,30 @@ test("Edit is offered for a global (null-session) file and Save targets null sco
 
 // ─── CRUD: hooks ────────────────────────────────────────────────────────────────
 
-test("Add hook submits event/matcher/command and refreshes", async () => {
+test("Add hook opens a panel, constrains the event, and submits", async () => {
   const onChanged = vi.fn();
   render(<CustomizationsDialog {...defaultProps} initialSection="hooks" onChanged={onChanged} />);
 
   await userEvent.click(screen.getByRole("button", { name: /^add$/i }));
-  await userEvent.type(screen.getByPlaceholderText(/event/i), "PreToolUse");
-  await userEvent.type(screen.getByPlaceholderText(/matcher/i), "Bash");
-  await userEvent.type(screen.getByPlaceholderText(/command to run/i), "echo hi");
+  // Event is a constrained dropdown, not free text.
+  await userEvent.selectOptions(screen.getByRole("combobox", { name: /hook event/i }), "PreToolUse");
+  // A tool event reveals a tool-matcher input (blank = all tools).
+  await userEvent.type(screen.getByPlaceholderText(/all tools/i), "Bash");
+  await userEvent.type(screen.getByPlaceholderText(/npm run lint/i), "echo hi");
   await userEvent.click(screen.getByRole("button", { name: /^project$/i }));
-  await userEvent.click(screen.getByRole("button", { name: /^add$/i }));
+  await userEvent.click(screen.getByRole("button", { name: /add hook/i }));
 
   await waitFor(() => expect(addHook).toHaveBeenCalledWith("s1", "PreToolUse", "Bash", "echo hi"));
   expect(onChanged).toHaveBeenCalled();
+});
+
+test("hook matcher input is hidden for events that ignore it", async () => {
+  render(<CustomizationsDialog {...defaultProps} initialSection="hooks" />);
+  await userEvent.click(screen.getByRole("button", { name: /^add$/i }));
+  // Stop has no matcher — no matcher control should render.
+  await userEvent.selectOptions(screen.getByRole("combobox", { name: /hook event/i }), "Stop");
+  expect(screen.queryByPlaceholderText(/all tools/i)).toBeNull();
+  expect(screen.queryByRole("combobox", { name: /hook matcher/i })).toBeNull();
 });
 
 test("deleting a hook passes its source and identifying fields", async () => {
@@ -819,21 +830,43 @@ test("deleting a hook passes its source and identifying fields", async () => {
 
 // ─── CRUD: MCP servers ──────────────────────────────────────────────────────────
 
-test("Add MCP server splits args on whitespace and refreshes", async () => {
+test("Add MCP server (stdio) splits args on whitespace and refreshes", async () => {
   const onChanged = vi.fn();
   render(<CustomizationsDialog {...defaultProps} initialSection="mcp" onChanged={onChanged} />);
 
   await userEvent.click(screen.getByRole("button", { name: /^add$/i }));
-  await userEvent.type(screen.getByPlaceholderText(/server name/i), "ctx");
-  await userEvent.type(screen.getByPlaceholderText(/^command/i), "npx");
-  await userEvent.type(screen.getByPlaceholderText(/args/i), "-y @context7/mcp");
+  await userEvent.type(screen.getByPlaceholderText(/e\.g\. context7/i), "ctx");
+  await userEvent.type(screen.getByPlaceholderText(/e\.g\. npx/i), "npx");
+  await userEvent.type(screen.getByPlaceholderText(/@context7\/mcp/i), "-y @context7/mcp");
   await userEvent.click(screen.getByRole("button", { name: /^project$/i }));
-  await userEvent.click(screen.getByRole("button", { name: /^add$/i }));
+  await userEvent.click(screen.getByRole("button", { name: /add server/i }));
 
   await waitFor(() =>
-    expect(addMcpServer).toHaveBeenCalledWith("s1", "ctx", "npx", ["-y", "@context7/mcp"]),
+    expect(addMcpServer).toHaveBeenCalledWith("s1", "ctx", {
+      transport: "stdio",
+      command: "npx",
+      args: ["-y", "@context7/mcp"],
+    }),
   );
   expect(onChanged).toHaveBeenCalled();
+});
+
+test("Add MCP server (remote http) submits a url transport", async () => {
+  render(<CustomizationsDialog {...defaultProps} initialSection="mcp" />);
+
+  await userEvent.click(screen.getByRole("button", { name: /^add$/i }));
+  await userEvent.type(screen.getByPlaceholderText(/e\.g\. context7/i), "remote");
+  await userEvent.selectOptions(screen.getByRole("combobox", { name: /mcp transport/i }), "http");
+  await userEvent.type(screen.getByPlaceholderText(/https/i), "https://example.com/mcp");
+  await userEvent.click(screen.getByRole("button", { name: /^project$/i }));
+  await userEvent.click(screen.getByRole("button", { name: /add server/i }));
+
+  await waitFor(() =>
+    expect(addMcpServer).toHaveBeenCalledWith("s1", "remote", {
+      transport: "http",
+      url: "https://example.com/mcp",
+    }),
+  );
 });
 
 test("deleting an MCP server passes its source and name", async () => {

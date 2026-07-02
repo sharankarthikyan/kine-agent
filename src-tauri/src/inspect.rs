@@ -945,18 +945,60 @@ fn prune_empty_hook_groups(root: &mut serde_json::Map<String, serde_json::Value>
     }
 }
 
-/// Add an stdio MCP server (`command` + optional `args`) under `mcpServers` in an MCP JSON
-/// file. Rejects a duplicate name; creates the file when absent; preserves other keys.
+/// How an MCP server is reached. `Stdio` launches a local process (`command` + `args`);
+/// `Remote` connects to a URL over `http` or `sse`.
+#[derive(Debug, Clone)]
+pub enum McpTransport {
+    Stdio { command: String, args: Vec<String> },
+    Remote { kind: String, url: String },
+}
+
+impl McpTransport {
+    /// Build the JSON config object Claude expects for this transport.
+    fn to_config(&self) -> Result<serde_json::Map<String, serde_json::Value>, InspectError> {
+        let mut config = serde_json::Map::new();
+        match self {
+            McpTransport::Stdio { command, args } => {
+                if command.trim().is_empty() {
+                    return Err(InspectError::InvalidName("server command is empty".into()));
+                }
+                config.insert("command".into(), serde_json::Value::String(command.clone()));
+                if !args.is_empty() {
+                    config.insert(
+                        "args".into(),
+                        serde_json::Value::Array(
+                            args.iter().map(|a| serde_json::Value::String(a.clone())).collect(),
+                        ),
+                    );
+                }
+            }
+            McpTransport::Remote { kind, url } => {
+                if kind != "http" && kind != "sse" {
+                    return Err(InspectError::InvalidConfig(format!(
+                        "unknown MCP transport: {kind}"
+                    )));
+                }
+                if url.trim().is_empty() {
+                    return Err(InspectError::InvalidName("server url is empty".into()));
+                }
+                config.insert("type".into(), serde_json::Value::String(kind.clone()));
+                config.insert("url".into(), serde_json::Value::String(url.clone()));
+            }
+        }
+        Ok(config)
+    }
+}
+
+/// Add an MCP server under `mcpServers` in an MCP JSON file. Supports a local stdio server
+/// (`command` + optional `args`) or a remote `http`/`sse` server (`url`). Rejects a
+/// duplicate name; creates the file when absent; preserves other keys.
 pub fn add_mcp_server(
     mcp_path: &Path,
     name: &str,
-    command: &str,
-    args: &[String],
+    transport: &McpTransport,
 ) -> Result<(), InspectError> {
     validate_customization_name(name)?;
-    if command.trim().is_empty() {
-        return Err(InspectError::InvalidName("server command is empty".into()));
-    }
+    let config = transport.to_config()?;
     let mut root = read_json_object(mcp_path)?;
     let servers = root
         .entry("mcpServers")
@@ -966,18 +1008,6 @@ pub fn add_mcp_server(
         .ok_or_else(|| InspectError::InvalidConfig("`mcpServers` is not an object".into()))?;
     if servers.contains_key(name) {
         return Err(InspectError::AlreadyExists(name.to_string()));
-    }
-    let mut config = serde_json::Map::new();
-    config.insert("command".into(), serde_json::Value::String(command.to_string()));
-    if !args.is_empty() {
-        config.insert(
-            "args".into(),
-            serde_json::Value::Array(
-                args.iter()
-                    .map(|a| serde_json::Value::String(a.clone()))
-                    .collect(),
-            ),
-        );
     }
     servers.insert(name.to_string(), serde_json::Value::Object(config));
     write_json_object(mcp_path, &root)
@@ -1815,13 +1845,20 @@ mod tests {
 
     // ── add_mcp_server / delete_mcp_server tests ─────────────────────────────
 
+    fn stdio(command: &str, args: &[&str]) -> McpTransport {
+        McpTransport::Stdio {
+            command: command.to_string(),
+            args: args.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
     #[test]
     fn add_mcp_server_roundtrips_and_rejects_dupes() {
         let dir = std::env::temp_dir().join(format!("ae-addmcp-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mcp = dir.join(".mcp.json");
 
-        add_mcp_server(&mcp, "my-server", "node", &["server.js".to_string()]).unwrap();
+        add_mcp_server(&mcp, "my-server", &stdio("node", &["server.js"])).unwrap();
         let entries = list_mcp_servers_with_home(&dir, None);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name, "my-server");
@@ -1829,12 +1866,50 @@ mod tests {
 
         // Duplicate name rejected.
         assert!(matches!(
-            add_mcp_server(&mcp, "my-server", "python", &[]),
+            add_mcp_server(&mcp, "my-server", &stdio("python", &[])),
             Err(InspectError::AlreadyExists(_))
         ));
         // Bad name rejected.
         assert!(matches!(
-            add_mcp_server(&mcp, "../evil", "node", &[]),
+            add_mcp_server(&mcp, "../evil", &stdio("node", &[])),
+            Err(InspectError::InvalidName(_))
+        ));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn add_mcp_server_supports_remote_http_transport() {
+        let dir = std::env::temp_dir().join(format!("ae-addmcphttp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mcp = dir.join(".mcp.json");
+
+        add_mcp_server(
+            &mcp,
+            "remote",
+            &McpTransport::Remote {
+                kind: "http".into(),
+                url: "https://example.com/mcp".into(),
+            },
+        )
+        .unwrap();
+
+        let raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&mcp).unwrap()).unwrap();
+        let server = &raw["mcpServers"]["remote"];
+        assert_eq!(server["type"], "http");
+        assert_eq!(server["url"], "https://example.com/mcp");
+        // The listing surfaces the url as the detail (no command present).
+        let entries = list_mcp_servers_with_home(&dir, None);
+        assert_eq!(entries[0].detail.as_deref(), Some("https://example.com/mcp"));
+
+        // Unknown transport kind and empty url are rejected.
+        assert!(matches!(
+            add_mcp_server(&mcp, "bad", &McpTransport::Remote { kind: "ftp".into(), url: "x".into() }),
+            Err(InspectError::InvalidConfig(_))
+        ));
+        assert!(matches!(
+            add_mcp_server(&mcp, "empty", &McpTransport::Remote { kind: "http".into(), url: "  ".into() }),
             Err(InspectError::InvalidName(_))
         ));
 
@@ -1846,8 +1921,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ae-delmcp-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mcp = dir.join(".mcp.json");
-        add_mcp_server(&mcp, "keep", "node", &[]).unwrap();
-        add_mcp_server(&mcp, "drop", "python", &[]).unwrap();
+        add_mcp_server(&mcp, "keep", &stdio("node", &[])).unwrap();
+        add_mcp_server(&mcp, "drop", &stdio("python", &[])).unwrap();
 
         delete_mcp_server(&mcp, "drop").unwrap();
         let entries = list_mcp_servers_with_home(&dir, None);

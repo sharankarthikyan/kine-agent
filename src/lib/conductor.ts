@@ -101,16 +101,30 @@ export async function deleteHook(
   return invoke<void>("delete_hook", { sessionId, source, event, matcher, command });
 }
 
-/** Add an stdio MCP server (command + optional args) to the scope's MCP config. An active
- *  session writes to <worktree>/.mcp.json; `null` writes to ~/.claude.json. */
+/** MCP server transport: a local stdio process, or a remote http/sse endpoint. */
+export type McpTransport =
+  | { transport: "stdio"; command: string; args: string[] }
+  | { transport: "http" | "sse"; url: string };
+
+/** Add an MCP server to the scope's MCP config. An active session writes to
+ *  <worktree>/.mcp.json; `null` writes to ~/.claude.json. */
 export async function addMcpServer(
   sessionId: string | null,
   name: string,
-  command: string,
-  args: string[],
+  transport: McpTransport,
 ): Promise<void> {
   assertDesktop();
-  return invoke<void>("add_mcp_server", { sessionId, name, command, args });
+  const args = transport.transport === "stdio" ? transport.args : [];
+  const command = transport.transport === "stdio" ? transport.command : null;
+  const url = transport.transport === "stdio" ? null : transport.url;
+  return invoke<void>("add_mcp_server", {
+    sessionId,
+    name,
+    transport: transport.transport,
+    command,
+    args,
+    url,
+  });
 }
 
 /** Remove an MCP server by name from the config file for the entry's `source`. */

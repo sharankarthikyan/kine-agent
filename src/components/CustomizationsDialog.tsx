@@ -19,6 +19,7 @@ import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/select";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Dialog,
@@ -746,15 +747,16 @@ function HooksSection({
   search,
   onSearchChange,
   sessionId,
+  onAdd,
   onChanged,
 }: {
   hooks: HookEntry[];
   search: string;
   onSearchChange: (s: string) => void;
   sessionId: string | null;
+  onAdd: () => void;
   onChanged: () => void;
 }) {
-  const [adding, setAdding] = useState(false);
   const filtered = search
     ? hooks.filter(
         (h) =>
@@ -780,24 +782,12 @@ function HooksSection({
       search={search}
       onSearchChange={onSearchChange}
       action={
-        !adding && (
-          <Button variant="outline" size="sm" onClick={() => setAdding(true)}>
-            <Plus className="size-3.5" />
-            Add
-          </Button>
-        )
+        <Button variant="outline" size="sm" onClick={onAdd}>
+          <Plus className="size-3.5" />
+          Add
+        </Button>
       }
     >
-      {adding && (
-        <HookForm
-          sessionId={sessionId}
-          onAdded={() => {
-            setAdding(false);
-            onChanged();
-          }}
-          onCancel={() => setAdding(false)}
-        />
-      )}
       {filtered.length === 0 ? (
         <p className="px-4 py-2 text-sm text-muted-foreground">
           {hooks.length === 0 ? "No hooks configured." : "No matches"}
@@ -835,86 +825,6 @@ function HooksSection({
   );
 }
 
-// Inline form to add a hook: event (required), matcher (optional), command (required).
-function HookForm({
-  sessionId,
-  onAdded,
-  onCancel,
-}: {
-  sessionId: string | null;
-  onAdded: () => void;
-  onCancel: () => void;
-}) {
-  const [event, setEvent] = useState("");
-  const [matcher, setMatcher] = useState("");
-  const [command, setCommand] = useState("");
-  const [scope, setScope] = useState<Scope | null>(null);
-  const [busy, setBusy] = useState(false);
-  const valid =
-    event.trim() !== "" && command.trim() !== "" && scopeChosen(sessionId, scope);
-
-  async function submit() {
-    if (!valid) return;
-    setBusy(true);
-    try {
-      await addHook(
-        scopedSessionId(sessionId, scope),
-        event.trim(),
-        matcher.trim() || null,
-        command.trim()
-      );
-      toast.success(`Added ${event.trim()} hook`);
-      onAdded();
-    } catch (err) {
-      toast.error(String(err));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <div className="flex flex-col gap-2 px-2 py-2">
-      <div className="flex items-center gap-2">
-        <Input
-          autoFocus
-          value={event}
-          onChange={(e) => setEvent(e.target.value)}
-          placeholder="Event (e.g. PreToolUse)"
-          className="h-8 text-sm flex-1 min-w-0"
-          disabled={busy}
-        />
-        <Input
-          value={matcher}
-          onChange={(e) => setMatcher(e.target.value)}
-          placeholder="Matcher (optional)"
-          className="h-8 text-sm flex-1 min-w-0"
-          disabled={busy}
-        />
-        {sessionId !== null && <ScopeToggle value={scope} onChange={setScope} />}
-      </div>
-      <div className="flex items-center gap-2">
-        <Input
-          value={command}
-          onChange={(e) => setCommand(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") void submit();
-            if (e.key === "Escape") onCancel();
-          }}
-          placeholder="Command to run"
-          className="h-8 text-sm flex-1 min-w-0 font-mono"
-          disabled={busy}
-        />
-        <Button size="sm" onClick={() => void submit()} disabled={busy || !valid}>
-          {busy ? "Adding…" : "Add"}
-        </Button>
-        <Button variant="ghost" size="sm" onClick={onCancel} disabled={busy}>
-          Cancel
-        </Button>
-      </div>
-    </div>
-  );
-}
-
 // ─── MCP Servers section ──────────────────────────────────────────────────────
 
 function McpServersSection({
@@ -922,15 +832,16 @@ function McpServersSection({
   search,
   onSearchChange,
   sessionId,
+  onAdd,
   onChanged,
 }: {
   mcpServers: McpServerEntry[];
   search: string;
   onSearchChange: (s: string) => void;
   sessionId: string | null;
+  onAdd: () => void;
   onChanged: () => void;
 }) {
-  const [adding, setAdding] = useState(false);
   const filtered = search
     ? mcpServers.filter(
         (s) =>
@@ -956,24 +867,12 @@ function McpServersSection({
       search={search}
       onSearchChange={onSearchChange}
       action={
-        !adding && (
-          <Button variant="outline" size="sm" onClick={() => setAdding(true)}>
-            <Plus className="size-3.5" />
-            Add
-          </Button>
-        )
+        <Button variant="outline" size="sm" onClick={onAdd}>
+          <Plus className="size-3.5" />
+          Add
+        </Button>
       }
     >
-      {adding && (
-        <McpForm
-          sessionId={sessionId}
-          onAdded={() => {
-            setAdding(false);
-            onChanged();
-          }}
-          onCancel={() => setAdding(false)}
-        />
-      )}
       {filtered.length === 0 ? (
         <p className="px-4 py-2 text-sm text-muted-foreground">
           {mcpServers.length === 0 ? "No MCP servers configured." : "No matches"}
@@ -1005,31 +904,265 @@ function McpServersSection({
   );
 }
 
-// Inline form to add an stdio MCP server: name (required), command (required),
-// and optional whitespace-separated args.
-function McpForm({
+// ─── Add panels (in-dialog sub-views, mirroring the file detail view) ───────────
+//
+// Hooks and MCP servers are state-dependent, multi-field forms, so they push a full
+// panel with a back button rather than expanding a cramped inline row — and never a
+// second modal stacked on this dialog.
+
+// Claude Code hook events are a fixed set, and matcher semantics differ per event
+// (some match tool names, some a fixed enum, some ignore the matcher entirely). This
+// drives constrained inputs so a typo can't produce a hook that silently never fires.
+type HookMatcherSpec =
+  | { kind: "none" }
+  | { kind: "tool" }
+  | { kind: "enum"; values: string[] };
+
+interface HookEventDef {
+  event: string;
+  description: string;
+  matcher: HookMatcherSpec;
+}
+
+const HOOK_EVENTS: HookEventDef[] = [
+  { event: "PreToolUse", description: "Before a tool runs.", matcher: { kind: "tool" } },
+  { event: "PostToolUse", description: "After a tool completes.", matcher: { kind: "tool" } },
+  {
+    event: "UserPromptSubmit",
+    description: "When you submit a prompt. Fires on every prompt.",
+    matcher: { kind: "none" },
+  },
+  {
+    event: "Notification",
+    description: "On a Claude notification. Fires on every notification.",
+    matcher: { kind: "none" },
+  },
+  {
+    event: "Stop",
+    description: "When the main agent finishes responding.",
+    matcher: { kind: "none" },
+  },
+  {
+    event: "SubagentStop",
+    description: "When a subagent finishes.",
+    matcher: { kind: "none" },
+  },
+  {
+    event: "SessionStart",
+    description: "When a session starts.",
+    matcher: { kind: "enum", values: ["startup", "resume", "clear", "compact"] },
+  },
+  {
+    event: "SessionEnd",
+    description: "When a session ends.",
+    matcher: { kind: "enum", values: ["clear", "resume", "logout", "prompt_input_exit", "other"] },
+  },
+  {
+    event: "PreCompact",
+    description: "Before the context is compacted.",
+    matcher: { kind: "enum", values: ["manual", "auto"] },
+  },
+];
+
+// Shared shell for an add panel: back-button header, scrolling body, sticky footer —
+// the same chrome as FileDetailView so navigating in and out feels consistent.
+function AddPanelShell({
+  title,
+  onBack,
+  footer,
+  children,
+}: {
+  title: string;
+  onBack: () => void;
+  footer: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="flex flex-col h-full min-h-0">
+      <div className="flex items-center gap-2 p-3 border-b border-border shrink-0">
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          aria-label="Back"
+          onClick={onBack}
+          className="shrink-0"
+        >
+          <ArrowLeft className="size-4" />
+        </Button>
+        <span className="text-sm font-bold leading-tight">{title}</span>
+      </div>
+      <ScrollArea className="flex-1 min-h-0">
+        <div className="flex flex-col gap-4 p-4 max-w-xl">{children}</div>
+      </ScrollArea>
+      <div className="flex items-center justify-end gap-2 p-3 border-t border-border shrink-0">
+        {footer}
+      </div>
+    </div>
+  );
+}
+
+// A labelled form field with an optional hint below the control.
+function Field({
+  label,
+  hint,
+  children,
+}: {
+  label: string;
+  hint?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="flex flex-col gap-1.5">
+      <span className="text-sm font-medium">{label}</span>
+      {children}
+      {hint && <span className="text-xs text-muted-foreground leading-snug">{hint}</span>}
+    </div>
+  );
+}
+
+function HookAddPanel({
   sessionId,
+  onBack,
   onAdded,
-  onCancel,
 }: {
   sessionId: string | null;
+  onBack: () => void;
   onAdded: () => void;
-  onCancel: () => void;
 }) {
-  const [name, setName] = useState("");
+  const [event, setEvent] = useState("");
+  const [matcher, setMatcher] = useState("");
   const [command, setCommand] = useState("");
-  const [args, setArgs] = useState("");
   const [scope, setScope] = useState<Scope | null>(null);
   const [busy, setBusy] = useState(false);
-  const valid =
-    name.trim() !== "" && command.trim() !== "" && scopeChosen(sessionId, scope);
+
+  const def = HOOK_EVENTS.find((e) => e.event === event) ?? null;
+  const valid = event !== "" && command.trim() !== "" && scopeChosen(sessionId, scope);
 
   async function submit() {
     if (!valid) return;
     setBusy(true);
     try {
-      const argList = args.trim() ? args.trim().split(/\s+/) : [];
-      await addMcpServer(scopedSessionId(sessionId, scope), name.trim(), command.trim(), argList);
+      await addHook(
+        scopedSessionId(sessionId, scope),
+        event,
+        matcher.trim() || null,
+        command.trim()
+      );
+      toast.success(`Added ${event} hook`);
+      onAdded();
+    } catch (err) {
+      toast.error(String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <AddPanelShell
+      title="Add hook"
+      onBack={onBack}
+      footer={
+        <>
+          <Button variant="ghost" size="sm" onClick={onBack} disabled={busy}>
+            Cancel
+          </Button>
+          <Button size="sm" onClick={() => void submit()} disabled={busy || !valid}>
+            {busy ? "Adding…" : "Add hook"}
+          </Button>
+        </>
+      }
+    >
+      <Field label="Event" hint={def?.description}>
+        <Select
+          aria-label="Hook event"
+          value={event}
+          placeholder="Select an event…"
+          options={HOOK_EVENTS.map((e) => ({ value: e.event, label: e.event }))}
+          onChange={(e) => {
+            setEvent(e.target.value);
+            setMatcher(""); // matcher semantics change per event
+          }}
+        />
+      </Field>
+
+      {def?.matcher.kind === "tool" && (
+        <Field
+          label="Matcher"
+          hint="Tool name(s) — e.g. Bash, Edit|Write, or a regex like mcp__.*. Leave blank to match all tools."
+        >
+          <Input
+            value={matcher}
+            onChange={(e) => setMatcher(e.target.value)}
+            placeholder="Blank = all tools"
+            className="font-mono"
+          />
+        </Field>
+      )}
+      {def?.matcher.kind === "enum" && (
+        <Field label="Matcher" hint="Restrict to a specific trigger, or Any to match all.">
+          <Select
+            aria-label="Hook matcher"
+            value={matcher}
+            options={[
+              { value: "", label: "Any" },
+              ...def.matcher.values.map((v) => ({ value: v, label: v })),
+            ]}
+            onChange={(e) => setMatcher(e.target.value)}
+          />
+        </Field>
+      )}
+
+      <Field label="Command" hint="Shell command Claude runs when this hook fires.">
+        <Input
+          value={command}
+          onChange={(e) => setCommand(e.target.value)}
+          placeholder="e.g. npm run lint"
+          className="font-mono"
+        />
+      </Field>
+
+      {sessionId !== null && (
+        <Field label="Scope" hint="Where this hook is saved.">
+          <ScopeToggle value={scope} onChange={setScope} />
+        </Field>
+      )}
+    </AddPanelShell>
+  );
+}
+
+function McpAddPanel({
+  sessionId,
+  onBack,
+  onAdded,
+}: {
+  sessionId: string | null;
+  onBack: () => void;
+  onAdded: () => void;
+}) {
+  const [name, setName] = useState("");
+  const [transport, setTransport] = useState<"stdio" | "http">("stdio");
+  const [command, setCommand] = useState("");
+  const [args, setArgs] = useState("");
+  const [url, setUrl] = useState("");
+  const [scope, setScope] = useState<Scope | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const detailValid = transport === "stdio" ? command.trim() !== "" : url.trim() !== "";
+  const valid = name.trim() !== "" && detailValid && scopeChosen(sessionId, scope);
+
+  async function submit() {
+    if (!valid) return;
+    setBusy(true);
+    try {
+      const spec =
+        transport === "stdio"
+          ? {
+              transport: "stdio" as const,
+              command: command.trim(),
+              args: args.trim() ? args.trim().split(/\s+/) : [],
+            }
+          : { transport: "http" as const, url: url.trim() };
+      await addMcpServer(scopedSessionId(sessionId, scope), name.trim(), spec);
       toast.success(`Added ${name.trim()}`);
       onAdded();
     } catch (err) {
@@ -1040,45 +1173,72 @@ function McpForm({
   }
 
   return (
-    <div className="flex flex-col gap-2 px-2 py-2">
-      <div className="flex items-center gap-2">
-        <Input
-          autoFocus
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          placeholder="Server name"
-          className="h-8 text-sm flex-1 min-w-0"
-          disabled={busy}
+    <AddPanelShell
+      title="Add MCP server"
+      onBack={onBack}
+      footer={
+        <>
+          <Button variant="ghost" size="sm" onClick={onBack} disabled={busy}>
+            Cancel
+          </Button>
+          <Button size="sm" onClick={() => void submit()} disabled={busy || !valid}>
+            {busy ? "Adding…" : "Add server"}
+          </Button>
+        </>
+      }
+    >
+      <Field label="Name" hint="Unique identifier for this server.">
+        <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. context7" />
+      </Field>
+
+      <Field label="Transport" hint="How Claude connects to the server.">
+        <Select
+          aria-label="MCP transport"
+          value={transport}
+          options={[
+            { value: "stdio", label: "Local (stdio)" },
+            { value: "http", label: "Remote (HTTP)" },
+          ]}
+          onChange={(e) => setTransport(e.target.value as "stdio" | "http")}
         />
-        <Input
-          value={command}
-          onChange={(e) => setCommand(e.target.value)}
-          placeholder="Command (e.g. npx)"
-          className="h-8 text-sm flex-1 min-w-0 font-mono"
-          disabled={busy}
-        />
-        {sessionId !== null && <ScopeToggle value={scope} onChange={setScope} />}
-      </div>
-      <div className="flex items-center gap-2">
-        <Input
-          value={args}
-          onChange={(e) => setArgs(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") void submit();
-            if (e.key === "Escape") onCancel();
-          }}
-          placeholder="Args (optional, space-separated)"
-          className="h-8 text-sm flex-1 min-w-0 font-mono"
-          disabled={busy}
-        />
-        <Button size="sm" onClick={() => void submit()} disabled={busy || !valid}>
-          {busy ? "Adding…" : "Add"}
-        </Button>
-        <Button variant="ghost" size="sm" onClick={onCancel} disabled={busy}>
-          Cancel
-        </Button>
-      </div>
-    </div>
+      </Field>
+
+      {transport === "stdio" ? (
+        <>
+          <Field label="Command" hint="Executable to launch, e.g. npx.">
+            <Input
+              value={command}
+              onChange={(e) => setCommand(e.target.value)}
+              placeholder="e.g. npx"
+              className="font-mono"
+            />
+          </Field>
+          <Field label="Arguments" hint="Optional, space-separated.">
+            <Input
+              value={args}
+              onChange={(e) => setArgs(e.target.value)}
+              placeholder="e.g. -y @context7/mcp"
+              className="font-mono"
+            />
+          </Field>
+        </>
+      ) : (
+        <Field label="URL" hint="Endpoint of the remote MCP server.">
+          <Input
+            value={url}
+            onChange={(e) => setUrl(e.target.value)}
+            placeholder="https://…"
+            className="font-mono"
+          />
+        </Field>
+      )}
+
+      {sessionId !== null && (
+        <Field label="Scope" hint="Where this server is saved.">
+          <ScopeToggle value={scope} onChange={setScope} />
+        </Field>
+      )}
+    </AddPanelShell>
   );
 }
 
@@ -1204,6 +1364,8 @@ export function CustomizationsDialog({
   const [fileContent, setFileContent] = useState<string | null>(null);
   const [fileLoading, setFileLoading] = useState(false);
   const [fileError, setFileError] = useState(false);
+  // In-dialog add-panel view (hooks / MCP), mutually exclusive with the file detail view.
+  const [addPanel, setAddPanel] = useState<"hook" | "mcp" | null>(null);
   // Path of the most recently requested file read — lets an in-flight read detect that
   // a newer file was opened and bail out instead of clobbering the newer view.
   const latestRequestRef = useRef<string | null>(null);
@@ -1216,14 +1378,16 @@ export function CustomizationsDialog({
     if (!open) return;
     setActiveSection(initialSection);
     setDetail(null);
+    setAddPanel(null);
     setFileContent(null);
     setFileError(false);
     setFileLoading(false);
   }, [open, initialSection]);
 
-  // Clear detail + search whenever the active section changes (nav click or dialog open).
+  // Clear detail + add panel + search whenever the active section changes.
   useEffect(() => {
     setDetail(null);
+    setAddPanel(null);
     setSearch("");
     setFileContent(null);
     setFileError(false);
@@ -1332,6 +1496,24 @@ export function CustomizationsDialog({
                 onBack={handleBack}
                 onSaved={(newContent) => setFileContent(newContent)}
               />
+            ) : addPanel === "hook" ? (
+              <HookAddPanel
+                sessionId={sessionId}
+                onBack={() => setAddPanel(null)}
+                onAdded={() => {
+                  setAddPanel(null);
+                  notifyChanged();
+                }}
+              />
+            ) : addPanel === "mcp" ? (
+              <McpAddPanel
+                sessionId={sessionId}
+                onBack={() => setAddPanel(null)}
+                onAdded={() => {
+                  setAddPanel(null);
+                  notifyChanged();
+                }}
+              />
             ) : (
               <ScrollArea className="h-full">
                 {activeSection === "overview" && (
@@ -1385,6 +1567,7 @@ export function CustomizationsDialog({
                     search={search}
                     onSearchChange={setSearch}
                     sessionId={sessionId}
+                    onAdd={() => setAddPanel("hook")}
                     onChanged={notifyChanged}
                   />
                 )}
@@ -1394,6 +1577,7 @@ export function CustomizationsDialog({
                     search={search}
                     onSearchChange={setSearch}
                     sessionId={sessionId}
+                    onAdd={() => setAddPanel("mcp")}
                     onChanged={notifyChanged}
                   />
                 )}
