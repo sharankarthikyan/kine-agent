@@ -202,6 +202,11 @@ pub async fn drive_session(
                         handle_notification(&method, &params, sink.as_ref(), &mut final_text);
                     }
                     Some(Inbound::Request { id, method, params }) => {
+                        // TODO(M3): interactive approvals must NOT be awaited inline
+                        // here — a user deliberating head-of-line-blocks all
+                        // session/update streaming. Spawn the answer future with a
+                        // cloned RpcPeer instead. Fine for M1: auto-answers resolve
+                        // in one write.
                         answer_request(&peer, id, &method, &params, permission_mode.as_deref()).await;
                     }
                 }
@@ -256,13 +261,18 @@ async fn answer_request(
         // replaces this with the interactive option-based approval UI.
         let options = client::parse_permission_options(params);
         let selected = client::auto_select_option(&options, permission_mode);
-        let _ = client::respond_permission(peer, id, selected.as_deref()).await;
+        if let Err(e) = client::respond_permission(peer, id, selected.as_deref()).await {
+            eprintln!("acp: failed to answer {method}: {e}");
+        }
     } else {
         // fs/* (capability not advertised in M1), terminal/*, anything else:
         // immediate error so the child never hangs on a dangling request.
-        let _ = peer
+        if let Err(e) = peer
             .respond_error(id, -32601, &format!("{method} not supported"))
-            .await;
+            .await
+        {
+            eprintln!("acp: failed to answer {method}: {e}");
+        }
     }
 }
 
@@ -286,18 +296,32 @@ mod tests {
         captured: Arc<Mutex<Option<String>>>,
     }
 
-    /// Run drive_session against a scripted fake agent. The `script` closure gets
-    /// the agent side of the duplex after initialize + session/new are answered
-    /// and the session/prompt request has arrived (its id is passed along).
-    async fn run_fixture<F, Fut>(prompt: Prompt, script: F) -> Harness
+    type AgentReader =
+        tokio::io::Lines<tokio::io::BufReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>>;
+    type AgentWriter = tokio::io::WriteHalf<tokio::io::DuplexStream>;
+
+    /// Read the fake agent's next inbound line and assert its JSON-RPC method.
+    async fn next_request(lines: &mut AgentReader, method: &str) -> serde_json::Value {
+        let req: serde_json::Value =
+            serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        assert_eq!(req["method"], method);
+        req
+    }
+
+    /// Write one ndjson line from the fake agent.
+    async fn send_line(w: &mut AgentWriter, msg: serde_json::Value) {
+        w.write_all(format!("{msg}\n").as_bytes()).await.unwrap();
+    }
+
+    /// Run drive_session against a fully scripted fake agent: `agent` owns the
+    /// whole wire conversation from the initialize request onward.
+    async fn run_agent_fixture<F, Fut>(
+        prompt: Prompt,
+        resume_session: Option<String>,
+        agent: F,
+    ) -> Harness
     where
-        F: FnOnce(
-                tokio::io::Lines<tokio::io::BufReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>>,
-                tokio::io::WriteHalf<tokio::io::DuplexStream>,
-                serde_json::Value,
-            ) -> Fut
-            + Send
-            + 'static,
+        F: FnOnce(AgentReader, AgentWriter) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = ()> + Send,
     {
         let (ours, theirs) = tokio::io::duplex(64 * 1024);
@@ -306,30 +330,10 @@ mod tests {
         let sink: Box<dyn EventSink> = Box::new(Collect(Arc::clone(&events)));
         let captured = Arc::new(Mutex::new(None));
 
-        let agent = tokio::spawn(async move {
-            let (r, mut w) = tokio::io::split(theirs);
-            let mut lines = tokio::io::BufReader::new(r).lines();
-            // initialize
-            let req: serde_json::Value =
-                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
-            assert_eq!(req["method"], "initialize");
-            let resp = serde_json::json!({"jsonrpc":"2.0","id":req["id"],
-                "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":false}}});
-            w.write_all(format!("{resp}\n").as_bytes()).await.unwrap();
-            // session/new
-            let req: serde_json::Value =
-                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
-            assert_eq!(req["method"], "session/new");
-            assert_eq!(req["params"]["cwd"], "/wt");
-            let resp = serde_json::json!({"jsonrpc":"2.0","id":req["id"],
-                "result":{"sessionId":"acp-abc"}});
-            w.write_all(format!("{resp}\n").as_bytes()).await.unwrap();
-            // session/prompt
-            let req: serde_json::Value =
-                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
-            assert_eq!(req["method"], "session/prompt");
-            let prompt_id = req["id"].clone();
-            script(lines, w, prompt_id).await;
+        let agent_task = tokio::spawn(async move {
+            let (r, w) = tokio::io::split(theirs);
+            let lines = tokio::io::BufReader::new(r).lines();
+            agent(lines, w).await;
         });
 
         drive_session(
@@ -337,14 +341,44 @@ mod tests {
             write,
             prompt,
             "/wt".into(),
-            None,
+            resume_session,
             sink,
             Arc::clone(&captured),
         )
         .await
         .unwrap();
-        agent.await.unwrap();
+        agent_task.await.unwrap();
         Harness { events, captured }
+    }
+
+    /// Fresh-session shorthand: answers initialize (loadSession:false) and
+    /// session/new (sessionId "acp-abc"); the `script` closure takes over once
+    /// the session/prompt request has arrived (its id is passed along).
+    async fn run_fixture<F, Fut>(prompt: Prompt, script: F) -> Harness
+    where
+        F: FnOnce(AgentReader, AgentWriter, serde_json::Value) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send,
+    {
+        run_agent_fixture(prompt, None, |mut lines, mut w| async move {
+            let req = next_request(&mut lines, "initialize").await;
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                    "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":false}}}),
+            )
+            .await;
+            let req = next_request(&mut lines, "session/new").await;
+            assert_eq!(req["params"]["cwd"], "/wt");
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                    "result":{"sessionId":"acp-abc"}}),
+            )
+            .await;
+            let req = next_request(&mut lines, "session/prompt").await;
+            script(lines, w, req["id"].clone()).await;
+        })
+        .await
     }
 
     #[tokio::test]
@@ -439,6 +473,114 @@ mod tests {
         assert!(matches!(
             h.events.lock().unwrap().last().unwrap(),
             AgentEvent::Done { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn drive_session_resumes_via_session_load_when_supported() {
+        let prompt = Prompt {
+            text: "continue".into(),
+            ..Default::default()
+        };
+        let h = run_agent_fixture(prompt, Some("acp-abc".into()), |mut lines, mut w| async move {
+            let req = next_request(&mut lines, "initialize").await;
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                    "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}),
+            )
+            .await;
+            // loadSession:true + a resume id ⇒ session/load, NOT session/new.
+            let req = next_request(&mut lines, "session/load").await;
+            assert_eq!(req["params"]["sessionId"], "acp-abc");
+            assert_eq!(req["params"]["cwd"], "/wt");
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":req["id"],"result":{}}),
+            )
+            .await;
+            let req = next_request(&mut lines, "session/prompt").await;
+            assert_eq!(req["params"]["sessionId"], "acp-abc");
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                    "result":{"stopReason":"completed"}}),
+            )
+            .await;
+        })
+        .await;
+        assert_eq!(h.captured.lock().unwrap().as_deref(), Some("acp-abc"));
+        assert!(matches!(
+            h.events.lock().unwrap().last().unwrap(),
+            AgentEvent::Done { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn drive_session_falls_back_to_new_session_when_load_fails() {
+        let prompt = Prompt {
+            text: "continue".into(),
+            ..Default::default()
+        };
+        let h = run_agent_fixture(prompt, Some("acp-gone".into()), |mut lines, mut w| async move {
+            let req = next_request(&mut lines, "initialize").await;
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                    "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}),
+            )
+            .await;
+            // The agent no longer knows the session — a load error must degrade
+            // to a fresh session instead of failing the run.
+            let req = next_request(&mut lines, "session/load").await;
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                    "error":{"code":-32603,"message":"session not found"}}),
+            )
+            .await;
+            let req = next_request(&mut lines, "session/new").await;
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                    "result":{"sessionId":"acp-fresh"}}),
+            )
+            .await;
+            let req = next_request(&mut lines, "session/prompt").await;
+            assert_eq!(req["params"]["sessionId"], "acp-fresh");
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                    "result":{"stopReason":"completed"}}),
+            )
+            .await;
+        })
+        .await;
+        assert_eq!(h.captured.lock().unwrap().as_deref(), Some("acp-fresh"));
+        assert!(matches!(
+            h.events.lock().unwrap().last().unwrap(),
+            AgentEvent::Done { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn cancelled_stop_reason_emits_error_not_done() {
+        let prompt = Prompt {
+            text: "hello".into(),
+            ..Default::default()
+        };
+        let h = run_fixture(prompt, |_lines, mut w, prompt_id| async move {
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":prompt_id,
+                    "result":{"stopReason":"cancelled"}}),
+            )
+            .await;
+        })
+        .await;
+        assert!(matches!(
+            h.events.lock().unwrap().last().unwrap(),
+            AgentEvent::Error { message } if message.contains("cancelled")
         ));
     }
 }
