@@ -1992,4 +1992,70 @@ mod tests {
         let out = normalize_title(&long).unwrap();
         assert_eq!(out.chars().count(), 60);
     }
+
+    // ── Customization scope routing (the glue between IPC and inspect::) ──────
+    //
+    // Pins the branch that decides WHERE a customization mutation lands, so the UI's
+    // scope choice cannot silently write to the wrong place.
+
+    #[test]
+    fn global_scope_routes_to_the_user_claude_dir() {
+        // No active session → the ".global-scope" sentinel → the user's real ~/.claude
+        // (where list_capabilities also looks), NOT an empty per-app dir.
+        let root = super::worktree_root_for_opt(None);
+        let scope = super::inspect_scope(&root, None).unwrap();
+        assert!(
+            scope.ends_with(".global-scope"),
+            "no-session scope should be the global sentinel, got {scope:?}"
+        );
+        let claude_root = super::customization_claude_root(&scope);
+        assert_eq!(
+            claude_root,
+            crate::agent_paths::claude_config_dir().unwrap(),
+            "global create/delete must target the user's ~/.claude"
+        );
+        assert_ne!(claude_root, scope.join(".claude"));
+    }
+
+    #[test]
+    fn project_scope_routes_to_the_worktree_claude_dir() {
+        let wt = std::path::Path::new("/tmp/kl-verify-wt");
+        assert_eq!(super::customization_claude_root(wt), wt.join(".claude"));
+    }
+
+    // End-to-end run of the ACTUAL IPC command functions for GLOBAL scope, against a real
+    // (temp) ~/.claude via CLAUDE_CONFIG_DIR. #[ignore]d so it never mutates process env
+    // under the parallel suite; run explicitly:
+    //   cargo test --lib commands::tests::global_create_edit_delete_roundtrip -- --ignored --test-threads=1
+    #[tokio::test]
+    #[ignore]
+    async fn global_create_edit_delete_roundtrip() {
+        let tmp = std::env::temp_dir().join(format!("kl-verify-claude-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("CLAUDE_CONFIG_DIR", &tmp);
+
+        // create (global) → scaffolds <claude>/skills/verifyskill/SKILL.md
+        let path = super::create_customization(None, "skill".into(), "verifyskill".into())
+            .await
+            .expect("create should succeed");
+        let expected = tmp.join("skills/verifyskill/SKILL.md");
+        assert_eq!(std::path::Path::new(&path), expected, "created in wrong scope");
+        assert!(expected.is_file(), "skill file missing at {expected:?}");
+        assert!(std::fs::read_to_string(&expected).unwrap().contains("name: verifyskill"));
+
+        // edit (global) → write_text_file must be allowed for a ~/.claude file
+        super::write_text_file(None, path.clone(), "edited body".into())
+            .await
+            .expect("write should succeed");
+        assert_eq!(std::fs::read_to_string(&expected).unwrap(), "edited body");
+
+        // delete (global) → removes the whole skill directory
+        super::delete_customization(None, path)
+            .await
+            .expect("delete should succeed");
+        assert!(!expected.parent().unwrap().exists(), "skill dir should be gone");
+
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }
