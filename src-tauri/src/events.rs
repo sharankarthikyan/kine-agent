@@ -7,6 +7,11 @@ pub enum AgentEvent {
     Token {
         text: String,
     },
+    /// The agent's internal reasoning stream (ACP `agent_thought_chunk`). Rendered
+    /// collapsed; never part of the Done summary.
+    Thought {
+        text: String,
+    },
     ToolCall {
         name: String,
         input: String,
@@ -51,6 +56,13 @@ mod tests {
         let ev = AgentEvent::Token { text: "hi".into() };
         let json = serde_json::to_string(&ev).unwrap();
         assert_eq!(json, r#"{"kind":"token","data":{"text":"hi"}}"#);
+    }
+
+    #[test]
+    fn serializes_thought_as_tagged_camelcase() {
+        let ev = AgentEvent::Thought { text: "hmm".into() };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert_eq!(json, r#"{"kind":"thought","data":{"text":"hmm"}}"#);
     }
 
     #[test]

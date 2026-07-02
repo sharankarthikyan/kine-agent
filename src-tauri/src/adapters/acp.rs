@@ -296,13 +296,16 @@ fn handle_notification(
             final_text.push_str(&text);
             sink.emit(AgentEvent::Token { text });
         }
+        Some(SessionUpdate::Thought { text }) => {
+            sink.emit(AgentEvent::Thought { text });
+        }
         Some(SessionUpdate::ToolCall { title, raw_input }) => {
             sink.emit(AgentEvent::ToolCall {
                 name: title,
                 input: raw_input,
             });
         }
-        None => {} // thought/plan/tool_call_update/commands — M2+/M5.
+        None => {} // plan/tool_call_update/commands — M5.
     }
 }
 
@@ -479,6 +482,32 @@ mod tests {
         assert!(matches!(&events[1], AgentEvent::ToolCall { name, .. } if name == "Read main.rs"));
         assert!(matches!(events.last().unwrap(), AgentEvent::Done { summary } if summary == "Hi "));
         assert_eq!(h.captured.lock().unwrap().as_deref(), Some("acp-abc"));
+    }
+
+    #[tokio::test]
+    async fn thought_chunks_emit_thought_events_not_summary_text() {
+        let prompt = Prompt { text: "hello".into(), ..Default::default() };
+        let h = run_fixture(prompt, |_lines, mut w, prompt_id| async move {
+            for msg in [
+                serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{
+                    "sessionId":"acp-abc","update":{"sessionUpdate":"agent_thought_chunk",
+                    "content":{"type":"text","text":"SECRET THOUGHT"}}}}),
+                serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{
+                    "sessionId":"acp-abc","update":{"sessionUpdate":"agent_message_chunk",
+                    "content":{"type":"text","text":"visible answer"}}}}),
+            ] {
+                send_line(&mut w, msg).await;
+            }
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":prompt_id,
+                "result":{"stopReason":"completed"}})).await;
+        })
+        .await;
+        let events = h.events.lock().unwrap();
+        assert!(matches!(&events[0], AgentEvent::Thought { text } if text == "SECRET THOUGHT"));
+        assert!(matches!(&events[1], AgentEvent::Token { text } if text == "visible answer"));
+        // Thought text must NOT leak into the turn summary.
+        assert!(matches!(events.last().unwrap(),
+            AgentEvent::Done { summary } if summary == "visible answer"));
     }
 
     #[tokio::test]

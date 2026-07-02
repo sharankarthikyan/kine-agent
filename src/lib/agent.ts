@@ -16,6 +16,7 @@ export function assertDesktop(): void {
 
 export type AgentEvent =
   | { kind: "token"; data: { text: string } }
+  | { kind: "thought"; data: { text: string } }
   | { kind: "status"; data: { text: string } }
   | { kind: "toolCall"; data: { name: string; input: string } }
   | { kind: "fileWrite"; data: { path: string } }

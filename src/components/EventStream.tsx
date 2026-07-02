@@ -53,6 +53,15 @@ export function EventStream({ events, onOpenFile, onApprovalRespond }: EventStre
           </div>
         ) : group.kind === "prose" ? (
           <Markdown key={i}>{group.text}</Markdown>
+        ) : group.kind === "thought" ? (
+          // Reasoning stream: present but quiet — collapsed by default, native
+          // disclosure so no state is needed and historical turns behave identically.
+          <details key={i} className="w-full text-sm text-muted-foreground">
+            <summary className="cursor-pointer select-none italic">Thinking…</summary>
+            <div className="mt-1 border-l-2 border-muted pl-3">
+              <Markdown>{group.text}</Markdown>
+            </div>
+          </details>
         ) : (
           <Fragment key={i}>
             {renderEvent(group.event, hasProse, onOpenFile, onApprovalRespond)}
@@ -66,6 +75,7 @@ export function EventStream({ events, onOpenFile, onApprovalRespond }: EventStre
 type ChipGroup =
   | { kind: "chips"; events: AgentEvent[] }
   | { kind: "prose"; text: string }
+  | { kind: "thought"; text: string }
   | { kind: "single"; event: AgentEvent };
 
 /** Coalesce streaming text and chip bursts so a live turn reads as one stable flow. */
@@ -74,7 +84,11 @@ function groupEventRuns(events: AgentEvent[]): ChipGroup[] {
   for (const event of events) {
     const isChip = event.kind === "toolCall" || event.kind === "fileWrite";
     const last = groups[groups.length - 1];
-    if (event.kind === "token" && last && last.kind === "prose") {
+    if (event.kind === "thought" && last && last.kind === "thought") {
+      last.text += event.data.text;
+    } else if (event.kind === "thought") {
+      groups.push({ kind: "thought", text: event.data.text });
+    } else if (event.kind === "token" && last && last.kind === "prose") {
       last.text += event.data.text;
     } else if (event.kind === "token") {
       groups.push({ kind: "prose", text: event.data.text });
@@ -101,6 +115,10 @@ function renderEvent(
       // "prose" group rendered directly. Kept because removing the case would send
       // "token" into the default arm and break its `never` exhaustiveness check.
       return <Markdown>{event.data.text}</Markdown>;
+
+    case "thought":
+      // Unreachable: groupEventRuns coalesces thought runs into a "thought" group.
+      return null;
 
     case "status":
       return (

@@ -1,4 +1,4 @@
-//! Typed ACP layer over the ndjson JSON-RPC peer — only the M1 subset.
+//! Typed ACP layer over the ndjson JSON-RPC peer — the M1/M2 subset.
 //! Unknown fields/update kinds are ignored, never fatal (agents evolve).
 
 use super::jsonrpc::{RpcError, RpcPeer};
@@ -6,11 +6,12 @@ use serde_json::Value;
 
 pub const PROTOCOL_VERSION: u64 = 1;
 
-/// The session/update variants M1 consumes. Thought/plan/commands arrive on the
-/// wire but map to `None` until M2/M5.
+/// The session/update variants M1/M2 consume. Plan/commands arrive on the
+/// wire but map to `None` until M5.
 #[derive(Debug, PartialEq)]
 pub enum SessionUpdate {
     AgentMessageChunk { text: String },
+    Thought { text: String },
     ToolCall { title: String, raw_input: String },
 }
 
@@ -122,6 +123,13 @@ pub fn parse_session_update(params: &Value) -> Option<SessionUpdate> {
                 .to_string();
             Some(SessionUpdate::AgentMessageChunk { text })
         }
+        "agent_thought_chunk" => {
+            let text = update
+                .pointer("/content/text")
+                .and_then(Value::as_str)?
+                .to_string();
+            Some(SessionUpdate::Thought { text })
+        }
         "tool_call" => Some(SessionUpdate::ToolCall {
             title: update
                 .get("title")
@@ -133,7 +141,7 @@ pub fn parse_session_update(params: &Value) -> Option<SessionUpdate> {
                 .map(|v| v.to_string())
                 .unwrap_or_else(|| "{}".to_string()),
         }),
-        // thought/plan/tool_call_update/available_commands_update: M2+/M5.
+        // plan/tool_call_update/available_commands_update: M5.
         _ => None,
     }
 }
@@ -249,6 +257,21 @@ mod tests {
     }
 
     #[test]
+    fn parses_agent_thought_chunk_update() {
+        let params = serde_json::json!({
+            "sessionId": "s",
+            "update": {
+                "sessionUpdate": "agent_thought_chunk",
+                "content": {"type": "text", "text": "pondering"}
+            }
+        });
+        assert_eq!(
+            parse_session_update(&params),
+            Some(SessionUpdate::Thought { text: "pondering".into() })
+        );
+    }
+
+    #[test]
     fn parses_tool_call_update() {
         let params = serde_json::json!({
             "sessionId": "s",
@@ -274,7 +297,7 @@ mod tests {
             "sessionId": "s",
             "update": {"sessionUpdate": "plan", "entries": []}
         });
-        // M1 ignores plan/thought/commands updates.
+        // M2 still ignores plan/commands updates.
         assert_eq!(parse_session_update(&params), None);
     }
 

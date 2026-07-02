@@ -92,9 +92,25 @@ test("Deny calls onApprovalRespond with the request id and false", async () => {
 });
 
 test("renders nothing for an unknown event kind (forward compatibility)", () => {
-  // A newer backend may persist kinds this frontend build doesn't know (e.g. "thought").
-  const unknown = { kind: "thought", data: { text: "pondering" } } as unknown as AgentEvent;
+  // A newer backend may persist kinds this frontend build doesn't know (e.g. "plan").
+  const unknown = { kind: "plan", data: { text: "pondering" } } as unknown as AgentEvent;
   const { container } = render(<EventStream events={[unknown]} />);
   expect(container.textContent).not.toContain("pondering");
   // Must not throw "Objects are not valid as a React child".
+});
+
+test("coalesces consecutive thought chunks into one collapsed Thinking block", () => {
+  const events = [
+    { kind: "thought", data: { text: "step one " } },
+    { kind: "thought", data: { text: "step two" } },
+    { kind: "token", data: { text: "answer" } },
+  ] as AgentEvent[];
+  render(<EventStream events={events} />);
+  // One collapsed disclosure, not two.
+  expect(screen.getAllByText("Thinking…")).toHaveLength(1);
+  // Collapsed by default: thought text hidden until expanded.
+  const details = screen.getByText("Thinking…").closest("details");
+  expect(details).not.toHaveAttribute("open");
+  expect(screen.getByText(/step one step two/)).toBeInTheDocument(); // present in DOM (native details)
+  expect(screen.getByText("answer")).toBeInTheDocument();
 });
