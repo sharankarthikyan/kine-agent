@@ -49,29 +49,99 @@ pub async fn initialize(peer: &RpcPeer) -> Result<bool, RpcError> {
         }))
 }
 
-/// session/new → the agent-minted session id (persisted as external_thread_id).
+/// Session-mode state advertised by session/new (and session/load) responses.
+/// Absent/malformed fields degrade to empty — mode syncing is best-effort.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SessionModes {
+    pub current: Option<String>,
+    pub available: Vec<String>,
+}
+
+pub fn parse_modes(result: &Value) -> SessionModes {
+    let modes = result.get("modes");
+    SessionModes {
+        current: modes
+            .and_then(|m| m.get("currentModeId"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        available: modes
+            .and_then(|m| m.get("availableModes"))
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|m| m.get("id").and_then(Value::as_str).map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    }
+}
+
+/// The ACP session mode a Kineloop permission mode should run under. The agent
+/// otherwise inherits the USER'S OWN settings default (e.g. permissions.defaultMode
+/// "auto"), which silently auto-approves edits — "Ask before edits" must force
+/// the agent into a mode that actually asks. Falls back along same-or-safer
+/// semantics when the primary mapping isn't in `available`; an empty `available`
+/// (agent didn't advertise) trusts the primary mapping.
+pub fn acp_mode_for(permission_mode: Option<&str>, available: &[String]) -> String {
+    let chain: &[&str] = match permission_mode {
+        Some("acceptEdits") => &["acceptEdits", "default"],
+        Some("plan") => &["plan", "default"],
+        Some("full") => &["bypassPermissions", "acceptEdits", "default"],
+        Some("dontAsk") => &["dontAsk", "acceptEdits", "default"],
+        Some("auto") => &["auto", "default"],
+        _ => &["default"],
+    };
+    if available.is_empty() {
+        return chain[0].to_string();
+    }
+    chain
+        .iter()
+        .find(|m| available.iter().any(|a| a == *m))
+        .unwrap_or(&"default")
+        .to_string()
+}
+
+/// session/set_mode — point the agent at the session mode matching Kineloop's
+/// permission mode. Best-effort at the call site (a failure must not kill the run).
+pub async fn session_set_mode(peer: &RpcPeer, session_id: &str, mode_id: &str) -> Result<(), RpcError> {
+    peer.request(
+        "session/set_mode",
+        serde_json::json!({"sessionId": session_id, "modeId": mode_id}),
+    )
+    .await?;
+    Ok(())
+}
+
+/// session/new → the agent-minted session id (persisted as external_thread_id),
+/// plus the session-mode state the response advertised.
 /// A response without a sessionId is a hard error: an empty id would poison
 /// every later session/prompt and resume.
-pub async fn session_new(peer: &RpcPeer, cwd: &str) -> Result<String, RpcError> {
+pub async fn session_new(peer: &RpcPeer, cwd: &str) -> Result<(String, SessionModes), RpcError> {
     let result = peer
         .request("session/new", serde_json::json!({"cwd": cwd, "mcpServers": []}))
         .await?;
-    result
+    let session_id = result
         .get("sessionId")
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .map(str::to_string)
-        .ok_or_else(|| RpcError::Protocol("session/new: missing sessionId".into()))
+        .ok_or_else(|| RpcError::Protocol("session/new: missing sessionId".into()))?;
+    Ok((session_id, parse_modes(&result)))
 }
 
 /// session/load for resume. Errors surface to the caller (falls back to session/new).
-pub async fn session_load(peer: &RpcPeer, session_id: &str, cwd: &str) -> Result<(), RpcError> {
-    peer.request(
-        "session/load",
-        serde_json::json!({"sessionId": session_id, "cwd": cwd, "mcpServers": []}),
-    )
-    .await?;
-    Ok(())
+pub async fn session_load(
+    peer: &RpcPeer,
+    session_id: &str,
+    cwd: &str,
+) -> Result<SessionModes, RpcError> {
+    let result = peer
+        .request(
+            "session/load",
+            serde_json::json!({"sessionId": session_id, "cwd": cwd, "mcpServers": []}),
+        )
+        .await?;
+    Ok(parse_modes(&result))
 }
 
 /// session/prompt → stopReason ("completed" | "cancelled" | "resource_not_found").
@@ -293,6 +363,105 @@ mod tests {
         let err = session_new(&peer, "/w").await.unwrap_err();
         assert!(matches!(err, RpcError::Protocol(_)), "got {err:?}");
         agent_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_new_returns_parsed_modes_alongside_session_id() {
+        let (peer, agent_task) = harness_answering(serde_json::json!({
+            "sessionId": "acp-abc",
+            "modes": {
+                "currentModeId": "auto",
+                "availableModes": [
+                    {"id": "auto", "name": "Auto"},
+                    {"id": "default", "name": "Default"}
+                ]
+            }
+        }));
+        let (session_id, modes) = session_new(&peer, "/w").await.unwrap();
+        assert_eq!(session_id, "acp-abc");
+        assert_eq!(modes.current.as_deref(), Some("auto"));
+        assert_eq!(modes.available, vec!["auto".to_string(), "default".to_string()]);
+        agent_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_load_returns_parsed_modes() {
+        let (peer, agent_task) = harness_answering(serde_json::json!({
+            "modes": {
+                "currentModeId": "acceptEdits",
+                "availableModes": [{"id": "acceptEdits"}, {"id": "default"}]
+            }
+        }));
+        let modes = session_load(&peer, "s", "/w").await.unwrap();
+        assert_eq!(modes.current.as_deref(), Some("acceptEdits"));
+        assert_eq!(modes.available, vec!["acceptEdits".to_string(), "default".to_string()]);
+        agent_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_load_empty_result_yields_default_modes() {
+        let (peer, agent_task) = harness_answering(serde_json::json!({}));
+        let modes = session_load(&peer, "s", "/w").await.unwrap();
+        assert_eq!(modes, SessionModes::default());
+        agent_task.await.unwrap();
+    }
+
+    #[test]
+    fn parse_modes_happy_path() {
+        let result = serde_json::json!({
+            "sessionId": "s",
+            "modes": {
+                "currentModeId": "plan",
+                "availableModes": [
+                    {"id": "plan", "name": "Plan"},
+                    {"id": "default", "name": "Default"},
+                    {"id": "acceptEdits", "name": "Accept Edits"}
+                ]
+            }
+        });
+        let modes = parse_modes(&result);
+        assert_eq!(modes.current.as_deref(), Some("plan"));
+        assert_eq!(
+            modes.available,
+            vec!["plan".to_string(), "default".to_string(), "acceptEdits".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_modes_missing_modes_key_defaults_to_empty() {
+        let modes = parse_modes(&serde_json::json!({"sessionId": "s"}));
+        assert_eq!(modes, SessionModes::default());
+    }
+
+    #[test]
+    fn acp_mode_for_mapping_table() {
+        let all = vec![
+            "default".to_string(),
+            "acceptEdits".to_string(),
+            "plan".to_string(),
+            "bypassPermissions".to_string(),
+            "dontAsk".to_string(),
+            "auto".to_string(),
+        ];
+        assert_eq!(acp_mode_for(None, &all), "default");
+        assert_eq!(acp_mode_for(Some("acceptEdits"), &all), "acceptEdits");
+        assert_eq!(acp_mode_for(Some("plan"), &all), "plan");
+        assert_eq!(acp_mode_for(Some("full"), &all), "bypassPermissions");
+        assert_eq!(acp_mode_for(Some("dontAsk"), &all), "dontAsk");
+        assert_eq!(acp_mode_for(Some("auto"), &all), "auto");
+
+        // full → falls back to acceptEdits when bypassPermissions isn't advertised
+        let no_bypass = vec!["default".to_string(), "acceptEdits".to_string()];
+        assert_eq!(acp_mode_for(Some("full"), &no_bypass), "acceptEdits");
+
+        // empty available (agent didn't advertise) → primary mapping unclamped
+        assert_eq!(acp_mode_for(Some("acceptEdits"), &[]), "acceptEdits");
+        assert_eq!(acp_mode_for(Some("full"), &[]), "bypassPermissions");
+
+        // unknown-everything: only "default" advertised and permission_mode unmapped
+        let only_default = vec!["default".to_string()];
+        assert_eq!(acp_mode_for(Some("plan"), &only_default), "default");
+        assert_eq!(acp_mode_for(Some("weird-unknown-mode"), &only_default), "default");
     }
 
     #[tokio::test]

@@ -172,10 +172,10 @@ pub async fn drive_session(
     // Resume when the agent supports it; a failed/unsupported load degrades to a
     // fresh session (M5 adds the transcript-replay fallback so conversation
     // context isn't silently lost).
-    let acp_session_id = match resume_session {
+    let (acp_session_id, modes) = match resume_session {
         Some(id) if can_load => match load_discarding_replay(&peer, &mut inbound, &id, &cwd).await
         {
-            Ok(()) => id,
+            Ok(modes) => (id, modes),
             Err(e) => {
                 eprintln!("acp: session/load failed ({e}); starting a fresh session");
                 new_session(&peer, &cwd).await?
@@ -188,6 +188,19 @@ pub async fn drive_session(
     }
 
     let permission_mode = prompt.permission_mode.clone();
+
+    // The agent inherits the user's own settings default (often permissive).
+    // Force the session into the mode Kineloop's permission mode demands —
+    // otherwise "Ask before edits" never generates a permission request at all.
+    let target_mode = client::acp_mode_for(permission_mode.as_deref(), &modes.available);
+    if modes.current.as_deref() != Some(target_mode.as_str()) {
+        if let Err(e) = client::session_set_mode(&peer, &acp_session_id, &target_mode).await {
+            eprintln!(
+                "acp: session/set_mode {target_mode} failed: {e} — the agent may not honor this session's permission mode"
+            );
+        }
+    }
+
     let mut final_text = String::new();
     let prompt_fut = client::session_prompt(&peer, &acp_session_id, &prompt.text);
     tokio::pin!(prompt_fut);
@@ -247,7 +260,10 @@ pub async fn drive_session(
     }
 }
 
-async fn new_session(peer: &RpcPeer, cwd: &str) -> Result<String, SessionError> {
+async fn new_session(
+    peer: &RpcPeer,
+    cwd: &str,
+) -> Result<(String, client::SessionModes), SessionError> {
     client::session_new(peer, cwd)
         .await
         .map_err(|e| SessionError::Protocol(format!("session/new failed: {e}")))
@@ -257,13 +273,14 @@ async fn new_session(peer: &RpcPeer, cwd: &str) -> Result<String, SessionError> 
 /// requires the agent to replay the entire prior conversation as session/update
 /// notifications before answering session/load; Kineloop already persists that
 /// history itself, so re-emitting it would duplicate the transcript on every
-/// resume (and grow the events table multiplicatively).
+/// resume (and grow the events table multiplicatively). Returns the mode state
+/// the load response advertised on success.
 async fn load_discarding_replay(
     peer: &RpcPeer,
     inbound: &mut tokio::sync::mpsc::UnboundedReceiver<Inbound>,
     session_id: &str,
     cwd: &str,
-) -> Result<(), crate::acp::jsonrpc::RpcError> {
+) -> Result<client::SessionModes, crate::acp::jsonrpc::RpcError> {
     // The unbounded channel simply buffers the replay while we await the
     // response — but inbound REQUESTS still need answers (an agent blocking on
     // one mid-replay could never send the load response).
@@ -470,6 +487,13 @@ mod tests {
         req
     }
 
+    /// Read the fake agent's next inbound line without asserting its method —
+    /// for fixtures that need to branch on whether a session/set_mode request
+    /// shows up before session/prompt.
+    async fn next_line_value(lines: &mut AgentReader) -> serde_json::Value {
+        serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap()
+    }
+
     /// Write one ndjson line from the fake agent.
     async fn send_line(w: &mut AgentWriter, msg: serde_json::Value) {
         w.write_all(format!("{msg}\n").as_bytes()).await.unwrap();
@@ -600,8 +624,12 @@ mod tests {
     }
 
     /// Fresh-session shorthand: answers initialize (loadSession:false) and
-    /// session/new (sessionId "acp-abc"); the `script` closure takes over once
-    /// the session/prompt request has arrived (its id is passed along).
+    /// session/new (sessionId "acp-abc", modes default+acceptEdits available);
+    /// the `script` closure takes over once the session/prompt request has
+    /// arrived (its id is passed along). A Prompt whose permission_mode maps to
+    /// something other than "default" (e.g. "acceptEdits") makes drive_session
+    /// issue a session/set_mode first — answered here transparently with `{}` so
+    /// existing fixtures don't all need to know about mode syncing.
     async fn run_fixture<F, Fut>(prompt: Prompt, resolver: Option<Resolver>, script: F) -> Harness
     where
         F: FnOnce(AgentReader, AgentWriter, serde_json::Value) -> Fut + Send + 'static,
@@ -620,10 +648,19 @@ mod tests {
             send_line(
                 &mut w,
                 serde_json::json!({"jsonrpc":"2.0","id":req["id"],
-                    "result":{"sessionId":"acp-abc"}}),
+                    "result":{"sessionId":"acp-abc","modes":{"currentModeId":"default",
+                        "availableModes":[{"id":"default"},{"id":"acceptEdits"}]}}}),
             )
             .await;
-            let req = next_request(&mut lines, "session/prompt").await;
+            let next = next_line_value(&mut lines).await;
+            let req = if next["method"] == "session/set_mode" {
+                send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":next["id"],"result":{}}))
+                    .await;
+                next_request(&mut lines, "session/prompt").await
+            } else {
+                assert_eq!(next["method"], "session/prompt");
+                next
+            };
             script(lines, w, req["id"].clone()).await;
         })
         .await
@@ -672,6 +709,141 @@ mod tests {
             !events.iter().any(|e| matches!(e, AgentEvent::ApprovalNeeded { .. })),
             "autonomous modes answer without surfacing an approval card"
         );
+    }
+
+    /// The agent's session/new default differs from what Kineloop's permission
+    /// mode demands ("default" here, since permission_mode is None/"Ask before
+    /// edits") — drive_session must sync via session/set_mode before the first
+    /// session/prompt, or the agent silently runs under its own inherited
+    /// default (the actual bug this test guards against).
+    #[tokio::test]
+    async fn mode_synced_before_prompt_when_agent_default_differs() {
+        let prompt = Prompt {
+            text: "hello".into(),
+            permission_mode: None,
+            ..Default::default()
+        };
+        let h = run_agent_fixture(prompt, None, None, |mut lines, mut w| async move {
+            let req = next_request(&mut lines, "initialize").await;
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                    "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":false}}}),
+            )
+            .await;
+            let req = next_request(&mut lines, "session/new").await;
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                    "result":{"sessionId":"acp-abc","modes":{"currentModeId":"auto",
+                        "availableModes":[{"id":"auto"},{"id":"default"},{"id":"acceptEdits"},{"id":"plan"}]}}}),
+            )
+            .await;
+            let req = next_request(&mut lines, "session/set_mode").await;
+            assert_eq!(req["params"]["sessionId"], "acp-abc");
+            assert_eq!(req["params"]["modeId"], "default");
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],"result":{}})).await;
+            let req = next_request(&mut lines, "session/prompt").await;
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                    "result":{"stopReason":"completed"}}),
+            )
+            .await;
+        })
+        .await;
+        assert!(matches!(
+            h.events.lock().unwrap().last().unwrap(),
+            AgentEvent::Done { .. }
+        ));
+    }
+
+    /// Already matching ⇒ no session/set_mode is sent at all: the fixture's
+    /// `next_request(lines, "session/prompt")` assertion fails the test if one
+    /// sneaks in between session/new and session/prompt.
+    #[tokio::test]
+    async fn mode_sync_skipped_when_already_matching() {
+        let prompt = Prompt {
+            text: "hello".into(),
+            permission_mode: Some("acceptEdits".into()),
+            ..Default::default()
+        };
+        let h = run_agent_fixture(prompt, None, None, |mut lines, mut w| async move {
+            let req = next_request(&mut lines, "initialize").await;
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                    "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":false}}}),
+            )
+            .await;
+            let req = next_request(&mut lines, "session/new").await;
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                    "result":{"sessionId":"acp-abc","modes":{"currentModeId":"acceptEdits",
+                        "availableModes":[{"id":"default"},{"id":"acceptEdits"}]}}}),
+            )
+            .await;
+            let req = next_request(&mut lines, "session/prompt").await;
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                    "result":{"stopReason":"completed"}}),
+            )
+            .await;
+        })
+        .await;
+        assert!(matches!(
+            h.events.lock().unwrap().last().unwrap(),
+            AgentEvent::Done { .. }
+        ));
+    }
+
+    /// session/set_mode failing must not kill the run: log and continue to
+    /// session/prompt as if the mode weren't synced (best-effort by design).
+    #[tokio::test]
+    async fn mode_sync_failure_does_not_kill_the_run() {
+        let prompt = Prompt {
+            text: "hello".into(),
+            permission_mode: None,
+            ..Default::default()
+        };
+        let h = run_agent_fixture(prompt, None, None, |mut lines, mut w| async move {
+            let req = next_request(&mut lines, "initialize").await;
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                    "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":false}}}),
+            )
+            .await;
+            let req = next_request(&mut lines, "session/new").await;
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                    "result":{"sessionId":"acp-abc","modes":{"currentModeId":"auto",
+                        "availableModes":[{"id":"auto"},{"id":"default"}]}}}),
+            )
+            .await;
+            let req = next_request(&mut lines, "session/set_mode").await;
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                    "error":{"code":-32603,"message":"set_mode unsupported"}}),
+            )
+            .await;
+            let req = next_request(&mut lines, "session/prompt").await;
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                    "result":{"stopReason":"completed"}}),
+            )
+            .await;
+        })
+        .await;
+        assert!(matches!(
+            h.events.lock().unwrap().last().unwrap(),
+            AgentEvent::Done { .. }
+        ));
     }
 
     #[tokio::test]
@@ -911,9 +1083,12 @@ mod tests {
             }
             send_line(
                 &mut w,
-                serde_json::json!({"jsonrpc":"2.0","id":req["id"],"result":{}}),
+                serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                    "result":{"modes":{"currentModeId":"default","availableModes":[{"id":"default"}]}}}),
             )
             .await;
+            // Prompt permission_mode is None ("default") and the load response's
+            // currentModeId already matches — no session/set_mode should fire.
             let req = next_request(&mut lines, "session/prompt").await;
             assert_eq!(req["params"]["sessionId"], "acp-abc");
             // Live turn: one real chunk, then completion.
@@ -973,9 +1148,12 @@ mod tests {
             send_line(
                 &mut w,
                 serde_json::json!({"jsonrpc":"2.0","id":req["id"],
-                    "result":{"sessionId":"acp-fresh"}}),
+                    "result":{"sessionId":"acp-fresh","modes":{"currentModeId":"default",
+                        "availableModes":[{"id":"default"}]}}}),
             )
             .await;
+            // Prompt permission_mode is None ("default") and matches — no
+            // session/set_mode should fire.
             let req = next_request(&mut lines, "session/prompt").await;
             assert_eq!(req["params"]["sessionId"], "acp-fresh");
             send_line(
