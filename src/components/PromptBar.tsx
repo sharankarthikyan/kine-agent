@@ -27,6 +27,7 @@ import { AutocompletePopover } from "./AutocompletePopover";
 import { usePromptAutocomplete } from "@/lib/usePromptAutocomplete";
 import { buildPromptForAgent, needsPromptTransform } from "@/lib/mentions";
 import { readAnyFile, readWorktreeFile } from "@/lib/conductor";
+import type { AcpCommand } from "@/lib/acpCommands";
 
 interface PromptBarProps {
   onStart: (text: string, model: ModelInfo | null) => void;
@@ -38,6 +39,8 @@ interface PromptBarProps {
   agent: string;
   /** Active session id — enables `@file` / `/command` autocomplete and file inlining. */
   sessionId?: string;
+  /** ACP-advertised slash commands for this session; overrides `/` autocomplete. */
+  acpCommands?: AcpCommand[];
   /** The session's current permission mode. */
   permissionMode: PermissionMode;
   /** Called when the user picks a different permission mode. */
@@ -75,6 +78,7 @@ export function PromptBar({
   onModelChange,
   agent,
   sessionId,
+  acpCommands,
   permissionMode,
   onPermissionModeChange,
   sandboxTerminal = false,
@@ -84,7 +88,7 @@ export function PromptBar({
 }: PromptBarProps) {
   const [text, setText] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const ac = usePromptAutocomplete({ text, setText, textareaRef, sessionId, agent });
+  const ac = usePromptAutocomplete({ text, setText, textareaRef, sessionId, agent, acpCommands });
   const canSend = !running && text.trim().length > 0;
   const continuingExternal = mode === "external-continuation";
   const placeholder = continuingExternal

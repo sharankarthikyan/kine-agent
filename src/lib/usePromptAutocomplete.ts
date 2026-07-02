@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import type { RefObject } from "react";
 import {
+  acpCommandsToSuggestions,
   agentsToSuggestions,
   applySuggestion,
   commandsToSuggestions,
@@ -16,6 +17,7 @@ import {
 import { listCapabilities, type Capabilities } from "./inspect";
 import { listDir, worktreeTree, type TreeEntry } from "./conductor";
 import type { Mention } from "./mentions";
+import type { AcpCommand } from "./acpCommands";
 
 interface Options {
   text: string;
@@ -25,6 +27,9 @@ interface Options {
   sessionId?: string;
   /** Session agent id; commands/agents only populate for agents that expose them (claude today). */
   agent: string;
+  /** Live command list advertised by an ACP session; when present it overrides
+   * the filesystem-scan path (and its claude-only gate) for `/` suggestions. */
+  acpCommands?: AcpCommand[];
 }
 
 /** True when an `@` query addresses the filesystem (`@/…` or `@~/…`) rather than the repo. */
@@ -38,7 +43,14 @@ function isFilesystemQuery(trigger: TriggerContext | null): boolean {
  * mention registry for per-agent resolution on send, and returns the state + handlers the
  * composer and the `AutocompletePopover` need.
  */
-export function usePromptAutocomplete({ text, setText, textareaRef, sessionId, agent }: Options) {
+export function usePromptAutocomplete({
+  text,
+  setText,
+  textareaRef,
+  sessionId,
+  agent,
+  acpCommands,
+}: Options) {
   const [trigger, setTrigger] = useState<TriggerContext | null>(null);
   const [items, setItems] = useState<Suggestion[]>([]);
   const [activeIndex, setActiveIndex] = useState(0);
@@ -64,6 +76,9 @@ export function usePromptAutocomplete({ text, setText, textareaRef, sessionId, a
       const q = effectiveFilterQuery(t);
 
       if (t.trigger === "/") {
+        if (acpCommands && acpCommands.length > 0) {
+          return filterSuggestions(acpCommandsToSuggestions(acpCommands), q);
+        }
         if (agent !== "claude") return []; // only claude exposes headless-invocable commands
         cacheRef.current.caps ??= listCapabilities(sessionId, agent);
         return filterSuggestions(commandsToSuggestions(await cacheRef.current.caps), q);
@@ -84,7 +99,7 @@ export function usePromptAutocomplete({ text, setText, textareaRef, sessionId, a
       const agents = agentsToSuggestions(await cacheRef.current.caps);
       return filterSuggestions([...agents, ...files], q);
     },
-    [sessionId, agent],
+    [sessionId, agent, acpCommands],
   );
 
   // Load + set suggestions whenever the active trigger token changes.

@@ -258,6 +258,10 @@ function renderEvent(
       // Rendered by the Context panel, not the chat stream. Ignore here.
       return null;
 
+    case "commands":
+      // Feeds the composer's `/` autocomplete (via App state), not the transcript.
+      return null;
+
     case "toolStatus":
       // Filtered out of `visible` before grouping — this event never renders
       // its own row, it only decorates the matching toolCall chip. Case kept

@@ -312,7 +312,10 @@ fn handle_notification(
         Some(SessionUpdate::Plan { entries_json }) => {
             sink.emit(AgentEvent::Plan { entries_json });
         }
-        None => {} // available_commands_update — a later milestone.
+        Some(SessionUpdate::AvailableCommands { commands_json }) => {
+            sink.emit(AgentEvent::Commands { commands_json });
+        }
+        None => {} // unknown/future update kinds — ignored by design
     }
 }
 
@@ -531,6 +534,22 @@ mod tests {
         let events = h.events.lock().unwrap();
         assert!(matches!(&events[0],
             AgentEvent::Plan { entries_json } if entries_json.contains("Step A")));
+    }
+
+    #[tokio::test]
+    async fn available_commands_update_emits_commands_event() {
+        let prompt = Prompt { text: "hello".into(), ..Default::default() };
+        let h = run_fixture(prompt, |_lines, mut w, prompt_id| async move {
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{
+                "sessionId":"acp-abc","update":{"sessionUpdate":"available_commands_update",
+                "availableCommands":[{"name":"web","description":"Search the web"}]}}})).await;
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":prompt_id,
+                "result":{"stopReason":"completed"}})).await;
+        })
+        .await;
+        let events = h.events.lock().unwrap();
+        assert!(matches!(&events[0],
+            AgentEvent::Commands { commands_json } if commands_json.contains("web")));
     }
 
     #[tokio::test]

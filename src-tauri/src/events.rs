@@ -57,6 +57,13 @@ pub enum AgentEvent {
     Plan {
         entries_json: String,
     },
+    /// Slash commands the agent currently accepts (ACP `available_commands_update`).
+    /// `commands_json` is a JSON array of `{name, description}`; feeds the composer's
+    /// `/` autocomplete. Hidden in the transcript.
+    #[serde(rename_all = "camelCase")]
+    Commands {
+        commands_json: String,
+    },
     /// Token usage + cost for a completed run (normalized across agents).
     #[serde(rename_all = "camelCase")]
     Usage {
@@ -167,6 +174,15 @@ mod tests {
         assert_eq!(
             json,
             r#"{"kind":"usage","data":{"inputTokens":100,"outputTokens":200,"cacheReadTokens":50,"cacheCreationTokens":25,"costUsd":0.003,"model":"claude-opus-4-5"}}"#
+        );
+    }
+
+    #[test]
+    fn serializes_commands_with_commands_json() {
+        let ev = AgentEvent::Commands { commands_json: "[]".into() };
+        assert_eq!(
+            serde_json::to_string(&ev).unwrap(),
+            r#"{"kind":"commands","data":{"commandsJson":"[]"}}"#
         );
     }
 

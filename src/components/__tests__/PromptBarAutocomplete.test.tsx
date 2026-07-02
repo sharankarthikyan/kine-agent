@@ -134,6 +134,18 @@ test("does not open the command menu for an absolute path (interior slash)", asy
   expect(screen.queryByRole("option")).not.toBeInTheDocument();
 });
 
+test("ACP commands override the claude-only gate for '/' suggestions", async () => {
+  // agent="codex": the static path returns nothing, so any suggestion proves
+  // the override fed the menu.
+  setup({
+    agent: "codex",
+    sessionId: "s1",
+    acpCommands: [{ name: "web", description: "Search the web" }],
+  });
+  await userEvent.type(screen.getByPlaceholderText(PLACEHOLDER), "/w");
+  expect(await screen.findByRole("option", { name: /\/web/ })).toBeInTheDocument();
+});
+
 // ── @agent mentions (claude) ──────────────────────────────────────────────────────
 
 test("typing @ surfaces claude subagents alongside files", async () => {

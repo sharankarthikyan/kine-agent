@@ -221,6 +221,25 @@ export function commandsToSuggestions(caps: Capabilities): Suggestion[] {
 }
 
 /**
+ * Build `/command` suggestions from an ACP agent's advertised command list
+ * (`available_commands_update`). Unlike `commandsToSuggestions`, the source is
+ * the live protocol — no filesystem scan and no claude-only gate.
+ */
+export function acpCommandsToSuggestions(
+  commands: { name: string; description: string }[],
+): Suggestion[] {
+  return commands.map((c) => ({
+    id: `cmd:${c.name}`,
+    kind: "command",
+    label: `/${c.name}`,
+    insertText: `/${c.name}`,
+    description: c.description || null,
+    detail: "agent command",
+    searchText: c.name,
+  }));
+}
+
+/**
  * Build `@agent-<name>` suggestions from a session's subagents. Offered only for Claude (the
  * only agent whose subagents Kineloop can enumerate); on send the token is expanded to a
  * natural-language nudge, since the raw `@agent-` token is cosmetic in headless mode.

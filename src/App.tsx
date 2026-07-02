@@ -88,6 +88,7 @@ import {
   type Capabilities,
 } from "./lib/inspect";
 import { turnsFromEvents } from "./lib/turns";
+import { lastAcpCommands } from "./lib/acpCommands";
 import {
   branchChanges as fetchBranchChanges,
   worktreeTree as fetchWorktreeTree,
@@ -1938,6 +1939,11 @@ export default function App() {
                           sessionId={
                             pane.sessionId !== null && paneSession?.source !== "external"
                               ? pane.sessionId
+                              : undefined
+                          }
+                          acpCommands={
+                            pane.sessionId !== null
+                              ? lastAcpCommands(eventsBySession[pane.sessionId] ?? [])
                               : undefined
                           }
                           permissionMode={permissionModeForSession(paneSession)}

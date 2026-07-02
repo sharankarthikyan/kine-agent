@@ -6,8 +6,7 @@ use serde_json::Value;
 
 pub const PROTOCOL_VERSION: u64 = 1;
 
-/// The session/update variants M1/M2 consume. `available_commands_update`
-/// arrives on the wire but maps to `None` until a later milestone.
+/// The session/update variants M1/M2 consume.
 #[derive(Debug, PartialEq)]
 pub enum SessionUpdate {
     AgentMessageChunk { text: String },
@@ -15,6 +14,9 @@ pub enum SessionUpdate {
     ToolCall { title: String, raw_input: String, tool_call_id: Option<String> },
     ToolCallUpdate { tool_call_id: String, status: String, detail: String },
     Plan { entries_json: String },
+    /// `available_commands_update` — `commands_json` is a JSON array of
+    /// `{name, description}`; entries without a name are dropped.
+    AvailableCommands { commands_json: String },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -171,7 +173,24 @@ pub fn parse_session_update(params: &Value) -> Option<SessionUpdate> {
             }
             Some(SessionUpdate::Plan { entries_json: entries.to_string() })
         }
-        // available_commands_update: a later milestone.
+        "available_commands_update" => {
+            let commands: Vec<Value> = update
+                .get("availableCommands")
+                .and_then(Value::as_array)?
+                .iter()
+                .filter_map(|c| {
+                    let name = c.get("name").and_then(Value::as_str)?;
+                    Some(serde_json::json!({
+                        "name": name,
+                        "description": c.get("description").and_then(Value::as_str).unwrap_or(""),
+                    }))
+                })
+                .collect();
+            Some(SessionUpdate::AvailableCommands {
+                commands_json: Value::Array(commands).to_string(),
+            })
+        }
+        // unknown/future update kinds — ignored by design
         _ => None,
     }
 }
@@ -388,6 +407,29 @@ mod tests {
             "update": {"sessionUpdate": "plan"}
         });
         assert_eq!(parse_session_update(&params), None);
+    }
+
+    #[test]
+    fn parses_available_commands_update() {
+        let params = serde_json::json!({
+            "sessionId": "s",
+            "update": {"sessionUpdate": "available_commands_update", "availableCommands": [
+                {"name": "web", "description": "Search the web", "input": {"hint": "query"}},
+                {"description": "no name — dropped"},
+                {"name": "plan", "description": "Plan first"}
+            ]}
+        });
+        match parse_session_update(&params) {
+            Some(SessionUpdate::AvailableCommands { commands_json }) => {
+                let parsed: serde_json::Value = serde_json::from_str(&commands_json).unwrap();
+                let arr = parsed.as_array().unwrap();
+                assert_eq!(arr.len(), 2); // nameless entry dropped
+                assert_eq!(arr[0]["name"], "web");
+                assert_eq!(arr[0]["description"], "Search the web");
+                assert_eq!(arr[1]["name"], "plan");
+            }
+            other => panic!("expected AvailableCommands, got {other:?}"),
+        }
     }
 
     #[test]

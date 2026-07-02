@@ -113,6 +113,14 @@ test("malformed plan entriesJson renders nothing, not a crash", () => {
   expect(container.textContent).not.toContain("not json");
 });
 
+test("commands events render nothing in the transcript", () => {
+  const events = [
+    { kind: "commands", data: { commandsJson: JSON.stringify([{ name: "web", description: "" }]) } },
+  ] as AgentEvent[];
+  const { container } = render(<EventStream events={events} />);
+  expect(container.textContent).not.toContain("web");
+});
+
 test("renders an error event with alert role", () => {
   const events: AgentEvent[] = [{ kind: "error", data: { message: "boom" } }];
   render(<EventStream events={events} />);

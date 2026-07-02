@@ -21,6 +21,7 @@ export type AgentEvent =
   | { kind: "toolCall"; data: { name: string; input: string; toolCallId?: string } }
   | { kind: "toolStatus"; data: { toolCallId: string; status: string; detail: string } }
   | { kind: "plan"; data: { entriesJson: string } }
+  | { kind: "commands"; data: { commandsJson: string } }
   | { kind: "fileWrite"; data: { path: string } }
   | {
       kind: "approvalNeeded";
