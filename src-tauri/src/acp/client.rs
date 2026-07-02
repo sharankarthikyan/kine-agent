@@ -79,17 +79,19 @@ pub fn parse_modes(result: &Value) -> SessionModes {
 /// The ACP session mode a Kineloop permission mode should run under. The agent
 /// otherwise inherits the USER'S OWN settings default (e.g. permissions.defaultMode
 /// "auto"), which silently auto-approves edits — "Ask before edits" must force
-/// the agent into a mode that actually asks. Falls back along same-or-safer
-/// semantics when the primary mapping isn't in `available`; an empty `available`
-/// (agent didn't advertise) trusts the primary mapping.
+/// the agent into a mode that actually asks. Chains cover both claude-agent-acp ids
+/// (acceptEdits, bypassPermissions, plan, dontAsk, auto) and codex-acp ids
+/// (read-only, auto, full-access). Falls back along same-or-safer semantics when
+/// the primary mapping isn't in `available`; an empty `available` (agent didn't
+/// advertise) trusts the primary (claude-shaped) mapping.
 pub fn acp_mode_for(permission_mode: Option<&str>, available: &[String]) -> String {
     let chain: &[&str] = match permission_mode {
-        Some("acceptEdits") => &["acceptEdits", "default"],
-        Some("plan") => &["plan", "default"],
-        Some("full") => &["bypassPermissions", "acceptEdits", "default"],
-        Some("dontAsk") => &["dontAsk", "acceptEdits", "default"],
+        Some("acceptEdits") => &["acceptEdits", "auto", "default"],
+        Some("plan") => &["plan", "read-only", "default"],
+        Some("full") => &["bypassPermissions", "full-access", "acceptEdits", "auto", "default"],
+        Some("dontAsk") => &["dontAsk", "full-access", "acceptEdits", "auto", "default"],
         Some("auto") => &["auto", "default"],
-        _ => &["default"],
+        _ => &["default", "read-only"],
     };
     if available.is_empty() {
         return chain[0].to_string();
@@ -451,6 +453,25 @@ mod tests {
     }
 
     #[test]
+    fn acp_mode_for_maps_onto_codex_mode_ids() {
+        // codex-acp v0.16.0 advertises these preset ids (source-verified).
+        let codex = vec![
+            "read-only".to_string(),
+            "auto".to_string(),
+            "full-access".to_string(),
+        ];
+        // "Ask before edits" must land on read-only — codex then requests
+        // permission for mutations instead of silently applying them.
+        assert_eq!(acp_mode_for(None, &codex), "read-only");
+        assert_eq!(acp_mode_for(Some("plan"), &codex), "read-only");
+        // acceptEdits ≈ codex auto (workspace-write, asks only for escalations).
+        assert_eq!(acp_mode_for(Some("acceptEdits"), &codex), "auto");
+        assert_eq!(acp_mode_for(Some("full"), &codex), "full-access");
+        assert_eq!(acp_mode_for(Some("dontAsk"), &codex), "full-access");
+        assert_eq!(acp_mode_for(Some("auto"), &codex), "auto");
+    }
+
+    #[test]
     fn acp_mode_for_mapping_table() {
         let all = vec![
             "default".to_string(),
@@ -470,6 +491,10 @@ mod tests {
         // full → falls back to acceptEdits when bypassPermissions isn't advertised
         let no_bypass = vec!["default".to_string(), "acceptEdits".to_string()];
         assert_eq!(acp_mode_for(Some("full"), &no_bypass), "acceptEdits");
+
+        // full → auto when only auto/default are advertised (codex-ish list).
+        let only_auto = vec!["auto".to_string(), "default".to_string()];
+        assert_eq!(acp_mode_for(Some("full"), &only_auto), "auto");
 
         // empty available (agent didn't advertise) → primary mapping unclamped
         assert_eq!(acp_mode_for(Some("acceptEdits"), &[]), "acceptEdits");
