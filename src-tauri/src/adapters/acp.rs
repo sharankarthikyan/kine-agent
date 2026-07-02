@@ -1,0 +1,441 @@
+//! ACP engine adapter: drives an ACP agent subprocess (claude-agent-acp in M1)
+//! over ndjson JSON-RPC stdio. See docs/superpowers/specs/2026-07-01-acp-adapter-design.md.
+//!
+//! M1 scope: text + tool-call streaming, permissions auto-answered from the
+//! session's permission mode, no fs proxy (capability not advertised, so the
+//! agent uses its own file access exactly like the pipe engine), no usage event
+//! (ACP does not standardize usage), immediate-kill cancel via `kill_on_drop`.
+
+use crate::acp::client::{self, SessionUpdate};
+use crate::acp::jsonrpc::{Inbound, RpcPeer};
+use crate::adapter::{AgentAdapter, EventSink, Prompt, SessionError};
+use crate::events::AgentEvent;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, BufReader};
+use tokio::process::Command;
+
+/// Version-pinned launcher. Unpinned npx drifts to @latest; a silent protocol
+/// bump must be a deliberate, tested upgrade — not a runtime surprise.
+pub const CLAUDE_ACP_PACKAGE: &str = "@agentclientprotocol/claude-agent-acp@0.54.1";
+
+/// Adapter that drives an ACP agent (Claude in M1) as a subprocess.
+///
+/// The agent mints its own ACP session id in `session/new`; we capture it into
+/// [`AcpAdapter::captured_session`] so the command layer can persist it
+/// (`external_thread_id`) and resume with `session/load` on later turns.
+pub struct AcpAdapter {
+    captured_session: Arc<Mutex<Option<String>>>,
+}
+
+impl AcpAdapter {
+    pub fn new(captured_session: Arc<Mutex<Option<String>>>) -> Self {
+        Self { captured_session }
+    }
+}
+
+impl AgentAdapter for AcpAdapter {
+    fn run(
+        &self,
+        prompt: Prompt,
+        cwd: PathBuf,
+        session_id: String,
+        resume: bool,
+        sink: Box<dyn EventSink>,
+    ) -> impl std::future::Future<Output = Result<(), SessionError>> + Send {
+        spawn_and_drive(
+            prompt,
+            cwd,
+            session_id,
+            resume,
+            sink,
+            self.captured_session.clone(),
+        )
+    }
+}
+
+/// Spawn the ACP agent subprocess and run the protocol loop over its stdio.
+async fn spawn_and_drive(
+    prompt: Prompt,
+    cwd: PathBuf,
+    session_id: String,
+    resume: bool,
+    sink: Box<dyn EventSink>,
+    captured_session: Arc<Mutex<Option<String>>>,
+) -> Result<(), SessionError> {
+    // resolve_program falls back to the bare name on lookup failure, which would
+    // yield a generic "No such file" from spawn — check explicitly so the user
+    // gets an actionable message instead.
+    if which::which("npx").is_err() {
+        return Err(SessionError::Spawn(
+            "Node.js (npx) is required for the ACP engine — install Node or switch the session back to the default engine".into(),
+        ));
+    }
+    let npx = crate::agent_paths::resolve_program("npx");
+    let mut child = Command::new(&npx)
+        .arg("--yes")
+        .arg(CLAUDE_ACP_PACKAGE)
+        .current_dir(&cwd)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| SessionError::Spawn(format!("npx {CLAUDE_ACP_PACKAGE}: {e}")))?;
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| SessionError::Spawn("no stdin".into()))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| SessionError::Spawn("no stdout".into()))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| SessionError::Spawn("no stderr".into()))?;
+
+    // Drain stderr concurrently so a full pipe buffer can't deadlock stdout —
+    // same tail-keeping pattern as the codex adapter.
+    let stderr_task = tokio::spawn(async move {
+        let mut buf = String::new();
+        let _ = BufReader::new(stderr).read_to_string(&mut buf).await;
+        let lines: Vec<&str> = buf.lines().collect();
+        let start = lines.len().saturating_sub(20);
+        lines[start..].join("\n")
+    });
+
+    // On resume, `session_id` is the previously captured ACP session id
+    // (external_thread_id), threaded in by the (agent, engine) dispatch — the
+    // mirror of `resume_target` for codex/antigravity.
+    let resume_id = if resume { Some(session_id) } else { None };
+    let result = drive_session(
+        stdout,
+        stdin,
+        prompt,
+        cwd.to_string_lossy().to_string(),
+        resume_id,
+        sink,
+        captured_session,
+    )
+    .await;
+
+    let stderr_tail = stderr_task.await.unwrap_or_default();
+    let _ = child.kill().await;
+    if result.is_err() && !stderr_tail.trim().is_empty() {
+        eprintln!("acp agent stderr tail: {}", stderr_tail.trim());
+    }
+    result
+}
+
+/// Protocol loop, separated from process spawning so fixture tests can drive it
+/// over an in-memory duplex instead of a real child process.
+pub async fn drive_session(
+    read: impl AsyncRead + Unpin + Send + 'static,
+    write: impl AsyncWrite + Unpin + Send + 'static,
+    prompt: Prompt,
+    cwd: String,
+    resume_session: Option<String>,
+    sink: Box<dyn EventSink>,
+    captured_session: Arc<Mutex<Option<String>>>,
+) -> Result<(), SessionError> {
+    let peer = RpcPeer::start(read, write);
+    let mut inbound = peer.inbound();
+
+    let can_load = client::initialize(&peer)
+        .await
+        .map_err(|e| SessionError::Spawn(format!("ACP initialize failed: {e}")))?;
+
+    // Resume when the agent supports it; a failed/unsupported load degrades to a
+    // fresh session (M5 adds the transcript-replay fallback so conversation
+    // context isn't silently lost).
+    let acp_session_id = match resume_session {
+        Some(id) if can_load => match client::session_load(&peer, &id, &cwd).await {
+            Ok(()) => id,
+            Err(e) => {
+                eprintln!("acp: session/load failed ({e}); starting a fresh session");
+                new_session(&peer, &cwd).await?
+            }
+        },
+        _ => new_session(&peer, &cwd).await?,
+    };
+    if let Ok(mut guard) = captured_session.lock() {
+        *guard = Some(acp_session_id.clone());
+    }
+
+    let permission_mode = prompt.permission_mode.clone();
+    let mut final_text = String::new();
+    let prompt_fut = client::session_prompt(&peer, &acp_session_id, &prompt.text);
+    tokio::pin!(prompt_fut);
+
+    loop {
+        tokio::select! {
+            // Deterministic priority: a completed turn beats a closing connection.
+            // The agent may exit right after answering session/prompt; without
+            // `biased`, the racing inbound-channel EOF could win the select and
+            // turn a successful run into a spurious "connection closed" error.
+            biased;
+            stop = &mut prompt_fut => {
+                match stop {
+                    Ok(reason) if reason == "cancelled" => {
+                        sink.emit(AgentEvent::Error { message: "turn cancelled by agent".into() });
+                    }
+                    Ok(_) => sink.emit(AgentEvent::Done { summary: final_text.clone() }),
+                    Err(e) => sink.emit(AgentEvent::Error { message: format!("ACP turn failed: {e}") }),
+                }
+                return Ok(());
+            }
+            msg = inbound.recv() => {
+                match msg {
+                    None => {
+                        sink.emit(AgentEvent::Error { message: "ACP agent closed the connection".into() });
+                        return Ok(());
+                    }
+                    // Notifications only emit (synchronous); requests only talk to the
+                    // peer. Keeping the two apart means the `&dyn EventSink` borrow never
+                    // lives across an await, so this future stays `Send` without
+                    // requiring `EventSink: Sync`.
+                    Some(Inbound::Notification { method, params }) => {
+                        handle_notification(&method, &params, sink.as_ref(), &mut final_text);
+                    }
+                    Some(Inbound::Request { id, method, params }) => {
+                        answer_request(&peer, id, &method, &params, permission_mode.as_deref()).await;
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn new_session(peer: &RpcPeer, cwd: &str) -> Result<String, SessionError> {
+    client::session_new(peer, cwd)
+        .await
+        .map_err(|e| SessionError::Spawn(format!("session/new failed: {e}")))
+}
+
+/// Map a session/update notification onto AgentEvents. Synchronous by design —
+/// see the comment at the call site about `Send` and the sink borrow.
+fn handle_notification(
+    method: &str,
+    params: &serde_json::Value,
+    sink: &dyn EventSink,
+    final_text: &mut String,
+) {
+    if method != "session/update" {
+        return;
+    }
+    match client::parse_session_update(params) {
+        Some(SessionUpdate::AgentMessageChunk { text }) => {
+            final_text.push_str(&text);
+            sink.emit(AgentEvent::Token { text });
+        }
+        Some(SessionUpdate::ToolCall { title, raw_input }) => {
+            sink.emit(AgentEvent::ToolCall {
+                name: title,
+                input: raw_input,
+            });
+        }
+        None => {} // thought/plan/tool_call_update/commands — M2+/M5.
+    }
+}
+
+/// Answer an agent-initiated request. Never leaves the request dangling — an
+/// unanswered inbound RPC would hang the child.
+async fn answer_request(
+    peer: &RpcPeer,
+    id: serde_json::Value,
+    method: &str,
+    params: &serde_json::Value,
+    permission_mode: Option<&str>,
+) {
+    if method == "session/request_permission" {
+        // M1: bounded auto-answer from the session's permission mode; M3
+        // replaces this with the interactive option-based approval UI.
+        let options = client::parse_permission_options(params);
+        let selected = client::auto_select_option(&options, permission_mode);
+        let _ = client::respond_permission(peer, id, selected.as_deref()).await;
+    } else {
+        // fs/* (capability not advertised in M1), terminal/*, anything else:
+        // immediate error so the child never hangs on a dangling request.
+        let _ = peer
+            .respond_error(id, -32601, &format!("{method} not supported"))
+            .await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::adapter::{EventSink, Prompt};
+    use crate::events::AgentEvent;
+    use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+    struct Collect(Arc<Mutex<Vec<AgentEvent>>>);
+    impl EventSink for Collect {
+        fn emit(&self, event: AgentEvent) {
+            self.0.lock().unwrap().push(event);
+        }
+    }
+
+    struct Harness {
+        events: Arc<Mutex<Vec<AgentEvent>>>,
+        captured: Arc<Mutex<Option<String>>>,
+    }
+
+    /// Run drive_session against a scripted fake agent. The `script` closure gets
+    /// the agent side of the duplex after initialize + session/new are answered
+    /// and the session/prompt request has arrived (its id is passed along).
+    async fn run_fixture<F, Fut>(prompt: Prompt, script: F) -> Harness
+    where
+        F: FnOnce(
+                tokio::io::Lines<tokio::io::BufReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>>,
+                tokio::io::WriteHalf<tokio::io::DuplexStream>,
+                serde_json::Value,
+            ) -> Fut
+            + Send
+            + 'static,
+        Fut: std::future::Future<Output = ()> + Send,
+    {
+        let (ours, theirs) = tokio::io::duplex(64 * 1024);
+        let (read, write) = tokio::io::split(ours);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink: Box<dyn EventSink> = Box::new(Collect(Arc::clone(&events)));
+        let captured = Arc::new(Mutex::new(None));
+
+        let agent = tokio::spawn(async move {
+            let (r, mut w) = tokio::io::split(theirs);
+            let mut lines = tokio::io::BufReader::new(r).lines();
+            // initialize
+            let req: serde_json::Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(req["method"], "initialize");
+            let resp = serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":false}}});
+            w.write_all(format!("{resp}\n").as_bytes()).await.unwrap();
+            // session/new
+            let req: serde_json::Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(req["method"], "session/new");
+            assert_eq!(req["params"]["cwd"], "/wt");
+            let resp = serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"sessionId":"acp-abc"}});
+            w.write_all(format!("{resp}\n").as_bytes()).await.unwrap();
+            // session/prompt
+            let req: serde_json::Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(req["method"], "session/prompt");
+            let prompt_id = req["id"].clone();
+            script(lines, w, prompt_id).await;
+        });
+
+        drive_session(
+            read,
+            write,
+            prompt,
+            "/wt".into(),
+            None,
+            sink,
+            Arc::clone(&captured),
+        )
+        .await
+        .unwrap();
+        agent.await.unwrap();
+        Harness { events, captured }
+    }
+
+    #[tokio::test]
+    async fn drive_session_maps_updates_and_auto_answers_permission() {
+        let prompt = Prompt {
+            text: "hello".into(),
+            permission_mode: Some("acceptEdits".into()),
+            ..Default::default()
+        };
+        let h = run_fixture(prompt, |mut lines, mut w, prompt_id| async move {
+            for msg in [
+                serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{
+                    "sessionId":"acp-abc","update":{"sessionUpdate":"agent_message_chunk",
+                    "content":{"type":"text","text":"Hi "}}}}),
+                serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{
+                    "sessionId":"acp-abc","update":{"sessionUpdate":"tool_call",
+                    "toolCallId":"t1","title":"Read main.rs","rawInput":{"path":"main.rs"}}}}),
+                serde_json::json!({"jsonrpc":"2.0","id":99,"method":"session/request_permission","params":{
+                    "sessionId":"acp-abc","toolCall":{"toolCallId":"t1"},
+                    "options":[{"optionId":"ok","name":"Allow","kind":"allow_once"},
+                               {"optionId":"no","name":"Reject","kind":"reject_once"}]}}),
+            ] {
+                w.write_all(format!("{msg}\n").as_bytes()).await.unwrap();
+            }
+            // Our side must answer the permission request (acceptEdits ⇒ "ok").
+            let ans: serde_json::Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(ans["id"], 99);
+            assert_eq!(ans["result"]["outcome"]["outcome"], "selected");
+            assert_eq!(ans["result"]["outcome"]["optionId"], "ok");
+            let resp = serde_json::json!({"jsonrpc":"2.0","id":prompt_id,
+                "result":{"stopReason":"completed"}});
+            w.write_all(format!("{resp}\n").as_bytes()).await.unwrap();
+        })
+        .await;
+
+        let events = h.events.lock().unwrap();
+        assert!(matches!(&events[0], AgentEvent::Token { text } if text == "Hi "));
+        assert!(matches!(&events[1], AgentEvent::ToolCall { name, .. } if name == "Read main.rs"));
+        assert!(matches!(events.last().unwrap(), AgentEvent::Done { summary } if summary == "Hi "));
+        assert_eq!(h.captured.lock().unwrap().as_deref(), Some("acp-abc"));
+    }
+
+    #[tokio::test]
+    async fn drive_session_rejects_permission_in_default_mode() {
+        let prompt = Prompt {
+            text: "hello".into(),
+            permission_mode: None,
+            ..Default::default()
+        };
+        let h = run_fixture(prompt, |mut lines, mut w, prompt_id| async move {
+            let msg = serde_json::json!({"jsonrpc":"2.0","id":41,"method":"session/request_permission","params":{
+                "sessionId":"acp-abc","toolCall":{"toolCallId":"t1"},
+                "options":[{"optionId":"ok","name":"Allow","kind":"allow_once"},
+                           {"optionId":"no","name":"Reject","kind":"reject_once"}]}});
+            w.write_all(format!("{msg}\n").as_bytes()).await.unwrap();
+            let ans: serde_json::Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(ans["id"], 41);
+            assert_eq!(ans["result"]["outcome"]["outcome"], "selected");
+            assert_eq!(ans["result"]["outcome"]["optionId"], "no");
+            let resp = serde_json::json!({"jsonrpc":"2.0","id":prompt_id,
+                "result":{"stopReason":"completed"}});
+            w.write_all(format!("{resp}\n").as_bytes()).await.unwrap();
+        })
+        .await;
+        assert!(matches!(
+            h.events.lock().unwrap().last().unwrap(),
+            AgentEvent::Done { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn unknown_inbound_request_gets_method_not_found() {
+        let prompt = Prompt {
+            text: "hello".into(),
+            ..Default::default()
+        };
+        let h = run_fixture(prompt, |mut lines, mut w, prompt_id| async move {
+            let msg = serde_json::json!({"jsonrpc":"2.0","id":7,"method":"fs/read_text_file",
+                "params":{"sessionId":"acp-abc","path":"/etc/passwd"}});
+            w.write_all(format!("{msg}\n").as_bytes()).await.unwrap();
+            let ans: serde_json::Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(ans["id"], 7);
+            assert_eq!(ans["error"]["code"], -32601);
+            let resp = serde_json::json!({"jsonrpc":"2.0","id":prompt_id,
+                "result":{"stopReason":"completed"}});
+            w.write_all(format!("{resp}\n").as_bytes()).await.unwrap();
+        })
+        .await;
+        assert!(matches!(
+            h.events.lock().unwrap().last().unwrap(),
+            AgentEvent::Done { .. }
+        ));
+    }
+}
