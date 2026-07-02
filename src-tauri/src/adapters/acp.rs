@@ -120,8 +120,11 @@ async fn spawn_and_drive(
     )
     .await;
 
-    let stderr_tail = stderr_task.await.unwrap_or_default();
+    // Kill BEFORE awaiting the stderr tail: an ACP agent is a persistent server,
+    // and the tail task only resolves at stderr EOF (child exit). Awaiting first
+    // would hang whenever the agent ignores stdin EOF after the turn completes.
     let _ = child.kill().await;
+    let stderr_tail = stderr_task.await.unwrap_or_default();
     if result.is_err() && !stderr_tail.trim().is_empty() {
         eprintln!("acp agent stderr tail: {}", stderr_tail.trim());
     }
