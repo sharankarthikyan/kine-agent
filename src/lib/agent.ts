@@ -90,6 +90,22 @@ export function defaultEngineFor(agentId: string, nodeOk: boolean): Engine {
   return agentId === "claude" || agentId === "codex" ? "acp" : "pipe";
 }
 
+/** The engine a stored session runs on, read from its summary row. Absent or
+ * unknown values ⇒ "pipe" (external CLI-history rows and pre-engine fixtures
+ * never carry one). */
+export function engineForSession(session: { engine?: string | null } | null): Engine {
+  return session?.engine === "acp" ? "acp" : "pipe";
+}
+
+/** The model label a composer shows for a given engine. ACP sessions run the
+ * agent CLI's default model — the ACP adapter does not forward a model pick
+ * yet (planned follow-up) — so they read "CLI default" instead of pretending
+ * a picked model is honored. */
+export function modelDisplayForEngine(engine: Engine, pickedLabel: string | null): string {
+  if (engine === "acp") return "CLI default";
+  return pickedLabel ?? "No models";
+}
+
 /** Whether Node.js (npx) is on PATH — decides the default engine for new
  * drafts (ACP agents are npx-launched; without Node the first spawn would
  * fail, so drafts fall back to pipe instead). */

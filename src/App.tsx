@@ -39,6 +39,7 @@ import {
   cleanupSession,
   continueExternalSession,
   defaultEngineFor,
+  engineForSession,
   listTrustedRepos,
   nodeAvailable,
   pickRepository,
@@ -1327,7 +1328,13 @@ export default function App() {
     const isNew = currentSessionId === null || isExternalContinuation;
     const sessionId = isNew ? crypto.randomUUID() : currentSessionId;
     const repo = opts?.repo ?? currentSession?.repo ?? ".";
-    const modelArg = model?.value;
+    // The engine this send runs on: new sessions carry the draft's derived engine in
+    // opts; follow-ups reuse the engine persisted on the session row. ACP sends never
+    // forward a model — the ACP adapter runs the CLI default and the pickers show
+    // "CLI default", so sending a model would pretend a choice that isn't honored.
+    const sendEngine: Engine =
+      opts?.engine ?? (currentSession ? engineForSession(currentSession) : "pipe");
+    const modelArg = sendEngine === "acp" ? undefined : model?.value;
     // Effective permission mode + terminal sandbox for this send: an explicit opt (the New
     // Session composer) wins; otherwise the pane session's pending override, then its
     // persisted value, then the safe default.
@@ -1365,7 +1372,7 @@ export default function App() {
     if (opts?.engine === "acp" && shouldShowAcpDownloadNotice()) {
       toast.info("First ACP run downloads the agent adapter", {
         description:
-          "npx fetches the pinned claude-agent-acp package — the first turn can take a minute before streaming starts.",
+          "npx fetches the pinned adapter package for this agent (one-time per install) — the first turn can take a minute before streaming starts.",
       });
     }
     // Set the ref synchronously before the first await so the cross-session guard
@@ -1399,12 +1406,17 @@ export default function App() {
             fileActionCount: null,
             permissionMode: effectivePermissionMode,
             sandboxTerminal: effectiveSandbox,
+            // Carried on the optimistic row so the PromptBar's model display locks to
+            // "CLI default" for ACP immediately, before refreshSessions round-trips.
+            engine: sendEngine,
             createdAt: now,
             updatedAt: now,
           };
       return [row, ...prev.filter((s) => s.id !== sessionId)];
     });
     closeRight();
+    // Never seeded for ACP sends: modelArg is undefined there (no model is forwarded),
+    // so the session keeps reading "CLI default" instead of a phantom pick.
     if (modelArg) {
       setSessionModelValues((prev) => ({ ...prev, [sessionId]: modelArg }));
     }
@@ -1860,6 +1872,7 @@ export default function App() {
                             model={draftModel}
                             permissionMode={draft?.permissionMode ?? DEFAULT_PERMISSION_MODE}
                             sandboxTerminal={draft?.sandbox ?? false}
+                            engine={draft?.engine ?? "pipe"}
                             running={false}
                             onPickRepo={() => void pickRepoForPane(pane.id)}
                             onPickRecent={(p) => updatePaneDraft(pane.id, { repo: p })}
@@ -1960,6 +1973,7 @@ export default function App() {
                             }
                           }}
                           agent={paneAgent}
+                          engine={engineForSession(paneSession)}
                           sessionId={
                             pane.sessionId !== null && paneSession?.source !== "external"
                               ? pane.sessionId

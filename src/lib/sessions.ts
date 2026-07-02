@@ -22,6 +22,9 @@ export interface SessionSummary {
   permissionMode?: string | null;
   /** Antigravity terminal-sandbox toggle last used. Absent ⇒ false. */
   sandboxTerminal?: boolean;
+  /** Streaming engine the session runs on ("pipe" | "acp"). Optional so test
+   * fixtures needn't set it; absent ⇒ "pipe" (see `engineForSession`). */
+  engine?: string;
   createdAt: number;
   updatedAt: number;
 }

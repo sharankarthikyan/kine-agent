@@ -939,9 +939,10 @@ async fn create_session_and_run(
         let _ = tokio::task::spawn_blocking(move || worktree::remove(&cleanup_repo, &wt)).await;
         return Err(e.to_string());
     }
-    // Persist the engine choice so follow-up turns (`send_message`, which takes no engine
-    // param) resume with the same engine. Best-effort, like permission mode; "pipe" is the
-    // stored default so only an opt-in needs a row update.
+    // Persist the engine so follow-up turns (`send_message`, which takes no engine
+    // param) resume with the same engine. Best-effort, like permission mode; the engine
+    // is auto-derived (no UI choice), and "pipe" is the stored column default so any
+    // non-pipe engine needs a row update.
     if engine != store::ENGINE_PIPE {
         if let Err(e) = store.set_engine(&session_id, &engine).await {
             eprintln!("failed to persist engine for {session_id}: {e}");

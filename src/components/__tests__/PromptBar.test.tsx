@@ -63,6 +63,23 @@ test("renders the composer placeholder", () => {
   expect(screen.getByPlaceholderText(PLACEHOLDER)).toBeInTheDocument();
 });
 
+// ── Honest model display for ACP sessions ──────────────────────────────────────
+// The ACP adapter runs the agent CLI's default model — it does not forward a
+// model pick yet — so ACP sessions must not display a user-picked model.
+
+test("ACP sessions show 'CLI default' instead of a user-picked model", () => {
+  setup({ engine: "acp" });
+  const trigger = screen.getByRole("button", { name: "Model: CLI default" });
+  expect(trigger).toBeDisabled();
+  expect(screen.queryByText(opus.label)).not.toBeInTheDocument();
+});
+
+test("pipe sessions (and callers that pass no engine) keep the interactive picker", () => {
+  setup();
+  expect(screen.getByRole("button", { name: `Model: ${opus.label}` })).toBeEnabled();
+  expect(screen.queryByText("CLI default")).not.toBeInTheDocument();
+});
+
 test("renders external CLI continuation mode distinctly", () => {
   setup({ mode: "external-continuation" });
   expect(screen.getByPlaceholderText("Continue this CLI history…")).toBeInTheDocument();

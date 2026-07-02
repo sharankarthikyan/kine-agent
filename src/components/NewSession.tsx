@@ -20,6 +20,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { modelDisplayForEngine, type Engine } from "@/lib/agent";
 import { type AgentInfo, type ModelInfo, isAgentSpawnable } from "@/lib/models";
 import { AgentLogo } from "./AgentLogo";
 
@@ -32,6 +33,10 @@ interface NewSessionProps {
   model: ModelInfo | null;
   permissionMode: PermissionMode;
   sandboxTerminal: boolean;
+  /** The draft's derived engine — display-only (never user-chosen). ACP pins
+   * the model picker to "CLI default": the ACP adapter doesn't forward a model
+   * pick yet, so offering one would lie. */
+  engine: Engine;
   running: boolean;
   onPickRepo: () => void;
   onPickRecent: (path: string) => void;
@@ -72,6 +77,7 @@ export function NewSession({
   model,
   permissionMode,
   sandboxTerminal,
+  engine,
   running,
   onPickRepo,
   onPickRecent,
@@ -231,16 +237,30 @@ export function NewSession({
           <div className="flex flex-wrap items-center gap-2">
             {/* LEFT: model + permission selectors, side by side */}
             <div className="flex min-w-0 flex-wrap items-center gap-1">
+            {/* ACP runs the agent CLI's default model (the adapter doesn't forward a
+                model pick yet) — show an honest non-choice instead of a phantom picker. */}
+            {engine === "acp" ? (
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled
+                className="gap-1.5 px-2 text-muted-foreground"
+                aria-label="Model: CLI default"
+              >
+                <AgentLogo agent={agent?.id ?? "claude"} className="size-4" />
+                <span className="text-sm">{modelDisplayForEngine(engine, null)}</span>
+              </Button>
+            ) : (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button
                   variant="ghost"
                   size="sm"
                   className="gap-1.5 px-2 text-muted-foreground hover:text-foreground"
-                  aria-label={`Model: ${model?.label ?? "No models"}`}
+                  aria-label={`Model: ${modelDisplayForEngine(engine, model?.label ?? null)}`}
                 >
                   <AgentLogo agent={model?.agent ?? "claude"} className="size-4" />
-                  <span className="text-sm">{model?.label ?? "No models"}</span>
+                  <span className="text-sm">{modelDisplayForEngine(engine, model?.label ?? null)}</span>
                   <ChevronDown data-icon="inline-end" className="opacity-50" />
                 </Button>
               </DropdownMenuTrigger>
@@ -284,6 +304,7 @@ export function NewSession({
                 )}
               </DropdownMenuContent>
             </DropdownMenu>
+            )}
 
               <PermissionModeSelect
                 agent={agent?.id ?? "claude"}

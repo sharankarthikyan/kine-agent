@@ -1,4 +1,4 @@
-use crate::store::{SessionSummary, StoredEvent};
+use crate::store::{SessionSummary, StoredEvent, ENGINE_PIPE};
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::fs;
@@ -376,6 +376,8 @@ fn summarize_claude(path: &Path) -> Option<SessionSummary> {
         // Kineloop doesn't own external runs, so it has no permission setting for them.
         permission_mode: None,
         sandbox_terminal: false,
+        // External CLI history is never run by Kineloop — report the pipe default.
+        engine: ENGINE_PIPE.to_string(),
         turn_count: Some(turn_count),
         tool_call_count: Some(tool_call_count),
         file_action_count: Some(file_actions.len() as u32),
@@ -472,6 +474,8 @@ fn summarize_codex(path: &Path) -> Option<SessionSummary> {
         // Kineloop doesn't own external runs, so it has no permission setting for them.
         permission_mode: None,
         sandbox_terminal: false,
+        // External CLI history is never run by Kineloop — report the pipe default.
+        engine: ENGINE_PIPE.to_string(),
         turn_count: Some(turn_count),
         tool_call_count: Some(tool_call_count),
         file_action_count: Some(file_actions.len() as u32),
@@ -704,6 +708,8 @@ fn summarize_gemini(path: &Path) -> Option<SessionSummary> {
         // Kineloop doesn't own external runs, so it has no permission setting for them.
         permission_mode: None,
         sandbox_terminal: false,
+        // External CLI history is never run by Kineloop — report the pipe default.
+        engine: ENGINE_PIPE.to_string(),
         turn_count: Some(turn_count),
         tool_call_count: Some(tool_call_count),
         file_action_count: Some(file_actions.len() as u32),
@@ -874,6 +880,8 @@ fn summarize_antigravity(path: &Path) -> Option<SessionSummary> {
         // Kineloop doesn't own external runs, so it has no permission setting for them.
         permission_mode: None,
         sandbox_terminal: false,
+        // External CLI history is never run by Kineloop — report the pipe default.
+        engine: ENGINE_PIPE.to_string(),
         turn_count: Some(turn_count),
         tool_call_count: Some(tool_call_count),
         file_action_count: Some(file_actions.len() as u32),

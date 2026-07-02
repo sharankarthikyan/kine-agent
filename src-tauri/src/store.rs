@@ -52,6 +52,10 @@ pub struct SessionSummary {
     /// Antigravity terminal-sandbox toggle last used for this session. Always false for
     /// external sessions and non-Antigravity agents.
     pub sandbox_terminal: bool,
+    /// Streaming engine the session runs on ("pipe" | "acp"). The UI uses it to show
+    /// an honest model display (ACP runs the CLI-default model). Always "pipe" for
+    /// external CLI-history sessions (Kineloop doesn't run them).
+    pub engine: String,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -458,7 +462,7 @@ impl SessionStore {
     pub async fn list_sessions(&self) -> Result<Vec<SessionSummary>, StoreError> {
         let rows = sqlx::query(
             "SELECT id, agent, repo, branch, title, status,
-                    permission_mode, sandbox_terminal, created_at, updated_at
+                    permission_mode, sandbox_terminal, engine, created_at, updated_at
              FROM sessions ORDER BY updated_at DESC",
         )
         .fetch_all(&self.pool)
@@ -509,6 +513,7 @@ impl SessionStore {
                     permission_mode: r.get("permission_mode"),
                     // Stored as INTEGER (0/1); read as i64 then narrow to bool.
                     sandbox_terminal: r.get::<i64, _>("sandbox_terminal") != 0,
+                    engine: r.get("engine"),
                     created_at: r.get("created_at"),
                     updated_at: r.get("updated_at"),
                     id,
