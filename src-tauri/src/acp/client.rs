@@ -169,6 +169,8 @@ pub fn parse_permission_options(params: &Value) -> Vec<PermissionOption> {
 /// Prefers `*_once` over `*_always` so an M1 auto-answer never persists a policy.
 /// Returns the optionId to select, or None when no matching option exists.
 pub fn auto_select_option(options: &[PermissionOption], mode: Option<&str>) -> Option<String> {
+    // "auto" is unreachable today (validate_permission_mode rejects it at the IPC
+    // boundary) — kept for wire-compat if the unified mode set ever grows.
     let allow = matches!(
         mode,
         Some("acceptEdits") | Some("full") | Some("dontAsk") | Some("auto")

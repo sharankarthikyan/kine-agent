@@ -594,6 +594,11 @@ fn validate_engine(engine: Option<String>, agent: &str) -> Result<String, String
     match engine.as_deref() {
         None | Some("pipe") => Ok("pipe".to_string()),
         Some("acp") if agent == "claude" => Ok("acp".to_string()),
+        // Antigravity has no ACP adapter at all (spec matrix: never), unlike
+        // codex/gemini which are just later milestones.
+        Some("acp") if agent == "antigravity" => {
+            Err("the Antigravity CLI has no ACP support".to_string())
+        }
         Some("acp") => Err(format!("ACP engine is not yet supported for {agent}")),
         Some(other) => Err(format!("unsupported engine: {other}")),
     }
