@@ -2095,6 +2095,7 @@ export default function App() {
                     model={activePanelModel}
                     contextFootprint={contextFootprint}
                     agent={activeSession?.agent}
+                    engine={engineForSession(activeSession)}
                     source={activeSession?.source}
                     permissionMode={activePermissionMode}
                     sandboxTerminal={activeSandboxTerminal}

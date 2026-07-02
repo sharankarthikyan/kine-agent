@@ -99,6 +99,51 @@ test("renders real session settings", () => {
   expect(screen.getByText("On")).toBeInTheDocument();
 });
 
+// ── Honest model display for ACP sessions ──────────────────────────────────────
+// ACP sends no longer seed a model pick, so `modelForSession` falls through to the
+// agent's FIRST list model — without engine awareness the Settings row would
+// confidently fabricate it. ACP runs the CLI default; say so.
+
+test("ACP sessions show 'CLI default' in Settings — not a fabricated first model", () => {
+  render(
+    <ContextPanel
+      {...base}
+      agent="claude"
+      engine="acp"
+      model={{
+        value: "opus",
+        label: "Claude Opus",
+        agent: "claude",
+        description: null,
+        disabled: false,
+        contextWindow: 200000,
+      }}
+    />,
+  );
+  expect(screen.getByText("CLI default")).toBeInTheDocument();
+  expect(screen.queryByText("Claude Opus")).not.toBeInTheDocument();
+});
+
+test("ACP sessions suppress the Reported-by-CLI correction row", () => {
+  render(
+    <ContextPanel
+      {...base}
+      agent="claude"
+      engine="acp"
+      usage={{
+        inputTokens: 10,
+        outputTokens: 5,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        costUsd: null,
+        model: "claude-sonnet-4-6",
+      }}
+    />,
+  );
+  expect(screen.getByText("CLI default")).toBeInTheDocument();
+  expect(screen.queryByText(/reported by cli/i)).not.toBeInTheDocument();
+});
+
 test("renders estimated context source footprint", () => {
   render(
     <ContextPanel
