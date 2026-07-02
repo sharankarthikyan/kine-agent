@@ -502,7 +502,8 @@ mod tests {
         let no_bypass = vec!["default".to_string(), "acceptEdits".to_string()];
         assert_eq!(acp_mode_for(Some("full"), &no_bypass), "acceptEdits");
 
-        // full → auto when only auto/default are advertised (codex-ish list).
+        // full → auto even on a non-codex-shaped list: full intends autonomy,
+        // so the unguarded fallback chain is correct here.
         let only_auto = vec!["auto".to_string(), "default".to_string()];
         assert_eq!(acp_mode_for(Some("full"), &only_auto), "auto");
 

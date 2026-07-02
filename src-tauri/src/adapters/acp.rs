@@ -24,16 +24,24 @@ use tokio::process::Command;
 pub struct AcpProfile {
     pub package: &'static str,
     pub login_hint: &'static str,
+    /// Under acceptEdits-grade session modes, permission requests that still
+    /// arrive are by definition ESCALATIONS beyond the mode's grant (codex
+    /// mode "auto": network / outside-workspace / sandbox-off) — surface them
+    /// interactively instead of auto-approving. Claude keeps M1–M5 behavior
+    /// (false) until revisited.
+    pub interactive_escalations: bool,
 }
 
 pub const CLAUDE_ACP: AcpProfile = AcpProfile {
     package: "@agentclientprotocol/claude-agent-acp@0.54.1",
     login_hint: "log in with the Claude CLI first (`claude`, then /login)",
+    interactive_escalations: false,
 };
 
 pub const CODEX_ACP: AcpProfile = AcpProfile {
     package: "@zed-industries/codex-acp@0.16.0",
     login_hint: "run `codex login` in a terminal, then retry",
+    interactive_escalations: true,
 };
 
 /// Emitted when a resume request degrades to a fresh session WITH replayed context.
@@ -161,7 +169,7 @@ async fn spawn_and_drive(
         captured_session,
         approvals,
         app_session_id,
-        profile.login_hint,
+        profile,
     )
     .await;
 
@@ -201,7 +209,7 @@ pub async fn drive_session(
     captured_session: Arc<Mutex<Option<String>>>,
     approvals: crate::approval::ApprovalRegistry,
     app_session_id: String,
-    login_hint: &str,
+    profile: AcpProfile,
 ) -> Result<(), SessionError> {
     let peer = RpcPeer::start(read, write);
     let mut inbound = peer.inbound();
@@ -215,7 +223,7 @@ pub async fn drive_session(
     let can_load = client::initialize(&peer).await.map_err(|e| {
         SessionError::Protocol(format!(
             "ACP initialize failed: {}",
-            describe_rpc_failure(&e, login_hint)
+            describe_rpc_failure(&e, profile.login_hint)
         ))
     })?;
 
@@ -236,18 +244,18 @@ pub async fn drive_session(
                 }
                 Err(e) => {
                     eprintln!("acp: session/load failed ({e}); falling back to a fresh session");
-                    let (id, modes) = new_session(&peer, &cwd, login_hint).await?;
+                    let (id, modes) = new_session(&peer, &cwd, profile.login_hint).await?;
                     (id, modes, true)
                 }
             }
         }
         Some(_) => {
             // Resume requested but the agent can't load sessions at all.
-            let (id, modes) = new_session(&peer, &cwd, login_hint).await?;
+            let (id, modes) = new_session(&peer, &cwd, profile.login_hint).await?;
             (id, modes, true)
         }
         None => {
-            let (id, modes) = new_session(&peer, &cwd, login_hint).await?;
+            let (id, modes) = new_session(&peer, &cwd, profile.login_hint).await?;
             // resume_transcript is only populated for follow-up turns
             // (send_message on an ACP session). Carrying one into a fresh
             // session means the prior thread id was never captured — without
@@ -314,7 +322,7 @@ pub async fn drive_session(
                             handle_notification(&method, &params, sink.as_ref(), &mut final_text);
                         }
                         Inbound::Request { id, method, params } => {
-                            let answer = prepare_answer(&method, &params, permission_mode.as_deref(), fs_root.as_deref(), sink.as_ref(), &approvals, &app_session_id);
+                            let answer = prepare_answer(&method, &params, permission_mode.as_deref(), profile.interactive_escalations, fs_root.as_deref(), sink.as_ref(), &approvals, &app_session_id);
                             if let Some(event) = answer_request(&peer, id, &method, answer).await {
                                 sink.emit(event); // FileWrite — sync emit after the await
                             }
@@ -344,7 +352,7 @@ pub async fn drive_session(
                         handle_notification(&method, &params, sink.as_ref(), &mut final_text);
                     }
                     Some(Inbound::Request { id, method, params }) => {
-                        let answer = prepare_answer(&method, &params, permission_mode.as_deref(), fs_root.as_deref(), sink.as_ref(), &approvals, &app_session_id);
+                        let answer = prepare_answer(&method, &params, permission_mode.as_deref(), profile.interactive_escalations, fs_root.as_deref(), sink.as_ref(), &approvals, &app_session_id);
                         if let Some(event) = answer_request(&peer, id, &method, answer).await {
                             sink.emit(event); // FileWrite — sync emit after the await
                         }
@@ -539,10 +547,12 @@ enum InboundAnswer {
 /// `ApprovalNeeded` here, before any RPC round-trip. fs/* requests are
 /// validated and worktree-resolved here too, but their IO happens later in
 /// `answer_request`.
+#[allow(clippy::too_many_arguments)]
 fn prepare_answer(
     method: &str,
     params: &serde_json::Value,
     permission_mode: Option<&str>,
+    interactive_escalations: bool,
     fs_root: Option<&Path>,
     sink: &dyn EventSink,
     approvals: &crate::approval::ApprovalRegistry,
@@ -556,10 +566,14 @@ fn prepare_answer(
             let options = client::parse_permission_options(params);
             // Autonomous modes answer without asking (same policy as M1); everything
             // else — and only when the agent offered real options — goes interactive.
-            let autonomous = matches!(
-                permission_mode,
-                Some("acceptEdits") | Some("full") | Some("dontAsk") | Some("auto")
-            );
+            // Under acceptEdits, a profile with interactive_escalations set treats
+            // any request that still arrives as an escalation beyond the mode's
+            // grant and surfaces it instead (see AcpProfile::interactive_escalations).
+            let autonomous = match permission_mode {
+                Some("full") | Some("dontAsk") | Some("auto") => true,
+                Some("acceptEdits") => !interactive_escalations,
+                _ => false,
+            };
             if autonomous || options.is_empty() {
                 return InboundAnswer::Immediate(client::auto_select_option(&options, permission_mode));
             }
@@ -895,7 +909,7 @@ mod tests {
             Arc::clone(&captured),
             approvals.clone(),
             "app-session".to_string(),
-            CLAUDE_ACP.login_hint,
+            CLAUDE_ACP,
         )
         .await
         .unwrap();
@@ -1337,6 +1351,92 @@ mod tests {
         assert!(
             events.iter().any(|e| matches!(e, AgentEvent::Token { text } if text == "still streaming")),
             "streaming continued while the approval was pending"
+        );
+        assert!(matches!(events.last().unwrap(), AgentEvent::Done { .. }));
+    }
+
+    /// Codex under Auto-edit (acceptEdits → codex mode "auto"): a permission
+    /// request that STILL arrives is by definition an escalation beyond the
+    /// mode's grant (network / outside-workspace / sandbox-off) — it must
+    /// surface interactively (ApprovalNeeded), never be auto-approved.
+    /// CODEX_ACP.interactive_escalations pins this; claude keeps M1–M5
+    /// auto-answer behavior (see drive_session_maps_updates_and_auto_answers_permission).
+    #[tokio::test]
+    async fn codex_accept_edits_surfaces_escalations_interactively() {
+        let (ours, theirs) = tokio::io::duplex(64 * 1024);
+        let (read, write) = tokio::io::split(ours);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink: Box<dyn EventSink> = Box::new(Collect(Arc::clone(&events)));
+        let approvals = crate::approval::ApprovalRegistry::new();
+        let agent = tokio::spawn(async move {
+            let (r, mut w) = tokio::io::split(theirs);
+            let mut lines = tokio::io::BufReader::new(r).lines();
+            let req = next_request(&mut lines, "initialize").await;
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}})).await;
+            // Codex-shaped mode list; currentModeId already "auto" (what
+            // acceptEdits maps to) so no session/set_mode fires.
+            let req = next_request(&mut lines, "session/new").await;
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"sessionId":"acp-abc","modes":{"currentModeId":"auto",
+                    "availableModes":[{"id":"read-only"},{"id":"auto"},{"id":"full-access"}]}}})).await;
+            let prompt_req = next_request(&mut lines, "session/prompt").await;
+            // The escalation request, then MORE streaming — no head-of-line block.
+            for msg in [
+                serde_json::json!({"jsonrpc":"2.0","id":41,"method":"session/request_permission","params":{
+                    "sessionId":"acp-abc","toolCall":{"toolCallId":"t1","title":"Run curl (requires network)","rawInput":{"cmd":"curl"}},
+                    "options":[{"optionId":"ok-once","name":"Allow once","kind":"allow_once"},
+                               {"optionId":"no","name":"Reject","kind":"reject_once"}]}}),
+                serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{
+                    "sessionId":"acp-abc","update":{"sessionUpdate":"agent_message_chunk",
+                    "content":{"type":"text","text":"still streaming"}}}}),
+            ] {
+                send_line(&mut w, msg).await;
+            }
+            // The answer to id 41 arrives only after the user's registry resolve.
+            let ans: serde_json::Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(ans["id"], 41);
+            assert_eq!(ans["result"]["outcome"]["outcome"], "selected");
+            assert_eq!(ans["result"]["outcome"]["optionId"], "ok-once");
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":prompt_req["id"],
+                "result":{"stopReason":"completed"}})).await;
+        });
+        let resolver = spawn_resolver(
+            Arc::clone(&events),
+            approvals.clone(),
+            "ok-once",
+            Some("still streaming"),
+        );
+        drive_session(
+            read,
+            write,
+            Prompt {
+                text: "hi".into(),
+                permission_mode: Some("acceptEdits".into()),
+                ..Default::default()
+            },
+            "/wt".into(),
+            None,
+            sink,
+            Arc::new(Mutex::new(None)),
+            approvals.clone(),
+            "app-session".to_string(),
+            CODEX_ACP,
+        )
+        .await
+        .unwrap();
+        resolver.await.unwrap();
+        agent.await.unwrap();
+        let events = events.lock().unwrap();
+        assert!(
+            events.iter().any(|e| matches!(e, AgentEvent::ApprovalNeeded { tool, .. }
+                if tool == "Run curl (requires network)")),
+            "escalation must surface an approval card under codex Auto-edit, got {events:?}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, AgentEvent::Token { text } if text == "still streaming")),
+            "streaming continued while the escalation was pending"
         );
         assert!(matches!(events.last().unwrap(), AgentEvent::Done { .. }));
     }
@@ -1955,7 +2055,7 @@ mod tests {
             Arc::new(Mutex::new(None)),
             crate::approval::ApprovalRegistry::new(),
             "app-session".to_string(),
-            CODEX_ACP.login_hint,
+            CODEX_ACP,
         )
         .await
         .unwrap_err();
@@ -1992,7 +2092,7 @@ mod tests {
             Arc::new(Mutex::new(None)),
             crate::approval::ApprovalRegistry::new(),
             "app-session".to_string(),
-            CLAUDE_ACP.login_hint,
+            CLAUDE_ACP,
         )
         .await
         .unwrap_err();
@@ -2154,7 +2254,7 @@ mod tests {
             Arc::new(Mutex::new(None)),
             crate::approval::ApprovalRegistry::new(),
             "app-session".to_string(),
-            CLAUDE_ACP.login_hint,
+            CLAUDE_ACP,
         )
         .await
         .unwrap();
