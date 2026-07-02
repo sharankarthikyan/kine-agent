@@ -55,6 +55,13 @@ pub enum AgentEvent {
         #[serde(skip_serializing_if = "Vec::is_empty")]
         options: Vec<ApprovalOption>,
     },
+    /// The user's answer to an earlier ApprovalNeeded (same request_id). Lets the
+    /// transcript render the card as answered — including across reloads.
+    #[serde(rename_all = "camelCase")]
+    ApprovalResolved {
+        request_id: String,
+        selected_option_id: String,
+    },
     Done {
         summary: String,
     },
@@ -228,6 +235,18 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&ev).unwrap(),
             r#"{"kind":"approvalNeeded","data":{"requestId":"ar-1","tool":"Bash","input":"{}","prompt":"Run ls?"}}"#
+        );
+    }
+
+    #[test]
+    fn serializes_approval_resolved_as_tagged_camelcase() {
+        let ev = AgentEvent::ApprovalResolved {
+            request_id: "ar-1".into(),
+            selected_option_id: "allow".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&ev).unwrap(),
+            r#"{"kind":"approvalResolved","data":{"requestId":"ar-1","selectedOptionId":"allow"}}"#
         );
     }
 

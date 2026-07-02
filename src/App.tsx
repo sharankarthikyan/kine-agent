@@ -1564,7 +1564,15 @@ export default function App() {
     selectedOptionId: string,
   ) {
     try {
-      await respondToApproval(sessionId, requestId, selectedOptionId);
+      const resolved = await respondToApproval(sessionId, requestId, selectedOptionId);
+      if (resolved) {
+        // The backend persisted an approvalResolved row, but no live event streams
+        // back for it — reflect the answer locally so the card renders answered now.
+        appendToLastTurn(sessionId, {
+          kind: "approvalResolved",
+          data: { requestId, selectedOptionId },
+        });
+      }
     } catch (err) {
       toast.error(safeErrorMessage(err));
     }

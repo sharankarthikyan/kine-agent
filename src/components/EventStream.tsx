@@ -42,12 +42,21 @@ export function EventStream({ events, onOpenFile, onApprovalRespond }: EventStre
   for (const e of events) {
     if (e.kind === "toolStatus") statusById.set(e.data.toolCallId, e.data.status);
   }
+  // Last-write-wins answer per approval request id; approvalResolved rows never
+  // render themselves — they flip the matching approvalNeeded card to answered.
+  const resolvedApprovals = new Map<string, string>();
+  for (const e of events) {
+    if (e.kind === "approvalResolved") resolvedApprovals.set(e.data.requestId, e.data.selectedOptionId);
+  }
   const lastPlanIndex = events.reduce(
     (acc, e, i) => (e.kind === "plan" ? i : acc),
     -1,
   );
   const visible = events.filter(
-    (e, i) => e.kind !== "toolStatus" && (e.kind !== "plan" || i === lastPlanIndex),
+    (e, i) =>
+      e.kind !== "toolStatus" &&
+      e.kind !== "approvalResolved" &&
+      (e.kind !== "plan" || i === lastPlanIndex),
   );
   const hasProse = visible.some((e) => e.kind === "token");
   const groups = groupEventRuns(visible);
@@ -60,7 +69,7 @@ export function EventStream({ events, onOpenFile, onApprovalRespond }: EventStre
           <div key={i} className="flex w-full flex-wrap gap-1.5">
             {group.events.map((event, j) => (
               <Fragment key={j}>
-                {renderEvent(event, hasProse, statusById, onOpenFile, onApprovalRespond)}
+                {renderEvent(event, hasProse, statusById, resolvedApprovals, onOpenFile, onApprovalRespond)}
               </Fragment>
             ))}
           </div>
@@ -77,7 +86,7 @@ export function EventStream({ events, onOpenFile, onApprovalRespond }: EventStre
           </details>
         ) : (
           <Fragment key={i}>
-            {renderEvent(group.event, hasProse, statusById, onOpenFile, onApprovalRespond)}
+            {renderEvent(group.event, hasProse, statusById, resolvedApprovals, onOpenFile, onApprovalRespond)}
           </Fragment>
         )
       )}
@@ -120,6 +129,7 @@ function renderEvent(
   event: AgentEvent,
   hasProse: boolean,
   statusById: Map<string, string>,
+  resolvedApprovals: Map<string, string>,
   onOpenFile?: (path: string) => void,
   onApprovalRespond?: (requestId: string, selectedOptionId: string) => void,
 ) {
@@ -225,27 +235,45 @@ function renderEvent(
               { id: "allow", label: "Allow", kind: "allow_once" },
               { id: "deny", label: "Deny", kind: "reject_once" },
             ];
+      const answeredId = resolvedApprovals.get(event.data.requestId);
+      const answeredLabel =
+        answeredId !== undefined
+          ? (options.find((o) => o.id === answeredId)?.label ?? answeredId)
+          : undefined;
       return (
         <Alert className="w-full">
           <AlertTitle>Approval required</AlertTitle>
           <AlertDescription>{event.data.prompt}</AlertDescription>
-          {onApprovalRespond && (
-            <div className="mt-3 flex flex-wrap gap-2">
-              {options.map((option) => (
-                <Button
-                  key={option.id}
-                  size="sm"
-                  variant={option.kind.startsWith("reject") ? "outline" : "default"}
-                  onClick={() => onApprovalRespond(event.data.requestId, option.id)}
-                >
-                  {option.label}
-                </Button>
-              ))}
+          {answeredLabel !== undefined ? (
+            <div className="mt-3 flex items-center gap-1.5 text-sm text-muted-foreground">
+              <Check aria-hidden="true" className="size-3.5 shrink-0" />
+              {answeredLabel}
             </div>
+          ) : (
+            onApprovalRespond && (
+              <div className="mt-3 flex flex-wrap gap-2">
+                {options.map((option) => (
+                  <Button
+                    key={option.id}
+                    size="sm"
+                    variant={option.kind.startsWith("reject") ? "outline" : "default"}
+                    onClick={() => onApprovalRespond(event.data.requestId, option.id)}
+                  >
+                    {option.label}
+                  </Button>
+                ))}
+              </div>
+            )
           )}
         </Alert>
       );
     }
+
+    case "approvalResolved":
+      // Filtered out of `visible` before grouping — it only flips the matching
+      // approvalNeeded card to its answered state. Case kept purely for the
+      // `never` exhaustiveness check below.
+      return null;
 
     case "done":
       // Don't echo the final text — the prose already showed it. Only render the

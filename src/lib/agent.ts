@@ -40,6 +40,7 @@ export type AgentEvent =
         options?: ApprovalOption[];
       };
     }
+  | { kind: "approvalResolved"; data: { requestId: string; selectedOptionId: string } }
   | { kind: "done"; data: { summary: string } }
   | { kind: "error"; data: { message: string } }
   | {

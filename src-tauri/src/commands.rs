@@ -1136,13 +1136,28 @@ pub async fn respond_to_approval(
     selected_option_id: String,
     message: Option<String>,
     approvals: State<'_, ApprovalRegistry>,
+    store: State<'_, SessionStore>,
 ) -> Result<bool, String> {
     let decision = ApprovalDecision {
         allow: selected_option_id == "allow",
-        selected_option_id: Some(selected_option_id),
+        selected_option_id: Some(selected_option_id.clone()),
         message,
     };
-    Ok(approvals.resolve(&session_id, &request_id, decision))
+    let resolved = approvals.resolve(&session_id, &request_id, decision);
+    if resolved {
+        // Persist the answer so the transcript renders the card as answered across
+        // reloads. Best-effort: a persistence hiccup must not fail the IPC — the
+        // request is already resolved and the run is unblocked either way.
+        let event = AgentEvent::ApprovalResolved {
+            request_id,
+            selected_option_id,
+        };
+        let (kind, payload) = store::split_event(&event);
+        if let Err(e) = store.append_event(&session_id, &kind, &payload).await {
+            eprintln!("failed to persist approval resolution for {session_id}: {e}");
+        }
+    }
+    Ok(resolved)
 }
 
 /// Remove the worktree (and branch) for a finished session, then delete its persisted

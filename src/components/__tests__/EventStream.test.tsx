@@ -180,6 +180,54 @@ test("renders one button per agent-supplied option and passes the chosen id", as
   expect(screen.getByRole("button", { name: "Reject" })).toBeInTheDocument();
 });
 
+test("an answered approval renders the chosen option instead of buttons", () => {
+  const events = [
+    APPROVAL, // requestId "req-1", no options → legacy allow/deny pair
+    { kind: "approvalResolved", data: { requestId: "req-1", selectedOptionId: "allow" } },
+  ] as AgentEvent[];
+  render(<EventStream events={events} onApprovalRespond={vi.fn()} />);
+  expect(screen.queryByRole("button", { name: "Allow" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Deny" })).not.toBeInTheDocument();
+  expect(screen.getByText("Allow")).toBeInTheDocument(); // answered label, not a button
+});
+
+test("an unanswered approval keeps its buttons", () => {
+  render(<EventStream events={[APPROVAL]} onApprovalRespond={vi.fn()} />);
+  expect(screen.getByRole("button", { name: "Allow" })).toBeInTheDocument();
+});
+
+test("an answered approval with agent-supplied options shows the matching option's label", () => {
+  const event = {
+    kind: "approvalNeeded",
+    data: {
+      requestId: "req-9",
+      tool: "Edit",
+      input: "{}",
+      prompt: "Edit main.rs?",
+      options: [
+        { id: "opt-once", label: "Allow once", kind: "allow_once" },
+        { id: "opt-always", label: "Allow always", kind: "allow_always" },
+        { id: "opt-no", label: "Reject", kind: "reject_once" },
+      ],
+    },
+  } as AgentEvent;
+  const resolved = {
+    kind: "approvalResolved",
+    data: { requestId: "req-9", selectedOptionId: "opt-always" },
+  } as AgentEvent;
+  render(<EventStream events={[event, resolved]} onApprovalRespond={vi.fn()} />);
+  expect(screen.queryByRole("button", { name: "Allow always" })).not.toBeInTheDocument();
+  expect(screen.getByText("Allow always")).toBeInTheDocument();
+});
+
+test("approvalResolved events render nothing themselves", () => {
+  const events = [
+    { kind: "approvalResolved", data: { requestId: "req-1", selectedOptionId: "allow" } },
+  ] as AgentEvent[];
+  const { container } = render(<EventStream events={events} />);
+  expect(container.textContent).not.toContain("allow");
+});
+
 test("renders nothing for an unknown event kind (forward compatibility)", () => {
   // A newer backend may persist kinds this frontend build doesn't know yet.
   const unknown = { kind: "sparkles_v9", data: { text: "pondering" } } as unknown as AgentEvent;
