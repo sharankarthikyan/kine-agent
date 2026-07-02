@@ -363,7 +363,15 @@ pub async fn drive_session(
     let prompt_fut = client::session_prompt(&peer, &acp_session_id, &prompt_text);
     tokio::pin!(prompt_fut);
     let mut cancel = cancel; // owned mutable receiver
-    let mut cancel_sent = false;
+    // Two flags, deliberately split: `cancel_arm_disarmed` guards the select
+    // branch and is set unconditionally on its first firing (even a dropped
+    // sender or a spurious `false` must disarm it, or an Err would spin the
+    // loop). `user_cancelled` is set ONLY when a real user stop was processed —
+    // it drives the Done-vs-Error mapping at turn end and the post-cancel
+    // permission short-circuit, so a later agent-initiated "cancelled"
+    // stopReason still maps to Error when no user stop actually happened.
+    let mut cancel_arm_disarmed = false;
+    let mut user_cancelled = false;
 
     loop {
         tokio::select! {
@@ -383,7 +391,14 @@ pub async fn drive_session(
                             handle_notification(&method, &params, sink.as_ref(), &mut final_text);
                         }
                         Inbound::Request { id, method, params } => {
-                            let answer = prepare_answer(&method, &params, permission_mode.as_deref(), profile.interactive_escalations, fs_root.as_deref(), sink.as_ref(), &approvals, &app_session_id);
+                            // After session/cancel, ANY permission request answers
+                            // cancelled (ACP mandate) — never re-open an approval
+                            // card the user already stopped.
+                            let answer = if user_cancelled && method == "session/request_permission" {
+                                InboundAnswer::Immediate(None)
+                            } else {
+                                prepare_answer(&method, &params, permission_mode.as_deref(), profile.interactive_escalations, fs_root.as_deref(), sink.as_ref(), &approvals, &app_session_id)
+                            };
                             if let Some(event) = answer_request(&peer, id, &method, answer).await {
                                 sink.emit(event); // FileWrite — sync emit after the await
                             }
@@ -392,7 +407,7 @@ pub async fn drive_session(
                 }
                 match stop {
                     Ok(reason) if reason == "cancelled" => {
-                        if cancel_sent {
+                        if user_cancelled {
                             // The user asked for this stop: keep the partial
                             // output; it is not an error.
                             sink.emit(AgentEvent::Done { summary: final_text.clone() });
@@ -411,12 +426,13 @@ pub async fn drive_session(
             // draining updates until the agent answers session/prompt with
             // stopReason "cancelled" — or run_persisting's grace expires and
             // drops us (the pgid guard then kills the tree).
-            changed = cancel.changed(), if !cancel_sent => {
-                cancel_sent = true;
+            changed = cancel.changed(), if !cancel_arm_disarmed => {
+                cancel_arm_disarmed = true;
                 if changed.is_err() {
                     // Sender dropped without signalling (run teardown) — treat
                     // as a no-op; the arm stays disarmed either way.
                 } else if *cancel.borrow() {
+                    user_cancelled = true;
                     approvals.cancel_session(&app_session_id);
                     if let Err(e) = client::session_cancel(&peer, &acp_session_id).await {
                         eprintln!("acp: session/cancel failed: {e} — relying on the grace-timeout kill");
@@ -437,7 +453,14 @@ pub async fn drive_session(
                         handle_notification(&method, &params, sink.as_ref(), &mut final_text);
                     }
                     Some(Inbound::Request { id, method, params }) => {
-                        let answer = prepare_answer(&method, &params, permission_mode.as_deref(), profile.interactive_escalations, fs_root.as_deref(), sink.as_ref(), &approvals, &app_session_id);
+                        // After session/cancel, ANY permission request answers
+                        // cancelled (ACP mandate) — never re-open an approval
+                        // card the user already stopped.
+                        let answer = if user_cancelled && method == "session/request_permission" {
+                            InboundAnswer::Immediate(None)
+                        } else {
+                            prepare_answer(&method, &params, permission_mode.as_deref(), profile.interactive_escalations, fs_root.as_deref(), sink.as_ref(), &approvals, &app_session_id)
+                        };
                         if let Some(event) = answer_request(&peer, id, &method, answer).await {
                             sink.emit(event); // FileWrite — sync emit after the await
                         }
@@ -2144,6 +2167,62 @@ mod tests {
             !events.iter().any(|e| matches!(e, AgentEvent::Error { .. })),
             "a user stop is not an error: {events:?}"
         );
+    }
+
+    /// A permission request racing in AFTER the user's stop (queued behind the
+    /// cancel, or sent by the agent before it processed our session/cancel)
+    /// must be answered with the cancelled outcome IMMEDIATELY — never
+    /// registered, never surfaced as a fresh approval card. ACP's mandate
+    /// covers post-cancel requests too; re-opening a card here would block the
+    /// agent until the grace window degrades the graceful cancel to a kill.
+    #[tokio::test]
+    async fn permission_request_after_cancel_answers_cancelled_without_new_card() {
+        let prompt = Prompt { text: "hello".into(), permission_mode: None, ..Default::default() };
+        let h = run_fixture(
+            prompt,
+            // Flip the cancel switch once the first token has landed.
+            Some(Box::new(|events, _approvals, cancel_tx| {
+                tokio::spawn(async move {
+                    loop {
+                        let seen = events.lock().unwrap().iter().any(
+                            |e| matches!(e, AgentEvent::Token { text } if text == "partial "),
+                        );
+                        if seen {
+                            let _ = cancel_tx.send(true);
+                            return;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+            })),
+            |mut lines, mut w, prompt_id, _wt| async move {
+                send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{
+                    "sessionId":"acp-abc","update":{"sessionUpdate":"agent_message_chunk",
+                    "content":{"type":"text","text":"partial "}}}})).await;
+                let msg: serde_json::Value =
+                    serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+                assert_eq!(msg["method"], "session/cancel");
+                // The agent hadn't processed the cancel yet: one more permission
+                // request arrives AFTER our session/cancel went out.
+                send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":55,"method":"session/request_permission","params":{
+                    "sessionId":"acp-abc","toolCall":{"toolCallId":"t2","title":"Edit late.rs","rawInput":{}},
+                    "options":[{"optionId":"ok","name":"Allow","kind":"allow_once"},
+                               {"optionId":"no","name":"Reject","kind":"reject_once"}]}})).await;
+                let ans: serde_json::Value =
+                    serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+                assert_eq!(ans["id"], 55);
+                assert_eq!(ans["result"]["outcome"]["outcome"], "cancelled");
+                send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":prompt_id,
+                    "result":{"stopReason":"cancelled"}})).await;
+            },
+        )
+        .await;
+        let events = h.events.lock().unwrap();
+        assert!(
+            !events.iter().any(|e| matches!(e, AgentEvent::ApprovalNeeded { .. })),
+            "no approval card may re-open after the user pressed Stop: {events:?}"
+        );
+        assert!(matches!(events.last().unwrap(), AgentEvent::Done { .. }));
     }
 
     /// Stop while an approval card is pending: the cancel arm resolves the
