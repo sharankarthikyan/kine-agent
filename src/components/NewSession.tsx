@@ -7,7 +7,6 @@ import {
   Paperclip,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
@@ -35,7 +34,7 @@ interface NewSessionProps {
   model: ModelInfo | null;
   permissionMode: PermissionMode;
   sandboxTerminal: boolean;
-  /** Streaming engine: "pipe" (default, CLI adapters) | "acp" (beta, claude + codex). */
+  /** Streaming engine: "acp" (default for claude + codex when Node is available) | "pipe" (legacy CLI adapters; the opt-out). */
   engine: Engine;
   running: boolean;
   onPickRepo: () => void;
@@ -301,18 +300,18 @@ export function NewSession({
                 onSandboxTerminalChange={onSandboxTerminalChange}
               />
 
-              {/* ACP streaming engine (claude M1, codex M6; default off ⇒ pipe adapter).
-                  Gemini becomes ACP-only in M7 — until then no toggle for it. */}
+              {/* ACP streaming engine — the DEFAULT for claude/codex (M1–M8
+                  rollout complete); the switch is the opt-out back to the
+                  legacy pipe adapters. Hidden for agents without ACP support. */}
               {(agent?.id === "claude" || agent?.id === "codex") && (
                 <label className="flex shrink-0 cursor-pointer select-none items-center gap-1.5 whitespace-nowrap text-xs text-muted-foreground">
                   <Switch
                     checked={engine === "acp"}
                     onCheckedChange={(on) => onEngineChange(on ? "acp" : "pipe")}
                     disabled={running}
-                    aria-label="ACP streaming (beta — requires Node.js)"
+                    aria-label="ACP streaming (requires Node.js)"
                   />
                   <span>ACP streaming</span>
-                  <Badge variant="outline">beta</Badge>
                 </label>
               )}
             </div>

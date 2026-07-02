@@ -38,7 +38,9 @@ import { Toaster } from "@/components/ui/sonner";
 import {
   cleanupSession,
   continueExternalSession,
+  defaultEngineFor,
   listTrustedRepos,
+  nodeAvailable,
   pickRepository,
   respondToApproval,
   engineForAgentSwitch,
@@ -139,7 +141,7 @@ type PaneDraft = {
   modelValue: string | null;
   permissionMode: PermissionMode;
   sandbox: boolean;
-  /** Streaming engine: "pipe" (default, CLI adapters) | "acp" (beta, claude + codex). */
+  /** Streaming engine: "acp" (default for claude + codex when Node is available) | "pipe" (legacy CLI adapters; the opt-out). */
   engine: Engine;
 };
 type EventPageState = {
@@ -238,6 +240,11 @@ export default function App() {
   const [sessionModelValues, setSessionModelValues] = useState<Record<string, string>>({});
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [selectedAgent, setSelectedAgent] = useState<AgentInfo | null>(null);
+  // Node presence gates the ACP default for new drafts (ACP agents launch via
+  // npx). Optimistic true: worst case a Node-less machine's first draft shows
+  // ACP and the spawn error explains — flipped to false as soon as the check
+  // lands, and the check is near-instant.
+  const [nodeOk, setNodeOk] = useState(true);
   // Permission mode for the NEW Session composer — remembered across launches as the
   // user's preferred default. Its Antigravity terminal-sandbox toggle is transient.
   const [newSessionPermissionMode, setNewSessionPermissionMode] =
@@ -711,7 +718,7 @@ export default function App() {
       modelValue: selectedModel?.agent === agentId ? (selectedModel?.value ?? null) : null,
       permissionMode: newSessionPermissionMode,
       sandbox: newSessionSandbox,
-      engine: "pipe",
+      engine: defaultEngineFor(agentId, nodeOk),
     };
   }
 
@@ -1027,6 +1034,12 @@ export default function App() {
   useEffect(() => {
     void loadModels();
   }, [loadModels]);
+
+  useEffect(() => {
+    nodeAvailable()
+      .then(setNodeOk)
+      .catch(() => setNodeOk(false));
+  }, []);
 
   useEffect(() => {
     const clampPanes = () => {

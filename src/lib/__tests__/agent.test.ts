@@ -3,6 +3,7 @@ import {
   startSession,
   cleanupSession,
   continueExternalSession,
+  defaultEngineFor,
   engineForAgentSwitch,
   listTrustedRepos,
   pickRepository,
@@ -25,6 +26,23 @@ describe("engineForAgentSwitch", () => {
 
   it("passes pipe through unchanged for ACP-capable agents", () => {
     expect(engineForAgentSwitch("codex", "pipe")).toBe("pipe");
+  });
+});
+
+describe("defaultEngineFor", () => {
+  it("defaults claude and codex to acp when Node is present", () => {
+    expect(defaultEngineFor("claude", true)).toBe("acp");
+    expect(defaultEngineFor("codex", true)).toBe("acp");
+  });
+
+  it("falls back to pipe without Node — ACP agents are npx-launched", () => {
+    expect(defaultEngineFor("claude", false)).toBe("pipe");
+    expect(defaultEngineFor("codex", false)).toBe("pipe");
+  });
+
+  it("is always pipe for agents without ACP support", () => {
+    expect(defaultEngineFor("antigravity", true)).toBe("pipe");
+    expect(defaultEngineFor("gemini", true)).toBe("pipe");
   });
 });
 

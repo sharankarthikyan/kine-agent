@@ -257,6 +257,12 @@ test("hides the ACP toggle for antigravity", () => {
   expect(screen.queryByRole("switch", { name: /acp streaming/i })).not.toBeInTheDocument();
 });
 
+test("shows the ACP toggle without a beta badge — ACP is the default now", () => {
+  setup({ agent: claudeAgent, engine: "acp" });
+  expect(screen.getByRole("switch", { name: /acp streaming/i })).toBeInTheDocument();
+  expect(screen.queryByText(/beta/i)).not.toBeInTheDocument();
+});
+
 test("Antigravity offers only Ask before edits + Full access (no Auto-edit or advanced)", async () => {
   const antigravityAgent: AgentInfo = { id: "antigravity", label: "Antigravity", installed: true };
   setup({ agent: antigravityAgent });
