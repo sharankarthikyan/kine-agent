@@ -13,12 +13,18 @@ use tokio::process::ChildStdin;
 /// without killing the stream. Generous enough for any legitimate event.
 pub(crate) const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
 
+/// Bytes of an oversized line retained for salvage (enough to hold the
+/// top-level JSON-RPC keys, which precede the oversized payload in practice).
+pub(crate) const SKIPPED_HEAD_BYTES: usize = 4096;
+
 /// Outcome of [`read_capped_line`].
 pub(crate) enum CappedLine {
     /// A complete line within the cap, with any trailing CR/LF stripped.
     Line(Vec<u8>),
-    /// A line exceeded the cap and was dropped; carries its total byte length for logging.
-    Skipped(usize),
+    /// A line exceeded the cap and was dropped; carries its total byte length
+    /// for logging plus the first [`SKIPPED_HEAD_BYTES`] bytes so protocol
+    /// layers can salvage an id/method instead of leaving an RPC dangling.
+    Skipped { total: usize, head: Vec<u8> },
     /// End of stream.
     Eof,
 }
@@ -57,7 +63,9 @@ pub(crate) async fn read_capped_line<R: AsyncBufRead + Unpin>(
         reader.consume(len);
     }
     if total > cap {
-        return Ok(CappedLine::Skipped(total));
+        let mut head = buf;
+        head.truncate(SKIPPED_HEAD_BYTES);
+        return Ok(CappedLine::Skipped { total, head });
     }
     while matches!(buf.last(), Some(b'\n' | b'\r')) {
         buf.pop();
@@ -113,6 +121,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn skipped_line_retains_a_bounded_head() {
+        let big = format!("{}\nafter\n", "x".repeat(64));
+        let lines = collect(big.as_bytes(), 16).await;
+        match &lines[0] {
+            CappedLine::Skipped { total, head } => {
+                assert_eq!(*total, 64);
+                assert!(head.len() <= SKIPPED_HEAD_BYTES);
+                assert!(head.starts_with(b"xxxx"), "head must hold the line's first bytes");
+            }
+            _other => panic!("expected Skipped, got a different variant"),
+        }
+        assert!(matches!(&lines[1], CappedLine::Line(b) if b == b"after"));
+    }
+
+    #[tokio::test]
     async fn reads_lines_and_strips_newlines() {
         let lines = collect(b"alpha\nbeta\r\ngamma", 1024).await;
         // alpha, beta, gamma, eof
@@ -131,7 +154,7 @@ mod tests {
         let lines = collect(&input, 8).await;
         // oversized (skipped), "ok", eof
         assert_eq!(lines.len(), 3);
-        assert!(matches!(lines[0], CappedLine::Skipped(50)));
+        assert!(matches!(lines[0], CappedLine::Skipped { total: 50, .. }));
         assert!(matches!(&lines[1], CappedLine::Line(b) if b == b"ok"));
         assert!(matches!(lines[2], CappedLine::Eof));
     }

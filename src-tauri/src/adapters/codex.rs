@@ -274,7 +274,7 @@ pub async fn spawn_and_stream(
     loop {
         match read_capped_line(&mut reader, MAX_LINE_BYTES).await? {
             CappedLine::Eof => break,
-            CappedLine::Skipped(bytes) => {
+            CappedLine::Skipped { total: bytes, .. } => {
                 eprintln!("codex: skipped an oversized stdout line ({bytes} bytes)");
             }
             CappedLine::Line(buf) => {

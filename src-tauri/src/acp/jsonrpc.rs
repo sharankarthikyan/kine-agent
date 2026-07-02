@@ -82,6 +82,11 @@ impl RpcPeer {
         let reader_pending = Arc::clone(&pending);
         let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let reader_closed = Arc::clone(&closed);
+        // Created before the reader task is spawned so the reader can answer
+        // oversized inbound requests inline instead of leaving them dangling.
+        let writer: Arc<tokio::sync::Mutex<Box<dyn AsyncWrite + Unpin + Send>>> =
+            Arc::new(tokio::sync::Mutex::new(Box::new(write)));
+        let reader_writer = Arc::clone(&writer);
         tokio::spawn(async move {
             let mut reader = BufReader::new(read);
             loop {
@@ -89,8 +94,15 @@ impl RpcPeer {
                 // skipped rather than buffered unbounded — never fatal.
                 match read_capped_line(&mut reader, MAX_LINE_BYTES).await {
                     Ok(CappedLine::Eof) => break,
-                    Ok(CappedLine::Skipped(bytes)) => {
-                        eprintln!("acp: skipped an oversized stdout line ({bytes} bytes)");
+                    Ok(CappedLine::Skipped { total, head }) => {
+                        eprintln!("acp: skipped an oversized stdout line ({total} bytes)");
+                        handle_oversized(
+                            &String::from_utf8_lossy(&head),
+                            total,
+                            &reader_pending,
+                            &reader_writer,
+                        )
+                        .await;
                     }
                     Ok(CappedLine::Line(buf)) => {
                         let line = String::from_utf8_lossy(&buf);
@@ -112,7 +124,7 @@ impl RpcPeer {
             }
         });
         Self {
-            writer: Arc::new(tokio::sync::Mutex::new(Box::new(write))),
+            writer,
             pending,
             next_id: Arc::new(AtomicU64::new(1)),
             inbound_rx: Arc::new(Mutex::new(Some(inbound_rx))),
@@ -190,15 +202,7 @@ impl RpcPeer {
     /// away — normalized to [`RpcError::Closed`] here so `request`, `notify`,
     /// `respond`, and `respond_error` all report the same "connection is gone" error.
     async fn write_line(&self, msg: &Value) -> Result<(), RpcError> {
-        let mut line = msg.to_string();
-        line.push('\n');
-        let mut w = self.writer.lock().await;
-        let result = async {
-            w.write_all(line.as_bytes()).await?;
-            w.flush().await
-        }
-        .await;
-        result.map_err(|io_err| {
+        write_line_to(&self.writer, msg).await.map_err(|io_err| {
             if matches!(
                 io_err.kind(),
                 std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::UnexpectedEof
@@ -208,6 +212,79 @@ impl RpcPeer {
                 RpcError::Io(io_err)
             }
         })
+    }
+}
+
+/// Write one ndjson line to a shared writer. Raw IO — error normalization
+/// (BrokenPipe → Closed) stays in [`RpcPeer::write_line`].
+async fn write_line_to(
+    writer: &tokio::sync::Mutex<Box<dyn AsyncWrite + Unpin + Send>>,
+    msg: &Value,
+) -> std::io::Result<()> {
+    let mut line = msg.to_string();
+    line.push('\n');
+    let mut w = writer.lock().await;
+    w.write_all(line.as_bytes()).await?;
+    w.flush().await
+}
+
+/// Best-effort extraction of the top-level `id` and `method` from the retained
+/// head of an oversized JSON-RPC line. Heuristic: JSON serializers emit keys in
+/// insertion order, so the top-level `jsonrpc`/`id`/`method` keys precede the
+/// oversized `params`/`result` payload — the first occurrence in the head is
+/// the top-level one. The alternative to this heuristic is a guaranteed hang.
+fn salvage_id_and_method(head: &str) -> (Option<Value>, Option<String>) {
+    fn scalar_after(head: &str, key: &str) -> Option<Value> {
+        let pos = head.find(key)?;
+        let rest = head[pos + key.len()..].trim_start();
+        let rest = rest.strip_prefix(':')?.trim_start();
+        serde_json::Deserializer::from_str(rest)
+            .into_iter::<Value>()
+            .next()?
+            .ok()
+    }
+    // Only scalar ids are trustworthy; anything else means the match landed
+    // inside nested payload text.
+    let id = scalar_after(head, "\"id\"").filter(|v| v.is_number() || v.is_string());
+    let method =
+        scalar_after(head, "\"method\"").and_then(|v| v.as_str().map(str::to_string));
+    (id, method)
+}
+
+/// An oversized line was dropped — do NOT leave the protocol hanging. A salvaged
+/// request gets an error answer; a salvaged response fails its pending request;
+/// an unsalvageable line is logged and skipped (the pre-M5 behavior).
+async fn handle_oversized(
+    head: &str,
+    total: usize,
+    pending: &Pending,
+    writer: &tokio::sync::Mutex<Box<dyn AsyncWrite + Unpin + Send>>,
+) {
+    match salvage_id_and_method(head) {
+        (Some(id), Some(method)) => {
+            eprintln!("acp: answering oversized {method} request (id {id}) with an error");
+            let msg = serde_json::json!({
+                "jsonrpc": "2.0", "id": id,
+                "error": {"code": -32600, "message": format!(
+                    "message exceeds the {} MiB line limit ({total} bytes)",
+                    MAX_LINE_BYTES / (1024 * 1024)
+                )}
+            });
+            if let Err(e) = write_line_to(writer, &msg).await {
+                eprintln!("acp: failed to answer oversized request: {e}");
+            }
+        }
+        (Some(id), None) => {
+            // A response to one of our requests, too big to parse.
+            let key = id.to_string();
+            let tx = pending.lock().unwrap_or_else(|p| p.into_inner()).remove(&key);
+            if let Some(tx) = tx {
+                let _ = tx.send(Err(RpcError::Protocol(format!(
+                    "oversized response dropped ({total} bytes)"
+                ))));
+            }
+        }
+        _ => eprintln!("acp: oversized line was unsalvageable — no id/method in its head"),
     }
 }
 
@@ -443,6 +520,79 @@ mod tests {
         drop(agent); // close the connection with the request outstanding
         let err = fut.await.unwrap_err();
         assert!(matches!(err, RpcError::Closed));
+    }
+
+    #[test]
+    fn salvages_id_and_method_from_truncated_head() {
+        let head = r#"{"jsonrpc":"2.0","id":5,"method":"fs/write_text_file","params":{"sessionId":"s","path":"/w/big.txt","content":"AAAAAA"#;
+        let (id, method) = salvage_id_and_method(head);
+        assert_eq!(id, Some(serde_json::json!(5)));
+        assert_eq!(method.as_deref(), Some("fs/write_text_file"));
+
+        // Response shape: id but no method.
+        let head = r#"{"jsonrpc":"2.0","id":12,"result":{"content":"AAAA"#;
+        let (id, method) = salvage_id_and_method(head);
+        assert_eq!(id, Some(serde_json::json!(12)));
+        assert_eq!(method, None);
+
+        // String ids survive; unsalvageable garbage yields (None, None).
+        let (id, _) = salvage_id_and_method(r#"{"id":"abc","method":"m"#);
+        assert_eq!(id, Some(serde_json::json!("abc")));
+        assert_eq!(salvage_id_and_method("garbage no json"), (None, None));
+    }
+
+    #[tokio::test]
+    async fn oversized_inbound_request_is_answered_with_an_error_not_dropped() {
+        let (peer, agent) = harness();
+        let (r, mut agent_tx) = tokio::io::split(agent);
+        let mut agent_rx = BufReader::new(r).lines();
+        let _inbound = peer.inbound();
+        // A request whose params blob blows the 8 MiB line cap.
+        let blob = "A".repeat(MAX_LINE_BYTES + 1024);
+        let line = format!(
+            "{{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"fs/write_text_file\",\"params\":{{\"content\":\"{blob}\"}}}}\n"
+        );
+        let writer_task = tokio::spawn(async move {
+            agent_tx.write_all(line.as_bytes()).await.unwrap();
+            agent_tx
+        });
+        // The peer must ANSWER id 5 with an error instead of dropping it silently.
+        let ans: serde_json::Value =
+            serde_json::from_str(&agent_rx.next_line().await.unwrap().unwrap()).unwrap();
+        assert_eq!(ans["id"], 5);
+        assert_eq!(ans["error"]["code"], -32600);
+        assert!(ans["error"]["message"].as_str().unwrap().contains("line limit"));
+        // The transport stays alive: a normal follow-up line still routes.
+        let mut agent_tx = writer_task.await.unwrap();
+        agent_tx
+            .write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{}}\n")
+            .await
+            .unwrap();
+        drop(agent_tx);
+    }
+
+    #[tokio::test]
+    async fn oversized_response_fails_its_pending_request_instead_of_hanging() {
+        let (peer, agent) = harness();
+        let (r, mut agent_tx) = tokio::io::split(agent);
+        let mut agent_rx = BufReader::new(r).lines();
+        let fut = peer.request("x", serde_json::json!({}));
+        let agent_task = tokio::spawn(async move {
+            let line = agent_rx.next_line().await.unwrap().unwrap();
+            let req: serde_json::Value = serde_json::from_str(&line).unwrap();
+            let blob = "A".repeat(MAX_LINE_BYTES + 1024);
+            let resp = format!(
+                "{{\"jsonrpc\":\"2.0\",\"id\":{},\"result\":{{\"content\":\"{blob}\"}}}}\n",
+                req["id"]
+            );
+            agent_tx.write_all(resp.as_bytes()).await.unwrap();
+        });
+        let err = tokio::time::timeout(std::time::Duration::from_secs(10), fut)
+            .await
+            .expect("must not hang")
+            .unwrap_err();
+        assert!(matches!(err, RpcError::Protocol(_)), "got {err:?}");
+        agent_task.await.unwrap();
     }
 
     #[tokio::test]
