@@ -569,11 +569,7 @@ fn ensure_scope_dir(scope: &Path) -> Result<(), String> {
 /// under headless `-p`, so Kineloop never offers it.
 fn validate_permission_mode(mode: Option<String>) -> Result<Option<String>, String> {
     match mode.as_deref() {
-        None
-        | Some("default")
-        | Some("acceptEdits")
-        | Some("plan")
-        | Some("full")
+        None | Some("default") | Some("acceptEdits") | Some("plan") | Some("full")
         | Some("dontAsk") => Ok(mode),
         Some(other) => Err(format!("unsupported permission mode: {other}")),
     }
@@ -979,6 +975,8 @@ pub async fn send_message(
         .await
         .map_err(|e| e.to_string())?
         .unwrap_or_else(|| "claude".to_string());
+    // Deliberately not re-validated: engine values only enter the DB through
+    // start_session's validate_engine, so the stored value is trusted here.
     let engine = store
         .get_engine(&session_id)
         .await
@@ -1709,8 +1707,14 @@ mod tests {
     fn engine_matrix_validates_per_agent() {
         // M1: pipe for all spawnable agents; acp for claude only.
         assert_eq!(validate_engine(None, "claude").unwrap(), "pipe");
-        assert_eq!(validate_engine(Some("pipe".into()), "codex").unwrap(), "pipe");
-        assert_eq!(validate_engine(Some("acp".into()), "claude").unwrap(), "acp");
+        assert_eq!(
+            validate_engine(Some("pipe".into()), "codex").unwrap(),
+            "pipe"
+        );
+        assert_eq!(
+            validate_engine(Some("acp".into()), "claude").unwrap(),
+            "acp"
+        );
         assert!(validate_engine(Some("acp".into()), "codex").is_err()); // M6
         assert!(validate_engine(Some("acp".into()), "antigravity").is_err()); // never
         assert!(validate_engine(Some("warp".into()), "claude").is_err());
