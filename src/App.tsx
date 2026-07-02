@@ -1349,15 +1349,6 @@ export default function App() {
         return;
       }
     }
-    // ACP M1 auto-answers permission requests from the mode instead of asking:
-    // "Ask before edits" therefore DECLINES gated actions. Nudge once at start so
-    // an auto-rejected edit reads as expected behavior, not a broken feature.
-    if (opts?.engine === "acp" && effectivePermissionMode === "default") {
-      toast.info("ACP streaming with “Ask before edits”", {
-        description:
-          "This beta auto-declines gated actions instead of asking. Switch the session to “Edit automatically” to let the agent change files.",
-      });
-    }
     if (opts?.engine === "acp" && shouldShowAcpDownloadNotice()) {
       toast.info("First ACP run downloads the agent adapter", {
         description:

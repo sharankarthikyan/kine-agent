@@ -259,9 +259,13 @@ async fn run_persisting(
     let run_future = async {
         match (agent.as_str(), engine.as_str()) {
             ("claude", store::ENGINE_ACP) => {
-                crate::adapters::acp::AcpAdapter::new(captured.clone())
-                    .run(prompt, cwd, adapter_id, do_resume, sink)
-                    .await
+                crate::adapters::acp::AcpAdapter::new(
+                    captured.clone(),
+                    approvals.clone(),
+                    session_id.clone(),
+                )
+                .run(prompt, cwd, adapter_id, do_resume, sink)
+                .await
             }
             ("codex", _) => {
                 crate::adapters::codex::CodexAdapter::new(captured.clone())

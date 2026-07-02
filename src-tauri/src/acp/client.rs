@@ -222,6 +222,27 @@ pub fn parse_permission_options(params: &Value) -> Vec<PermissionOption> {
         .unwrap_or_default()
 }
 
+/// Human-readable pieces of a session/request_permission request, for the
+/// ApprovalNeeded event. ACP supplies its own description (the tool call's
+/// title) — deliberately NOT routed through `mcp::describe` (spec §Inbound
+/// request handling). Every field degrades to a safe fallback.
+pub fn parse_permission_request(params: &Value) -> (String, String, String) {
+    let tool_call = params.get("toolCall");
+    let title = tool_call
+        .and_then(|tc| tc.get("title"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty());
+    let tool = title.unwrap_or("tool").to_string();
+    let input = tool_call
+        .and_then(|tc| tc.get("rawInput"))
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "{}".to_string());
+    let prompt = title
+        .map(str::to_string)
+        .unwrap_or_else(|| "The agent requests permission to use a tool.".to_string());
+    (tool, input, prompt)
+}
+
 /// M1 auto-answer: autonomous permission modes allow, everything else rejects.
 /// Prefers `*_once` over `*_always` so an M1 auto-answer never persists a policy.
 /// Returns the optionId to select, or None when no matching option exists.
@@ -481,6 +502,27 @@ mod tests {
             auto_select_option(&options, Some("full")),
             Some("ao".to_string())
         );
+    }
+
+    #[test]
+    fn parse_permission_request_uses_tool_call_title_and_raw_input() {
+        let params = serde_json::json!({
+            "sessionId": "s",
+            "toolCall": {"toolCallId": "t1", "title": "Edit main.rs", "rawInput": {"path": "main.rs"}},
+            "options": []
+        });
+        let (tool, input, prompt) = parse_permission_request(&params);
+        assert_eq!(tool, "Edit main.rs");
+        assert!(input.contains("main.rs"));
+        assert_eq!(prompt, "Edit main.rs");
+    }
+
+    #[test]
+    fn parse_permission_request_degrades_on_missing_fields() {
+        let (tool, input, prompt) = parse_permission_request(&serde_json::json!({}));
+        assert_eq!(tool, "tool");
+        assert_eq!(input, "{}");
+        assert_eq!(prompt, "The agent requests permission to use a tool.");
     }
 
     #[test]
