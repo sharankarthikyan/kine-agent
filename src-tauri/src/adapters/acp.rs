@@ -169,7 +169,7 @@ pub async fn drive_session(
     // Canonicalized once: every fs/* request is contained against this root.
     // Canonicalization also survives macOS /tmp symlinks and Windows \\?\ paths.
     // A canonicalize failure leaves `None` — every fs request is then rejected
-    // with -32603, never served unguarded.
+    // with -32602, never served unguarded.
     let fs_root = std::fs::canonicalize(&cwd).ok();
 
     let can_load = client::initialize(&peer)
@@ -382,7 +382,14 @@ enum InboundAnswer {
     /// decision (or a closed channel — see [`ApprovalRegistry::cancel_session`]).
     ///
     /// [`ApprovalRegistry::cancel_session`]: crate::approval::ApprovalRegistry::cancel_session
-    Deferred(tokio::sync::oneshot::Receiver<crate::approval::ApprovalDecision>),
+    Deferred {
+        rx: tokio::sync::oneshot::Receiver<crate::approval::ApprovalDecision>,
+        /// The option ids the agent actually offered. A resolution carrying any
+        /// other id (e.g. a non-ACP-aware registry caller) is clamped to
+        /// cancelled rather than forwarded — the agent's behavior on an
+        /// unoffered optionId is unspecified.
+        offered: Vec<String>,
+    },
     /// fs/read_text_file, validated + resolved inside the session worktree.
     FsRead { path: PathBuf, line: Option<u64>, limit: Option<u64> },
     /// fs/write_text_file, validated + resolved inside the session worktree.
@@ -424,6 +431,7 @@ fn prepare_answer(
             let request_id = approvals.next_request_id();
             let rx = approvals.register(&request_id, app_session_id);
             let (tool, input, prompt) = client::parse_permission_request(params);
+            let offered: Vec<String> = options.iter().map(|o| o.option_id.clone()).collect();
             sink.emit(AgentEvent::ApprovalNeeded {
                 request_id,
                 tool,
@@ -438,7 +446,7 @@ fn prepare_answer(
                     })
                     .collect(),
             });
-            InboundAnswer::Deferred(rx)
+            InboundAnswer::Deferred { rx, offered }
         }
         "fs/read_text_file" => match (fs_root, client::parse_fs_read(params)) {
             (Some(root), Some((path, line, limit))) => {
@@ -513,11 +521,19 @@ async fn answer_request(
             }
             None
         }
-        InboundAnswer::Deferred(rx) => {
+        InboundAnswer::Deferred { rx, offered } => {
             let peer = peer.clone();
             tokio::spawn(async move {
                 let selected = match rx.await {
-                    Ok(decision) => decision.selected_option_id,
+                    Ok(decision) => decision.selected_option_id.filter(|id| {
+                        let ok = offered.iter().any(|o| o == id);
+                        if !ok {
+                            eprintln!(
+                                "acp: ignoring un-offered approval option id {id:?} — answering cancelled"
+                            );
+                        }
+                        ok
+                    }),
                     Err(_) => None, // registry dropped the entry (run ended) → cancelled
                 };
                 if let Err(e) = client::respond_permission(&peer, id, selected.as_deref()).await {
@@ -1109,6 +1125,66 @@ mod tests {
                 assert_eq!(ans["id"], 41);
                 assert_eq!(ans["result"]["outcome"]["outcome"], "selected");
                 assert_eq!(ans["result"]["outcome"]["optionId"], "ok-once");
+                send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":prompt_id,
+                    "result":{"stopReason":"completed"}})).await;
+            },
+        )
+        .await;
+        let events = h.events.lock().unwrap();
+        let approval = events.iter().find_map(|e| match e {
+            AgentEvent::ApprovalNeeded { request_id, tool, options, .. } => {
+                Some((request_id.clone(), tool.clone(), options.clone()))
+            }
+            _ => None,
+        });
+        let (_, tool, options) = approval.expect("ApprovalNeeded surfaced");
+        assert_eq!(tool, "Edit main.rs");
+        assert_eq!(options.len(), 2);
+        assert_eq!(options[0].id, "ok-once");
+        assert_eq!(options[0].label, "Allow once");
+        assert!(
+            events.iter().any(|e| matches!(e, AgentEvent::Token { text } if text == "still streaming")),
+            "streaming continued while the approval was pending"
+        );
+        assert!(matches!(events.last().unwrap(), AgentEvent::Done { .. }));
+    }
+
+    /// A resolve carrying an option id the agent never offered (possible via a
+    /// non-ACP-aware caller of the registry) must NOT be forwarded — the agent's
+    /// behavior on unknown optionIds is unspecified. It degrades to cancelled.
+    #[tokio::test]
+    async fn unoffered_option_id_degrades_to_cancelled() {
+        let prompt = Prompt {
+            text: "hello".into(),
+            permission_mode: None,
+            ..Default::default()
+        };
+        let h = run_fixture(
+            prompt,
+            // Resolve only after the "still streaming" token has ALSO been
+            // processed — an inline-await regression deadlocks here instead of
+            // passing (see spawn_resolver).
+            Some(Box::new(|events, approvals| {
+                spawn_resolver(events, approvals, "not-a-real-option", Some("still streaming"))
+            })),
+            |mut lines, mut w, prompt_id, _wt| async move {
+                // Permission request, then MORE streaming — proving no head-of-line block.
+                for msg in [
+                    serde_json::json!({"jsonrpc":"2.0","id":41,"method":"session/request_permission","params":{
+                        "sessionId":"acp-abc","toolCall":{"toolCallId":"t1","title":"Edit main.rs","rawInput":{"path":"main.rs"}},
+                        "options":[{"optionId":"ok-once","name":"Allow once","kind":"allow_once"},
+                                   {"optionId":"no","name":"Reject","kind":"reject_once"}]}}),
+                    serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{
+                        "sessionId":"acp-abc","update":{"sessionUpdate":"agent_message_chunk",
+                        "content":{"type":"text","text":"still streaming"}}}}),
+                ] {
+                    send_line(&mut w, msg).await;
+                }
+                // The answer to id 41 arrives only after the test resolves the registry.
+                let ans: serde_json::Value =
+                    serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+                assert_eq!(ans["id"], 41);
+                assert_eq!(ans["result"]["outcome"]["outcome"], "cancelled");
                 send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":prompt_id,
                     "result":{"stopReason":"completed"}})).await;
             },
