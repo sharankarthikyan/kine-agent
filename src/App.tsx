@@ -139,7 +139,7 @@ type PaneDraft = {
   modelValue: string | null;
   permissionMode: PermissionMode;
   sandbox: boolean;
-  /** Streaming engine: "pipe" (default, CLI adapters) | "acp" (beta, claude only). */
+  /** Streaming engine: "pipe" (default, CLI adapters) | "acp" (beta, claude + codex). */
   engine: Engine;
 };
 type EventPageState = {
