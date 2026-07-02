@@ -180,9 +180,14 @@ pub async fn drive_session(
     // fresh session (M5 adds the transcript-replay fallback so conversation
     // context isn't silently lost).
     let (acp_session_id, modes) = match resume_session {
-        Some(id) if can_load => match load_discarding_replay(&peer, &mut inbound, &id, &cwd).await
+        Some(id) if can_load => match load_discarding_replay(&peer, &mut inbound, &id, &cwd, fs_root.as_deref()).await
         {
-            Ok(modes) => (id, modes),
+            Ok((modes, replay_events)) => {
+                for event in replay_events {
+                    sink.emit(event); // sync emit — the load await already resolved
+                }
+                (id, modes)
+            }
             Err(e) => {
                 eprintln!("acp: session/load failed ({e}); starting a fresh session");
                 new_session(&peer, &cwd).await?
@@ -285,16 +290,20 @@ async fn new_session(
 /// notifications before answering session/load; Kineloop already persists that
 /// history itself, so re-emitting it would duplicate the transcript on every
 /// resume (and grow the events table multiplicatively). Returns the mode state
-/// the load response advertised on success.
+/// the load response advertised, plus any FileWrite events from fs writes the
+/// agent made mid-replay — the caller (`drive_session`) emits them synchronously
+/// once this await resolves, since no `&dyn EventSink` may cross an await here.
 async fn load_discarding_replay(
     peer: &RpcPeer,
     inbound: &mut tokio::sync::mpsc::UnboundedReceiver<Inbound>,
     session_id: &str,
     cwd: &str,
-) -> Result<client::SessionModes, crate::acp::jsonrpc::RpcError> {
+    fs_root: Option<&Path>,
+) -> Result<(client::SessionModes, Vec<AgentEvent>), crate::acp::jsonrpc::RpcError> {
     // The unbounded channel simply buffers the replay while we await the
     // response — but inbound REQUESTS still need answers (an agent blocking on
     // one mid-replay could never send the load response).
+    let mut file_writes = Vec::new();
     let load_fut = client::session_load(peer, session_id, cwd);
     tokio::pin!(load_fut);
     let result = loop {
@@ -303,10 +312,8 @@ async fn load_discarding_replay(
             result = &mut load_fut => break result,
             msg = inbound.recv() => match msg {
                 Some(Inbound::Notification { .. }) => {} // historical replay: drop
-                Some(Inbound::Request { id, method, .. }) => {
-                    let _ = peer
-                        .respond_error(id, -32601, &format!("{method} not supported"))
-                        .await;
+                Some(Inbound::Request { id, method, params }) => {
+                    answer_replay_request(peer, id, &method, &params, fs_root, &mut file_writes).await;
                 }
                 None => break Err(crate::acp::jsonrpc::RpcError::Closed),
             },
@@ -316,13 +323,45 @@ async fn load_discarding_replay(
     // response resolved, every replayed notification is already queued. Flush
     // whatever the select didn't get to, so none of it leaks into the live turn.
     while let Ok(msg) = inbound.try_recv() {
-        if let Inbound::Request { id, method, .. } = msg {
-            let _ = peer
-                .respond_error(id, -32601, &format!("{method} not supported"))
-                .await;
+        if let Inbound::Request { id, method, params } = msg {
+            answer_replay_request(peer, id, &method, &params, fs_root, &mut file_writes).await;
         }
     }
-    result
+    result.map(|modes| (modes, file_writes))
+}
+
+/// Answer one agent-initiated request arriving mid-replay. fs requests are
+/// served (the capability is advertised); permission requests are answered
+/// `cancelled` (no user context exists during replay); anything else is
+/// method-not-found. A successful write's FileWrite is pushed for the
+/// caller (drive_session) to emit after the load resolves.
+async fn answer_replay_request(
+    peer: &RpcPeer,
+    id: serde_json::Value,
+    method: &str,
+    params: &serde_json::Value,
+    fs_root: Option<&Path>,
+    file_writes: &mut Vec<AgentEvent>,
+) {
+    if let Some(answer) = prepare_fs_answer(method, params, fs_root) {
+        if let Some(event) = answer_request(peer, id, method, answer).await {
+            file_writes.push(event);
+        }
+        return;
+    }
+    if method == "session/request_permission" {
+        eprintln!("acp: permission request mid-replay — answering cancelled");
+        if let Err(e) = client::respond_permission(peer, id, None).await {
+            eprintln!("acp: failed to answer {method}: {e}");
+        }
+        return;
+    }
+    if let Err(e) = peer
+        .respond_error(id, -32601, &format!("{method} not supported"))
+        .await
+    {
+        eprintln!("acp: failed to answer {method}: {e}");
+    }
 }
 
 /// Map a session/update notification onto AgentEvents. Synchronous by design —
@@ -394,9 +433,10 @@ enum InboundAnswer {
     FsRead { path: PathBuf, line: Option<u64>, limit: Option<u64> },
     /// fs/write_text_file, validated + resolved inside the session worktree.
     FsWrite { path: PathBuf, content: String },
-    /// Malformed params, an unresolved worktree, or a fs_guard rejection
-    /// (escape attempt) — answered with -32602/-32603, never touches disk.
-    FsRejected { message: String },
+    /// Malformed params, an unresolved worktree, or a fs_guard rejection —
+    /// answered with `code` (-32602 for the agent's mistake, -32603 for ours),
+    /// never touches disk.
+    FsRejected { code: i64, message: String },
 }
 
 /// Decide how an inbound request should be answered. Synchronous by design —
@@ -413,6 +453,9 @@ fn prepare_answer(
     approvals: &crate::approval::ApprovalRegistry,
     app_session_id: &str,
 ) -> InboundAnswer {
+    if let Some(answer) = prepare_fs_answer(method, params, fs_root) {
+        return answer;
+    }
     match method {
         "session/request_permission" => {
             let options = client::parse_permission_options(params);
@@ -448,36 +491,55 @@ fn prepare_answer(
             });
             InboundAnswer::Deferred { rx, offered }
         }
-        "fs/read_text_file" => match (fs_root, client::parse_fs_read(params)) {
-            (Some(root), Some((path, line, limit))) => {
-                match crate::acp::fs_guard::resolve_within_root(root, &path) {
-                    Ok(resolved) => InboundAnswer::FsRead { path: resolved, line, limit },
-                    Err(e) => InboundAnswer::FsRejected { message: e },
-                }
-            }
-            (None, _) => InboundAnswer::FsRejected {
-                message: "session worktree could not be resolved".to_string(),
-            },
-            (_, None) => InboundAnswer::FsRejected {
-                message: "malformed fs/read_text_file params".to_string(),
-            },
-        },
-        "fs/write_text_file" => match (fs_root, client::parse_fs_write(params)) {
-            (Some(root), Some((path, content))) => {
-                match crate::acp::fs_guard::resolve_within_root(root, &path) {
-                    Ok(resolved) => InboundAnswer::FsWrite { path: resolved, content },
-                    Err(e) => InboundAnswer::FsRejected { message: e },
-                }
-            }
-            (None, _) => InboundAnswer::FsRejected {
-                message: "session worktree could not be resolved".to_string(),
-            },
-            (_, None) => InboundAnswer::FsRejected {
-                message: "malformed fs/write_text_file params".to_string(),
-            },
-        },
         _ => InboundAnswer::NotSupported,
     }
+}
+
+/// The fs/read_text_file + fs/write_text_file arms, shared by the live drive
+/// loop and the session/load replay drain. `None` ⇒ `method` is not an fs
+/// method. Pure validation/classification — IO happens in `answer_request`.
+fn prepare_fs_answer(
+    method: &str,
+    params: &serde_json::Value,
+    fs_root: Option<&Path>,
+) -> Option<InboundAnswer> {
+    if method != "fs/read_text_file" && method != "fs/write_text_file" {
+        return None;
+    }
+    let Some(root) = fs_root else {
+        return Some(InboundAnswer::FsRejected {
+            code: -32603,
+            message: "session worktree could not be resolved".to_string(),
+        });
+    };
+    let answer = if method == "fs/read_text_file" {
+        match client::parse_fs_read(params) {
+            Some((path, line, limit)) => {
+                match crate::acp::fs_guard::resolve_within_root(root, &path) {
+                    Ok(resolved) => InboundAnswer::FsRead { path: resolved, line, limit },
+                    Err(e) => InboundAnswer::FsRejected { code: -32602, message: e },
+                }
+            }
+            None => InboundAnswer::FsRejected {
+                code: -32602,
+                message: "malformed fs/read_text_file params".to_string(),
+            },
+        }
+    } else {
+        match client::parse_fs_write(params) {
+            Some((path, content)) => {
+                match crate::acp::fs_guard::resolve_within_root(root, &path) {
+                    Ok(resolved) => InboundAnswer::FsWrite { path: resolved, content },
+                    Err(e) => InboundAnswer::FsRejected { code: -32602, message: e },
+                }
+            }
+            None => InboundAnswer::FsRejected {
+                code: -32602,
+                message: "malformed fs/write_text_file params".to_string(),
+            },
+        }
+    };
+    Some(answer)
 }
 
 /// 1-based `line` + `limit` slicing for fs/read_text_file. 0 and 1 both mean
@@ -592,8 +654,8 @@ async fn answer_request(
                 }
             }
         }
-        InboundAnswer::FsRejected { message } => {
-            if let Err(e) = peer.respond_error(id, -32602, &message).await {
+        InboundAnswer::FsRejected { code, message } => {
+            if let Err(e) = peer.respond_error(id, code, &message).await {
                 eprintln!("acp: failed to answer {method}: {e}");
             }
             None
@@ -1569,6 +1631,162 @@ mod tests {
             matches!(&err, crate::adapter::SessionError::Protocol(m) if m.contains("initialize")),
             "expected SessionError::Protocol mentioning initialize, got {err:?}"
         );
+        agent.await.unwrap();
+    }
+
+    /// fs requests arriving DURING session/load replay must be served — the fs
+    /// capability is advertised at initialize, before any load. (M4 shipped them
+    /// as -32601, which contradicts the advertisement.)
+    #[tokio::test]
+    async fn fs_read_is_served_during_load_replay() {
+        let prompt = Prompt { text: "continue".into(), ..Default::default() };
+        let h = run_agent_fixture(prompt, Some("acp-abc".into()), None, |mut lines, mut w, worktree| async move {
+            std::fs::write(worktree.join("notes.txt"), "l1\nl2\n").unwrap();
+            let req = next_request(&mut lines, "initialize").await;
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}})).await;
+            let req = next_request(&mut lines, "session/load").await;
+            // Mid-replay: an fs read (agents rebuild context this way) …
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":77,"method":"fs/read_text_file",
+                "params":{"sessionId":"acp-abc",
+                    "path":worktree.join("notes.txt").to_string_lossy().to_string()}})).await;
+            let ans: serde_json::Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(ans["id"], 77);
+            assert_eq!(ans["result"]["content"], "l1\nl2\n");
+            // … and a non-fs, non-permission request still gets -32601.
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":78,"method":"terminal/create",
+                "params":{"sessionId":"acp-abc"}})).await;
+            let ans: serde_json::Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(ans["id"], 78);
+            assert_eq!(ans["error"]["code"], -32601);
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"modes":{"currentModeId":"default","availableModes":[{"id":"default"}]}}})).await;
+            let req = next_request(&mut lines, "session/prompt").await;
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"stopReason":"completed"}})).await;
+        })
+        .await;
+        assert!(matches!(h.events.lock().unwrap().last().unwrap(), AgentEvent::Done { .. }));
+    }
+
+    /// A write mid-replay is a real write — it lands on disk and its FileWrite
+    /// chip is emitted (after the load resolves, never across the await).
+    #[tokio::test]
+    async fn fs_write_during_load_replay_lands_and_emits_file_write() {
+        let prompt = Prompt { text: "continue".into(), ..Default::default() };
+        let h = run_agent_fixture(prompt, Some("acp-abc".into()), None, |mut lines, mut w, worktree| async move {
+            let req = next_request(&mut lines, "initialize").await;
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}})).await;
+            let req = next_request(&mut lines, "session/load").await;
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":9,"method":"fs/write_text_file",
+                "params":{"sessionId":"acp-abc",
+                    "path":worktree.join("replayed.txt").to_string_lossy().to_string(),
+                    "content":"mid-replay"}})).await;
+            let ans: serde_json::Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(ans["id"], 9);
+            assert_eq!(ans["result"], serde_json::json!({}));
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"modes":{"currentModeId":"default","availableModes":[{"id":"default"}]}}})).await;
+            let req = next_request(&mut lines, "session/prompt").await;
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"stopReason":"completed"}})).await;
+        })
+        .await;
+        assert_eq!(
+            std::fs::read_to_string(h.worktree.join("replayed.txt")).unwrap(),
+            "mid-replay"
+        );
+        let events = h.events.lock().unwrap();
+        assert!(
+            events.iter().any(|e| matches!(e, AgentEvent::FileWrite { path } if path.ends_with("replayed.txt"))),
+            "replay-time write must still surface a FileWrite chip, got {events:?}"
+        );
+    }
+
+    /// Permission requests mid-replay are answered `cancelled` (we support the
+    /// method — -32601 would be a lie — but there is no user context to ask in).
+    #[tokio::test]
+    async fn permission_request_during_load_replay_is_cancelled() {
+        let prompt = Prompt { text: "continue".into(), ..Default::default() };
+        let h = run_agent_fixture(prompt, Some("acp-abc".into()), None, |mut lines, mut w, _wt| async move {
+            let req = next_request(&mut lines, "initialize").await;
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}})).await;
+            let req = next_request(&mut lines, "session/load").await;
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":13,"method":"session/request_permission",
+                "params":{"sessionId":"acp-abc","toolCall":{"toolCallId":"t1"},
+                    "options":[{"optionId":"ok","name":"Allow","kind":"allow_once"}]}})).await;
+            let ans: serde_json::Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(ans["id"], 13);
+            assert_eq!(ans["result"]["outcome"]["outcome"], "cancelled");
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"modes":{"currentModeId":"default","availableModes":[{"id":"default"}]}}})).await;
+            let req = next_request(&mut lines, "session/prompt").await;
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"stopReason":"completed"}})).await;
+        })
+        .await;
+        let events = h.events.lock().unwrap();
+        assert!(
+            !events.iter().any(|e| matches!(e, AgentEvent::ApprovalNeeded { .. })),
+            "no approval card may surface for a replay-time permission request"
+        );
+        assert!(matches!(events.last().unwrap(), AgentEvent::Done { .. }));
+    }
+
+    /// An unresolvable worktree root is OUR failure (-32603 internal), not the
+    /// agent's params (-32602). Drives drive_session directly with a cwd that
+    /// cannot canonicalize.
+    #[tokio::test]
+    async fn unresolvable_root_rejects_fs_with_internal_error_code() {
+        let (ours, theirs) = tokio::io::duplex(64 * 1024);
+        let (read, write) = tokio::io::split(ours);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink: Box<dyn EventSink> = Box::new(Collect(Arc::clone(&events)));
+        let agent = tokio::spawn(async move {
+            let (r, mut w) = tokio::io::split(theirs);
+            let mut lines = tokio::io::BufReader::new(r).lines();
+            let req: serde_json::Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(req["method"], "initialize");
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":false}}})).await;
+            let req: serde_json::Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(req["method"], "session/new");
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"sessionId":"acp-abc","modes":{"currentModeId":"default",
+                    "availableModes":[{"id":"default"}]}}})).await;
+            let prompt_req: serde_json::Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(prompt_req["method"], "session/prompt");
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":7,"method":"fs/read_text_file",
+                "params":{"sessionId":"acp-abc","path":"x.txt"}})).await;
+            let ans: serde_json::Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(ans["id"], 7);
+            assert_eq!(ans["error"]["code"], -32603, "our failure, not the agent's params");
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":prompt_req["id"],
+                "result":{"stopReason":"completed"}})).await;
+        });
+        drive_session(
+            read,
+            write,
+            Prompt { text: "hi".into(), ..Default::default() },
+            "/kineloop-does-not-exist-m5".into(), // canonicalize fails ⇒ fs_root None
+            None,
+            sink,
+            Arc::new(Mutex::new(None)),
+            crate::approval::ApprovalRegistry::new(),
+            "app-session".to_string(),
+        )
+        .await
+        .unwrap();
         agent.await.unwrap();
     }
 }
