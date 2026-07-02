@@ -71,6 +71,7 @@ import {
   DEFAULT_PERMISSION_MODE,
   type PermissionMode,
 } from "./lib/permissions";
+import { shouldShowAcpDownloadNotice } from "./lib/acpNotice";
 import {
   activityCountsFromEvents,
   contextFootprintFromSources,
@@ -1351,6 +1352,12 @@ export default function App() {
       toast.info("ACP streaming with “Ask before edits”", {
         description:
           "This beta auto-declines gated actions instead of asking. Switch the session to “Edit automatically” to let the agent change files.",
+      });
+    }
+    if (opts?.engine === "acp" && shouldShowAcpDownloadNotice()) {
+      toast.info("First ACP run downloads the agent adapter", {
+        description:
+          "npx fetches the pinned claude-agent-acp package — the first turn can take a minute before streaming starts.",
       });
     }
     // Set the ref synchronously before the first await so the cross-session guard
