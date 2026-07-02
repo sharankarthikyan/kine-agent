@@ -50,6 +50,13 @@ pub enum AgentEvent {
     Error {
         message: String,
     },
+    /// The agent's live task plan (ACP `plan`). `entries_json` is the raw JSON
+    /// array of `{content, status, priority}` entries; agents resend the full
+    /// list on every change, so the UI renders only the latest event.
+    #[serde(rename_all = "camelCase")]
+    Plan {
+        entries_json: String,
+    },
     /// Token usage + cost for a completed run (normalized across agents).
     #[serde(rename_all = "camelCase")]
     Usage {
@@ -134,6 +141,15 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&ev).unwrap(),
             r#"{"kind":"toolStatus","data":{"toolCallId":"t1","status":"completed","detail":"Read main.rs"}}"#
+        );
+    }
+
+    #[test]
+    fn serializes_plan_with_entries_json() {
+        let ev = AgentEvent::Plan { entries_json: "[]".into() };
+        assert_eq!(
+            serde_json::to_string(&ev).unwrap(),
+            r#"{"kind":"plan","data":{"entriesJson":"[]"}}"#
         );
     }
 

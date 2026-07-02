@@ -5,7 +5,7 @@ import { Markdown } from "./Markdown";
 import { Badge, badgeVariants } from "@/components/ui/badge";
 import { Alert, AlertTitle, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
-import { Wrench, Pencil, Check, Loader2, X } from "lucide-react";
+import { Wrench, Pencil, Check, Loader2, X, Circle } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface EventStreamProps {
@@ -42,7 +42,13 @@ export function EventStream({ events, onOpenFile, onApprovalRespond }: EventStre
   for (const e of events) {
     if (e.kind === "toolStatus") statusById.set(e.data.toolCallId, e.data.status);
   }
-  const visible = events.filter((e) => e.kind !== "toolStatus");
+  const lastPlanIndex = events.reduce(
+    (acc, e, i) => (e.kind === "plan" ? i : acc),
+    -1,
+  );
+  const visible = events.filter(
+    (e, i) => e.kind !== "toolStatus" && (e.kind !== "plan" || i === lastPlanIndex),
+  );
   const hasProse = visible.some((e) => e.kind === "token");
   const groups = groupEventRuns(visible);
   return (
@@ -257,6 +263,47 @@ function renderEvent(
       // its own row, it only decorates the matching toolCall chip. Case kept
       // purely for the `never` exhaustiveness check below.
       return null;
+
+    case "plan": {
+      let entries: { content: string; status: string }[];
+      try {
+        const parsed = JSON.parse(event.data.entriesJson);
+        if (!Array.isArray(parsed)) return null;
+        entries = parsed.filter(
+          (e): e is { content: string; status: string } =>
+            !!e && typeof e === "object" && typeof (e as Record<string, unknown>).content === "string",
+        );
+      } catch {
+        return null; // malformed agent output degrades to nothing (convention)
+      }
+      if (entries.length === 0) return null;
+      return (
+        <div className="w-full rounded-md border p-3 text-sm">
+          <div className="mb-2 font-medium text-muted-foreground">Plan</div>
+          <ul className="flex flex-col gap-1.5">
+            {entries.map((entry, i) => (
+              <li
+                key={i}
+                className={cn(
+                  "flex items-start gap-2",
+                  entry.status === "completed" && "text-muted-foreground line-through",
+                  entry.status === "in_progress" && "font-medium",
+                )}
+              >
+                {entry.status === "completed" ? (
+                  <Check aria-hidden="true" className="mt-0.5 size-3.5 shrink-0" />
+                ) : entry.status === "in_progress" ? (
+                  <Loader2 aria-hidden="true" className="mt-0.5 size-3.5 shrink-0 animate-spin motion-reduce:animate-none" />
+                ) : (
+                  <Circle aria-hidden="true" className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
+                )}
+                <span>{entry.content}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      );
+    }
 
     default: {
       // Compile-time exhaustiveness stays (a new union member without a case is a

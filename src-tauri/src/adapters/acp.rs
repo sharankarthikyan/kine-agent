@@ -309,7 +309,10 @@ fn handle_notification(
         Some(SessionUpdate::ToolCallUpdate { tool_call_id, status, detail }) => {
             sink.emit(AgentEvent::ToolStatus { tool_call_id, status, detail });
         }
-        None => {} // plan/commands — M5.
+        Some(SessionUpdate::Plan { entries_json }) => {
+            sink.emit(AgentEvent::Plan { entries_json });
+        }
+        None => {} // available_commands_update — a later milestone.
     }
 }
 
@@ -512,6 +515,22 @@ mod tests {
         assert!(matches!(&events[1],
             AgentEvent::ToolStatus { tool_call_id, status, .. }
                 if tool_call_id == "t1" && status == "completed"));
+    }
+
+    #[tokio::test]
+    async fn plan_updates_emit_plan_events() {
+        let prompt = Prompt { text: "hello".into(), ..Default::default() };
+        let h = run_fixture(prompt, |_lines, mut w, prompt_id| async move {
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{
+                "sessionId":"acp-abc","update":{"sessionUpdate":"plan","entries":[
+                    {"content":"Step A","status":"pending","priority":"medium"}]}}})).await;
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":prompt_id,
+                "result":{"stopReason":"completed"}})).await;
+        })
+        .await;
+        let events = h.events.lock().unwrap();
+        assert!(matches!(&events[0],
+            AgentEvent::Plan { entries_json } if entries_json.contains("Step A")));
     }
 
     #[tokio::test]

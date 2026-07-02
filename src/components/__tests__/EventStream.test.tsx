@@ -83,6 +83,36 @@ test("tool chips without an id render as today (pipe engine unaffected)", () => 
   expect(screen.getByText("Write")).toBeInTheDocument();
 });
 
+test("renders only the LATEST plan event as a checklist card", () => {
+  const events = [
+    {
+      kind: "plan",
+      data: { entriesJson: JSON.stringify([{ content: "OLD ENTRY", status: "pending", priority: "medium" }]) },
+    },
+    {
+      kind: "plan",
+      data: {
+        entriesJson: JSON.stringify([
+          { content: "Read the file", status: "completed", priority: "medium" },
+          { content: "Edit it", status: "in_progress", priority: "high" },
+        ]),
+      },
+    },
+  ] as AgentEvent[];
+  render(<EventStream events={events} />);
+  expect(screen.queryByText("OLD ENTRY")).not.toBeInTheDocument(); // in-place update
+  expect(screen.getByText("Read the file")).toBeInTheDocument();
+  expect(screen.getByText("Edit it")).toBeInTheDocument();
+});
+
+test("malformed plan entriesJson renders nothing, not a crash", () => {
+  const events = [
+    { kind: "plan", data: { entriesJson: "{not json" } },
+  ] as AgentEvent[];
+  const { container } = render(<EventStream events={events} />);
+  expect(container.textContent).not.toContain("not json");
+});
+
 test("renders an error event with alert role", () => {
   const events: AgentEvent[] = [{ kind: "error", data: { message: "boom" } }];
   render(<EventStream events={events} />);
@@ -121,8 +151,8 @@ test("Deny calls onApprovalRespond with the request id and false", async () => {
 });
 
 test("renders nothing for an unknown event kind (forward compatibility)", () => {
-  // A newer backend may persist kinds this frontend build doesn't know (e.g. "plan").
-  const unknown = { kind: "plan", data: { text: "pondering" } } as unknown as AgentEvent;
+  // A newer backend may persist kinds this frontend build doesn't know yet.
+  const unknown = { kind: "sparkles_v9", data: { text: "pondering" } } as unknown as AgentEvent;
   const { container } = render(<EventStream events={[unknown]} />);
   expect(container.textContent).not.toContain("pondering");
   // Must not throw "Objects are not valid as a React child".

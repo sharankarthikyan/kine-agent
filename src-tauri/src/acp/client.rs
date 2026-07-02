@@ -6,14 +6,15 @@ use serde_json::Value;
 
 pub const PROTOCOL_VERSION: u64 = 1;
 
-/// The session/update variants M1/M2 consume. Plan/commands arrive on the
-/// wire but map to `None` until M5.
+/// The session/update variants M1/M2 consume. `available_commands_update`
+/// arrives on the wire but maps to `None` until a later milestone.
 #[derive(Debug, PartialEq)]
 pub enum SessionUpdate {
     AgentMessageChunk { text: String },
     Thought { text: String },
     ToolCall { title: String, raw_input: String, tool_call_id: Option<String> },
     ToolCallUpdate { tool_call_id: String, status: String, detail: String },
+    Plan { entries_json: String },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -163,7 +164,14 @@ pub fn parse_session_update(params: &Value) -> Option<SessionUpdate> {
                 .to_string();
             Some(SessionUpdate::ToolCallUpdate { tool_call_id, status, detail })
         }
-        // plan/available_commands_update: M5.
+        "plan" => {
+            let entries = update.get("entries")?;
+            if !entries.is_array() {
+                return None;
+            }
+            Some(SessionUpdate::Plan { entries_json: entries.to_string() })
+        }
+        // available_commands_update: a later milestone.
         _ => None,
     }
 }
@@ -350,9 +358,35 @@ mod tests {
     fn unknown_update_kind_is_none_not_panic() {
         let params = serde_json::json!({
             "sessionId": "s",
-            "update": {"sessionUpdate": "plan", "entries": []}
+            "update": {"sessionUpdate": "sparkles_v9", "entries": []}
         });
-        // M2 still ignores plan/commands updates.
+        assert_eq!(parse_session_update(&params), None);
+    }
+
+    #[test]
+    fn parses_plan_update_entries() {
+        let params = serde_json::json!({
+            "sessionId": "s",
+            "update": {"sessionUpdate": "plan", "entries": [
+                {"content": "Read the file", "status": "completed", "priority": "medium"},
+                {"content": "Edit it", "status": "in_progress", "priority": "high"}
+            ]}
+        });
+        match parse_session_update(&params) {
+            Some(SessionUpdate::Plan { entries_json }) => {
+                assert!(entries_json.contains("Read the file"));
+                assert!(entries_json.contains("in_progress"));
+            }
+            other => panic!("expected Plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_update_without_entries_is_ignored() {
+        let params = serde_json::json!({
+            "sessionId": "s",
+            "update": {"sessionUpdate": "plan"}
+        });
         assert_eq!(parse_session_update(&params), None);
     }
 
