@@ -35,7 +35,7 @@ interface NewSessionProps {
   model: ModelInfo | null;
   permissionMode: PermissionMode;
   sandboxTerminal: boolean;
-  /** Streaming engine: "pipe" (default, CLI adapters) | "acp" (beta, claude only). */
+  /** Streaming engine: "pipe" (default, CLI adapters) | "acp" (beta, claude + codex). */
   engine: Engine;
   running: boolean;
   onPickRepo: () => void;
@@ -301,8 +301,9 @@ export function NewSession({
                 onSandboxTerminalChange={onSandboxTerminalChange}
               />
 
-              {/* ACP streaming engine (M1: claude only, default off ⇒ pipe adapter). */}
-              {agent?.id === "claude" && (
+              {/* ACP streaming engine (claude M1, codex M6; default off ⇒ pipe adapter).
+                  Gemini becomes ACP-only in M7 — until then no toggle for it. */}
+              {(agent?.id === "claude" || agent?.id === "codex") && (
                 <label className="flex shrink-0 cursor-pointer select-none items-center gap-1.5 whitespace-nowrap text-xs text-muted-foreground">
                   <Switch
                     checked={engine === "acp"}

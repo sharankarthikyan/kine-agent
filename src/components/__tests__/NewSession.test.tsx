@@ -246,8 +246,14 @@ test("turning the ACP toggle off calls onEngineChange with 'pipe'", async () => 
   expect(onEngineChange).toHaveBeenCalledWith("pipe");
 });
 
-test("hides the ACP toggle for non-claude agents (M1)", () => {
+test("shows the ACP streaming toggle for codex (M6)", () => {
   setup({ agent: codexAgent, engine: "pipe" });
+  expect(screen.getByRole("switch", { name: /acp streaming/i })).toBeInTheDocument();
+});
+
+test("hides the ACP toggle for antigravity", () => {
+  const antigravityAgent: AgentInfo = { id: "antigravity", label: "Antigravity", installed: true };
+  setup({ agent: antigravityAgent, engine: "pipe" });
   expect(screen.queryByRole("switch", { name: /acp streaming/i })).not.toBeInTheDocument();
 });
 
