@@ -1133,6 +1133,7 @@ pub async fn respond_to_approval(
 ) -> Result<bool, String> {
     let decision = ApprovalDecision {
         allow: approve,
+        selected_option_id: Some(if approve { "allow".to_string() } else { "deny".to_string() }),
         message,
     };
     Ok(approvals.resolve(&session_id, &request_id, decision))

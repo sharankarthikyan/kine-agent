@@ -118,6 +118,7 @@ async fn request_decision_inner(
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     Ok(ApprovalDecision {
         allow: reply.allow,
+        selected_option_id: Some(if reply.allow { "allow".to_string() } else { "deny".to_string() }),
         message: reply.message,
     })
 }

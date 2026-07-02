@@ -229,6 +229,7 @@ mod tests {
     fn deny_without_reason_uses_a_generic_message() {
         let decision = ApprovalDecision {
             allow: false,
+            selected_option_id: Some("deny".to_string()),
             message: None,
         };
         let resp = permission_tool_response(&decision, &json!({}));

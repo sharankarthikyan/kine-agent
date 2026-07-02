@@ -37,8 +37,13 @@ pub struct ApprovalLaunch {
 /// The user's answer to an approval request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApprovalDecision {
-    /// True to allow the tool call, false to deny it.
+    /// True to allow the tool call, false to deny it. The currency of the pipe
+    /// MCP bridge and socket wire, which predate option-based approvals.
     pub allow: bool,
+    /// The exact option the user selected. The pipe path's fixed pair uses ids
+    /// "allow"/"deny"; ACP carries the agent-minted optionId back to the RPC.
+    /// `None` only on legacy paths that never saw options.
+    pub selected_option_id: Option<String>,
     /// Optional message surfaced to the agent (a deny reason, or a note on allow).
     pub message: Option<String>,
 }
@@ -47,6 +52,7 @@ impl ApprovalDecision {
     pub fn allow() -> Self {
         Self {
             allow: true,
+            selected_option_id: Some("allow".to_string()),
             message: None,
         }
     }
@@ -54,6 +60,7 @@ impl ApprovalDecision {
     pub fn deny(reason: impl Into<String>) -> Self {
         Self {
             allow: false,
+            selected_option_id: Some("deny".to_string()),
             message: Some(reason.into()),
         }
     }
@@ -64,10 +71,17 @@ struct Pending {
     responder: oneshot::Sender<ApprovalDecision>,
 }
 
-/// In-flight approval requests, keyed by a unique request id. Managed as Tauri state so
-/// the `respond_to_approval` IPC command can resolve a request an agent bridge is awaiting.
-#[derive(Default)]
+/// In-flight approval requests, keyed by a unique request id. Cheap to clone
+/// (Arc-inner, like `RpcPeer`): the managed Tauri instance and the ACP adapter's
+/// handle share one pending map. Managed as Tauri state so the
+/// `respond_to_approval` IPC command can resolve a request an agent bridge is awaiting.
+#[derive(Default, Clone)]
 pub struct ApprovalRegistry {
+    inner: Arc<RegistryInner>,
+}
+
+#[derive(Default)]
+struct RegistryInner {
     pending: Mutex<HashMap<String, Pending>>,
     counter: AtomicU64,
 }
@@ -80,13 +94,13 @@ impl ApprovalRegistry {
     /// Mint a process-unique request id. Cheap and dependency-free (an atomic counter),
     /// which is enough because the registry only needs uniqueness within one process.
     pub fn next_request_id(&self) -> String {
-        format!("ar-{}", self.counter.fetch_add(1, Ordering::Relaxed))
+        format!("ar-{}", self.inner.counter.fetch_add(1, Ordering::Relaxed))
     }
 
     /// Drop a pending request without resolving it (e.g. when its surfacing failed). The
     /// awaiter observes a closed channel, which the bridge treats as a deny.
     pub fn forget(&self, request_id: &str) {
-        if let Ok(mut pending) = self.pending.lock() {
+        if let Ok(mut pending) = self.inner.pending.lock() {
             pending.remove(request_id);
         }
     }
@@ -103,7 +117,7 @@ impl ApprovalRegistry {
         session_id: &str,
     ) -> oneshot::Receiver<ApprovalDecision> {
         let (tx, rx) = oneshot::channel();
-        if let Ok(mut pending) = self.pending.lock() {
+        if let Ok(mut pending) = self.inner.pending.lock() {
             pending.insert(
                 request_id.to_string(),
                 Pending {
@@ -119,7 +133,7 @@ impl ApprovalRegistry {
     /// with that id was waiting AND belongs to `session_id` (the session check hardens the
     /// untrusted IPC boundary: a stray/unknown/foreign id is ignored, not acted on).
     pub fn resolve(&self, session_id: &str, request_id: &str, decision: ApprovalDecision) -> bool {
-        let Ok(mut pending) = self.pending.lock() else {
+        let Ok(mut pending) = self.inner.pending.lock() else {
             return false;
         };
         match pending.get(request_id) {
@@ -136,14 +150,14 @@ impl ApprovalRegistry {
     /// Dropping the responder makes the awaiting bridge observe a closed channel, which it
     /// treats as a deny, so a gated tool never hangs a finished run.
     pub fn cancel_session(&self, session_id: &str) {
-        if let Ok(mut pending) = self.pending.lock() {
+        if let Ok(mut pending) = self.inner.pending.lock() {
             pending.retain(|_, p| p.session_id != session_id);
         }
     }
 
     #[cfg(test)]
     pub fn pending_count(&self) -> usize {
-        self.pending.lock().map(|p| p.len()).unwrap_or(0)
+        self.inner.pending.lock().map(|p| p.len()).unwrap_or(0)
     }
 }
 
@@ -358,6 +372,19 @@ mod tests {
         };
         assert!(registry.resolve("s1", &request_id, ApprovalDecision::allow()));
         assert!(handle.await.unwrap().allow);
+    }
+
+    #[tokio::test]
+    async fn cloned_registry_shares_pending_state() {
+        // The ACP adapter owns a clone while the IPC command resolves through
+        // the managed instance — both must see the same pending map.
+        let reg_a = ApprovalRegistry::new();
+        let reg_b = reg_a.clone();
+        let rx = reg_a.register("req-1", "sess-1");
+        assert!(reg_b.resolve("sess-1", "req-1", ApprovalDecision::allow()));
+        let decision = rx.await.unwrap();
+        assert!(decision.allow);
+        assert_eq!(decision.selected_option_id.as_deref(), Some("allow"));
     }
 
     #[tokio::test]
