@@ -44,6 +44,38 @@ pub const CODEX_ACP: AcpProfile = AcpProfile {
     interactive_escalations: true,
 };
 
+/// SIGKILLs the child's process group when dropped. `spawn_and_drive` arms one
+/// right after spawn so that EVERY exit path — normal return, the cancel-grace
+/// expiry in run_persisting, a stop-button drop of the whole future, panic
+/// unwind — tears down the full tree. tokio's `kill_on_drop` only reaches the
+/// direct child (the npx wrapper); the descendants (node shim, codex-acp's
+/// native binary) survive it and don't exit on stdin EOF (M6 smoke finding).
+/// Double-kill against the inline killpg at normal teardown is harmless
+/// (ESRCH on a dead group).
+struct KillPgOnDrop(#[cfg(unix)] Option<i32>);
+
+impl KillPgOnDrop {
+    fn new(child_id: Option<u32>) -> Self {
+        #[cfg(unix)]
+        return Self(child_id.map(|pid| pid as i32));
+        #[cfg(not(unix))]
+        {
+            let _ = child_id;
+            Self()
+        }
+    }
+}
+
+impl Drop for KillPgOnDrop {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(pgid) = self.0 {
+            // process_group(0) at spawn made the child's pgid == its pid.
+            unsafe { libc::killpg(pgid, libc::SIGKILL) };
+        }
+    }
+}
+
 /// Emitted when a resume request degrades to a fresh session WITH replayed context.
 const RESUME_NOTICE_WITH_CONTEXT: &str = "This agent can't restore the previous session natively — Kineloop replayed recent conversation context into this turn.";
 /// Emitted when a resume request degrades to a fresh session with NO context to replay.
@@ -152,6 +184,9 @@ async fn spawn_and_drive(
         .stderr
         .take()
         .ok_or_else(|| SessionError::Spawn("no stderr".into()))?;
+    // Armed before the first await: from here on, dropping this future kills
+    // the whole process group (see KillPgOnDrop).
+    let _pg_guard = KillPgOnDrop::new(child.id());
 
     // Drain stderr concurrently so a full pipe buffer can't deadlock stdout —
     // same tail-keeping pattern as the codex adapter.
@@ -2330,5 +2365,49 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         assert!(gone, "grandchild (sleep) survived the group kill");
+    }
+
+    /// Dropping the guard must kill the whole process group — this is the only
+    /// teardown that runs when run_persisting DROPS the run future (stop
+    /// button, cancel-grace expiry): kill_on_drop reaches only the npx
+    /// wrapper, and spawn_and_drive's inline killpg never executes on drop.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropping_the_pgid_guard_kills_the_grandchild() {
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c")
+            .arg("echo $$; sleep 30 & echo $!; wait")
+            .stdout(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        cmd.process_group(0);
+        let mut child = cmd.spawn().unwrap();
+        let guard = KillPgOnDrop::new(child.id());
+        let mut stdout = child.stdout.take().unwrap();
+        let mut out = String::new();
+        while out.lines().count() < 2 {
+            let mut buf = [0u8; 256];
+            let n = tokio::io::AsyncReadExt::read(&mut stdout, &mut buf).await.unwrap();
+            assert!(n > 0, "sh exited before printing both pids");
+            out.push_str(&String::from_utf8_lossy(&buf[..n]));
+        }
+        let mut lines = out.lines();
+        let _shell_pid: i32 = lines.next().unwrap().trim().parse().unwrap();
+        let sleep_pid: i32 = lines.next().unwrap().trim().parse().unwrap();
+        assert_eq!(unsafe { libc::kill(sleep_pid, 0) }, 0, "grandchild must be alive pre-drop");
+
+        drop(guard); // <- the mechanism under test
+
+        let mut dead = false;
+        for _ in 0..100 {
+            if unsafe { libc::kill(sleep_pid, 0) } == -1
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+            {
+                dead = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(dead, "grandchild (sleep) survived the guard drop");
+        let _ = child.kill().await;
     }
 }
