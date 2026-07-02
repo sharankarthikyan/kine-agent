@@ -670,4 +670,39 @@ mod tests {
             AgentEvent::Error { message } if message.contains("cancelled")
         ));
     }
+
+    #[tokio::test]
+    async fn initialize_error_maps_to_protocol_session_error() {
+        let (ours, theirs) = tokio::io::duplex(64 * 1024);
+        let (read, write) = tokio::io::split(ours);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink: Box<dyn EventSink> = Box::new(Collect(Arc::clone(&events)));
+        let agent = tokio::spawn(async move {
+            let (r, mut w) = tokio::io::split(theirs);
+            let mut lines = tokio::io::BufReader::new(r).lines();
+            let req: serde_json::Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(req["method"], "initialize");
+            let resp = serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "error":{"code":-32600,"message":"unsupported protocol version"}});
+            w.write_all(format!("{resp}\n").as_bytes()).await.unwrap();
+        });
+        let err = drive_session(
+            read,
+            write,
+            Prompt { text: "hi".into(), ..Default::default() },
+            "/wt".into(),
+            None,
+            sink,
+            Arc::new(Mutex::new(None)),
+        )
+        .await
+        .unwrap_err();
+        // Handshake failures are Protocol, not Spawn: the process launched fine.
+        assert!(
+            matches!(&err, crate::adapter::SessionError::Protocol(m) if m.contains("initialize")),
+            "expected SessionError::Protocol mentioning initialize, got {err:?}"
+        );
+        agent.await.unwrap();
+    }
 }
