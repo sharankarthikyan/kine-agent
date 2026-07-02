@@ -1,4 +1,4 @@
-use crate::adapter::{AgentAdapter, EventSink, Prompt};
+use crate::adapter::{AgentAdapter, EventSink, Prompt, SessionError};
 use crate::adapters::claude::ClaudeAdapter;
 use crate::approval::{ApprovalDecision, ApprovalRegistry};
 use crate::events::AgentEvent;
@@ -315,51 +315,16 @@ async fn run_persisting(
     #[cfg(not(unix))]
     let serve_fut = std::future::pending::<()>();
 
-    // Race the run against a cancel signal from `stop_session`. On cancel of a pipe
-    // engine, dropping `run_future` drops the adapter future, killing its child process
-    // via `kill_on_drop` and dropping the sink (whose tx end terminates the drain task
-    // below). On cancel of an ACP engine, the adapter saw the same watch signal and is
-    // sending session/cancel; give it a bounded grace window to finish the turn before
-    // falling back to the same drop-based kill.
-    //
-    // `run_future` is boxed (not just `tokio::pin!`-ed) so it can be dropped *explicitly*
-    // while still Pending. `select!` only drops the async expression it was given for a
-    // losing branch; when that expression is `&mut run_future` (a re-borrow, as `pin!`
-    // requires for the ACP grace re-await), losing the race drops the reborrow — a no-op
-    // — and leaves the referenced future alive and un-polled. Verified empirically: a
-    // guard held across `long_running().await` inside a `pin!`-ed future did NOT run its
-    // `Drop` immediately after `select!` picked the other branch. Left as `pin!` alone,
-    // both the pipe "immediate kill" and the ACP grace-timeout kill would silently stop
-    // polling the run but never drop it, so `kill_on_drop` never fires and the child
-    // keeps running; worse, `sink`'s `tx` (owned by the still-alive future) never drops,
-    // so `drain.await` below hangs forever waiting for `rx` to close. Boxing keeps
-    // `run_future` an owned value we can `drop()` on purpose in the "give up" arms.
-    let mut run_future = Box::pin(run_future);
-    let mut cancelled = false;
-    let result = tokio::select! {
-        r = &mut run_future => r,
-        _ = cancel_rx.changed() => {
-            cancelled = true;
-            if engine == store::ENGINE_ACP {
-                // Graceful path: the adapter saw the same signal and sent
-                // session/cancel — give the agent a bounded window to finish
-                // the turn before dropping it (drop ⇒ pgid guard kills the tree).
-                match tokio::time::timeout(ACP_CANCEL_GRACE, &mut run_future).await {
-                    Ok(r) => r,
-                    Err(_) => {
-                        eprintln!("acp: cancel grace expired for {session_id} — killing the agent");
-                        drop(run_future);
-                        Ok(())
-                    }
-                }
-            } else {
-                // Pipe engines: immediate kill via drop, exactly as before.
-                drop(run_future);
-                Ok(())
-            }
-        }
-        _ = serve_fut => Ok(()),
-    };
+    // Race the run against a cancel signal from `stop_session` (and the socket server).
+    // Dropping the run future drops the adapter future, killing its child process via
+    // `kill_on_drop` (pipe) or the pgid guard (ACP) and dropping the sink — whose tx end
+    // is what lets `drain.await` below terminate. ACP engines get a bounded grace window
+    // on cancel (the adapter saw the same watch signal and is sending session/cancel)
+    // before falling back to the same drop-based kill.
+    let acp_grace = (engine == store::ENGINE_ACP).then_some(ACP_CANCEL_GRACE);
+    let (result, cancelled) =
+        await_run_with_cancel(run_future, &mut cancel_rx, serve_fut, acp_grace, &session_id)
+            .await;
     let _ = drain.await; // flush all persisted events before stamping status
 
     // Persist a freshly captured external conversation id so later turns can resume it.
@@ -391,6 +356,69 @@ async fn run_persisting(
         let _ = std::fs::remove_file(path);
     }
     result.map_err(|e| e.to_string())
+}
+
+/// Race `run_future` against a cancel signal and the approval socket server, guaranteeing
+/// the run future never outlives this call: whichever arm wins, `run_future` is dropped
+/// by the time this returns — tearing down the adapter (child killed via `kill_on_drop`
+/// / the ACP pgid guard) and its event sink (whose tx end is what lets the caller's drain
+/// task finish). Returns the run result plus whether a cancel signal ended the race.
+///
+/// Arms:
+/// - run finishes: its result is returned as-is.
+/// - cancel fires, `acp_grace: None` (pipe engines): immediate drop — immediate kill,
+///   exactly the pre-ACP behavior.
+/// - cancel fires, `acp_grace: Some(_)` (ACP): the adapter saw the same watch signal and
+///   sent session/cancel — the run gets a bounded window to finish the turn gracefully
+///   (final updates + stopReason "cancelled") before the drop-based kill.
+/// - `serve_fut` resolves (socket server died early): drop the run rather than leave it
+///   running unsupervised.
+///
+/// Taking `run_future` by value (boxed internally) is load-bearing: `select!` never drops
+/// the loser when an arm is a `&mut future` reborrow (verified empirically — a Drop guard
+/// inside a `pin!`-ed future never fired after another arm won), so a future pinned in the
+/// caller's scope would silently outlive the race, keep its child process alive, and
+/// deadlock the caller's `drain.await` on the sink it still owns. The explicit `drop`s
+/// in the give-up arms plus this function's scope make the teardown unconditional.
+async fn await_run_with_cancel<R, S>(
+    run_future: R,
+    cancel_rx: &mut watch::Receiver<bool>,
+    serve_fut: S,
+    acp_grace: Option<std::time::Duration>,
+    session_id: &str,
+) -> (Result<(), SessionError>, bool)
+where
+    R: std::future::Future<Output = Result<(), SessionError>>,
+    S: std::future::Future<Output = ()>,
+{
+    // Boxed (not `tokio::pin!`-ed) so the give-up arms can drop it explicitly — the
+    // reborrow-based `select!` below never drops the loser on its own (see doc above).
+    let mut run_future = Box::pin(run_future);
+    tokio::select! {
+        r = &mut run_future => (r, false),
+        _ = cancel_rx.changed() => {
+            match acp_grace {
+                Some(grace) => match tokio::time::timeout(grace, &mut run_future).await {
+                    Ok(r) => (r, true),
+                    Err(_) => {
+                        eprintln!("acp: cancel grace expired for {session_id} — killing the agent");
+                        drop(run_future);
+                        (Ok(()), true)
+                    }
+                },
+                None => {
+                    // Pipe engines: immediate kill via drop, exactly as before.
+                    drop(run_future);
+                    (Ok(()), true)
+                }
+            }
+        }
+        _ = serve_fut => {
+            // The reborrow-based select never drops the loser — see the cancel arms.
+            drop(run_future);
+            (Ok(()), false)
+        }
+    }
 }
 
 /// Upper bound on a single user prompt forwarded to an agent CLI. The prompt is passed as
@@ -2237,5 +2265,133 @@ mod tests {
 
         std::env::remove_var("CLAUDE_CONFIG_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ---- await_run_with_cancel: the run future must never outlive the race ----
+    //
+    // The run future owns the adapter (child process, killed on drop) and the event sink
+    // (whose tx end gates the caller's drain task). If any winning arm leaves it alive,
+    // the child leaks and `run_persisting` deadlocks on `drain.await`. These tests pin
+    // the invariant for every arm with a Drop-flag guard held inside a never-completing
+    // run future.
+
+    /// Sets the flag when dropped — held inside a test run future to observe teardown.
+    struct SetOnDrop(std::sync::Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for SetOnDrop {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    /// A run future that never completes, holding a guard that flags its own drop.
+    fn pending_run(
+        dropped: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> impl std::future::Future<Output = Result<(), super::SessionError>> {
+        let guard = SetOnDrop(dropped.clone());
+        async move {
+            let _guard = guard;
+            std::future::pending::<()>().await;
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_without_grace_drops_the_run_future_immediately() {
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
+        cancel_tx.send(true).expect("receiver alive");
+
+        let (result, cancelled) = super::await_run_with_cancel(
+            pending_run(&dropped),
+            &mut cancel_rx,
+            std::future::pending::<()>(),
+            None, // pipe engine: no grace
+            "test-session",
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert!(cancelled, "a cancel win must report cancelled");
+        assert!(
+            dropped.load(std::sync::atomic::Ordering::Acquire),
+            "pipe cancel must drop the abandoned run future (immediate kill)"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_with_expired_grace_drops_the_run_future() {
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
+        cancel_tx.send(true).expect("receiver alive");
+
+        let started = std::time::Instant::now();
+        let grace = std::time::Duration::from_millis(30);
+        let (result, cancelled) = super::await_run_with_cancel(
+            pending_run(&dropped), // never finishes: the grace window must expire
+            &mut cancel_rx,
+            std::future::pending::<()>(),
+            Some(grace),
+            "test-session",
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert!(cancelled);
+        assert!(started.elapsed() >= grace, "the ACP grace window must be waited out");
+        assert!(
+            dropped.load(std::sync::atomic::Ordering::Acquire),
+            "grace expiry must drop the abandoned run future (pgid-guard kill)"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_within_grace_returns_the_runs_own_result() {
+        let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
+        cancel_tx.send(true).expect("receiver alive");
+
+        // The run errors quickly after the cancel — well inside a generous grace window —
+        // and that result must be surfaced, not swallowed by the timeout arm.
+        let run = async {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            Err(super::SessionError::Protocol("agent hiccup".into()))
+        };
+        let (result, cancelled) = super::await_run_with_cancel(
+            run,
+            &mut cancel_rx,
+            std::future::pending::<()>(),
+            Some(std::time::Duration::from_secs(30)),
+            "test-session",
+        )
+        .await;
+
+        assert!(cancelled);
+        assert!(
+            matches!(result, Err(super::SessionError::Protocol(_))),
+            "a run finishing within the grace window must return its own result"
+        );
+    }
+
+    #[tokio::test]
+    async fn serve_fut_win_drops_the_run_future() {
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // Keep the sender alive un-signalled: a dropped sender resolves `changed()` too,
+        // which would let the cancel arm win instead of the serve arm under test.
+        let (_cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
+
+        let (result, cancelled) = super::await_run_with_cancel(
+            pending_run(&dropped),
+            &mut cancel_rx,
+            std::future::ready(()), // approval socket server dying early
+            None,
+            "test-session",
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert!(!cancelled, "a serve_fut win is not a user cancel");
+        assert!(
+            dropped.load(std::sync::atomic::Ordering::Acquire),
+            "a serve_fut win must drop the run future, not leave it running unsupervised"
+        );
     }
 }
