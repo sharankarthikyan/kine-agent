@@ -147,7 +147,7 @@ pub async fn drive_session(
 
     let can_load = client::initialize(&peer)
         .await
-        .map_err(|e| SessionError::Spawn(format!("ACP initialize failed: {e}")))?;
+        .map_err(|e| SessionError::Protocol(format!("ACP initialize failed: {e}")))?;
 
     // Resume when the agent supports it; a failed/unsupported load degrades to a
     // fresh session (M5 adds the transcript-replay fallback so conversation
@@ -218,7 +218,7 @@ pub async fn drive_session(
 async fn new_session(peer: &RpcPeer, cwd: &str) -> Result<String, SessionError> {
     client::session_new(peer, cwd)
         .await
-        .map_err(|e| SessionError::Spawn(format!("session/new failed: {e}")))
+        .map_err(|e| SessionError::Protocol(format!("session/new failed: {e}")))
 }
 
 /// Map a session/update notification onto AgentEvents. Synchronous by design —
