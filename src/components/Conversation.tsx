@@ -24,6 +24,21 @@ interface ConversationProps {
 
 const FOLLOW_BOTTOM_THRESHOLD = 96;
 
+/** Kinds that never render their own row in EventStream — they feed other UI
+ * (autocomplete, context panel) or decorate sibling events. A turn holding
+ * only these must not show the "Agent" header above empty space (an ACP
+ * turn's first event is often `commands`). */
+const RENDER_NULL_KINDS: ReadonlySet<AgentEvent["kind"]> = new Set([
+  "commands",
+  "usage",
+  "toolStatus",
+  "approvalResolved",
+]);
+
+function hasRenderableEvents(events: AgentEvent[]): boolean {
+  return events.some((event) => !RENDER_NULL_KINDS.has(event.kind));
+}
+
 export function Conversation({
   turns,
   running,
@@ -140,7 +155,7 @@ export function Conversation({
             </section>
           )}
           {/* Agent output: plain on the canvas — room for prose, chips, code. */}
-          {turn.events.length > 0 && (
+          {hasRenderableEvents(turn.events) && (
             <section className="flex flex-col gap-2">
               <div className="text-xs font-medium text-muted-foreground">
                 Agent

@@ -29,6 +29,37 @@ test("does not render an empty user bubble for event-only turns", () => {
   expect(screen.queryByText("You")).not.toBeInTheDocument();
 });
 
+test("agent header stays hidden while a turn holds only render-null events", () => {
+  // An ACP turn's first event is often `commands` (autocomplete feed, renders
+  // nothing) — the "Agent" header must not appear above empty space.
+  const turns: Turn[] = [
+    {
+      prompt: "hi",
+      events: [
+        { kind: "commands", data: { commandsJson: '[{"name":"web","description":""}]' } },
+        { kind: "usage", data: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheCreationTokens: 0, costUsd: null, model: null } },
+      ],
+    },
+  ];
+  render(<Conversation turns={turns} running={true} />);
+  expect(screen.queryByText("Agent")).not.toBeInTheDocument();
+});
+
+test("agent header appears once a renderable event lands", () => {
+  const turns: Turn[] = [
+    {
+      prompt: "hi",
+      events: [
+        { kind: "commands", data: { commandsJson: "[]" } },
+        { kind: "token", data: { text: "Hello" } },
+      ],
+    },
+  ];
+  render(<Conversation turns={turns} running={false} />);
+  expect(screen.getByText("Agent")).toBeInTheDocument();
+  expect(screen.getByText("Hello")).toBeInTheDocument();
+});
+
 test("shows the running indicator while working", () => {
   const turns: Turn[] = [{ prompt: "x", events: [] }];
   render(<Conversation turns={turns} running={true} />);
