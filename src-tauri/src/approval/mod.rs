@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
 
-use crate::events::AgentEvent;
+use crate::events::{AgentEvent, ApprovalOption};
 
 /// What the Claude adapter adds to its launch when approvals are enabled for a run: the
 /// `--permission-prompt-tool` name and the inline `--mcp-config` JSON that registers the
@@ -206,6 +206,24 @@ impl SessionEmitters {
     }
 }
 
+/// The fixed answer pair for approval sources that are inherently binary (the
+/// pipe MCP bridge). Ids are load-bearing: `respond_to_approval` maps "allow"
+/// to `ApprovalDecision.allow = true` and everything else to false.
+pub fn default_binary_options() -> Vec<ApprovalOption> {
+    vec![
+        ApprovalOption {
+            id: "allow".to_string(),
+            label: "Allow".to_string(),
+            kind: "allow_once".to_string(),
+        },
+        ApprovalOption {
+            id: "deny".to_string(),
+            label: "Deny".to_string(),
+            kind: "reject_once".to_string(),
+        },
+    ]
+}
+
 /// Register a gated tool call, surface it to the session's UI as `ApprovalNeeded`, and await
 /// the user's decision. This is the agent-agnostic entry point the MCP approval bridge calls.
 ///
@@ -224,6 +242,7 @@ pub async fn request_approval(
         tool: tool.to_string(),
         input: input.to_string(),
         prompt: mcp::describe(tool, input),
+        options: default_binary_options(),
     };
     let rx = registry.register(&request_id, session_id);
     if !emitters.emit(session_id, event) {
@@ -362,10 +381,15 @@ mod tests {
         // Wait for the request to be surfaced, then answer it by its minted request id.
         let request_id = loop {
             if let Some(AgentEvent::ApprovalNeeded {
-                request_id, tool, ..
+                request_id, tool, options, ..
             }) = captured.lock().unwrap().clone()
             {
                 assert_eq!(tool, "Bash");
+                // The pipe path surfaces the fixed binary pair so the UI has one
+                // rendering path for pipe and ACP approvals alike.
+                assert_eq!(options.len(), 2);
+                assert_eq!(options[0].id, "allow");
+                assert_eq!(options[1].id, "deny");
                 break request_id;
             }
             tokio::task::yield_now().await;

@@ -1570,10 +1570,10 @@ export default function App() {
   async function handleApprovalRespond(
     sessionId: string,
     requestId: string,
-    approve: boolean,
+    selectedOptionId: string,
   ) {
     try {
-      await respondToApproval(sessionId, requestId, approve);
+      await respondToApproval(sessionId, requestId, selectedOptionId);
     } catch (err) {
       toast.error(safeErrorMessage(err));
     }
@@ -1912,11 +1912,11 @@ export default function App() {
                                 }}
                                 onApprovalRespond={
                                   pane.sessionId !== null
-                                    ? (requestId, approve) =>
+                                    ? (requestId, selectedOptionId) =>
                                         void handleApprovalRespond(
                                           pane.sessionId!,
                                           requestId,
-                                          approve,
+                                          selectedOptionId,
                                         )
                                     : undefined
                                 }

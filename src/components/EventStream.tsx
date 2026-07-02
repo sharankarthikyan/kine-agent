@@ -14,10 +14,10 @@ interface EventStreamProps {
   onOpenFile?: (path: string) => void;
   /**
    * Answer a pending approval request. When provided, an `approvalNeeded` event renders
-   * Approve/Deny buttons; when omitted (e.g. historical turns), it renders a read-only
+   * one button per option; when omitted (e.g. historical turns), it renders a read-only
    * notice. Agent-agnostic: any agent that raises an approval is answered the same way.
    */
-  onApprovalRespond?: (requestId: string, approve: boolean) => void;
+  onApprovalRespond?: (requestId: string, selectedOptionId: string) => void;
 }
 
 /**
@@ -121,7 +121,7 @@ function renderEvent(
   hasProse: boolean,
   statusById: Map<string, string>,
   onOpenFile?: (path: string) => void,
-  onApprovalRespond?: (requestId: string, approve: boolean) => void,
+  onApprovalRespond?: (requestId: string, selectedOptionId: string) => void,
 ) {
   switch (event.kind) {
     case "token":
@@ -214,33 +214,38 @@ function renderEvent(
       );
     }
 
-    case "approvalNeeded":
-      // A gated tool call awaiting the user's decision. When an answer handler is wired
-      // (a live run), show Approve/Deny; otherwise (historical turns, or an agent with no
-      // answerable gate) show a read-only notice so the card never implies a dead button.
+    case "approvalNeeded": {
+      // A gated tool call awaiting the user's decision. One button per option the
+      // agent offered (pipe emits a fixed Allow/Deny pair; ACP supplies its own).
+      // Legacy persisted events predate options — fall back to the binary pair.
+      const options =
+        event.data.options && event.data.options.length > 0
+          ? event.data.options
+          : [
+              { id: "allow", label: "Allow", kind: "allow_once" },
+              { id: "deny", label: "Deny", kind: "reject_once" },
+            ];
       return (
         <Alert className="w-full">
           <AlertTitle>Approval required</AlertTitle>
           <AlertDescription>{event.data.prompt}</AlertDescription>
           {onApprovalRespond && (
-            <div className="mt-3 flex gap-2">
-              <Button
-                size="sm"
-                onClick={() => onApprovalRespond(event.data.requestId, true)}
-              >
-                Approve
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => onApprovalRespond(event.data.requestId, false)}
-              >
-                Deny
-              </Button>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {options.map((option) => (
+                <Button
+                  key={option.id}
+                  size="sm"
+                  variant={option.kind.startsWith("reject") ? "outline" : "default"}
+                  onClick={() => onApprovalRespond(event.data.requestId, option.id)}
+                >
+                  {option.label}
+                </Button>
+              ))}
             </div>
           )}
         </Alert>
       );
+    }
 
     case "done":
       // Don't echo the final text — the prose already showed it. Only render the

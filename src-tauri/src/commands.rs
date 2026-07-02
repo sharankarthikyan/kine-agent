@@ -1118,22 +1118,24 @@ pub async fn stop_session(
     Ok(runs.cancel(&session_id))
 }
 
-/// Answer a pending tool-approval request (the Approve/Deny buttons in the UI). Resolves
-/// the request the agent's approval bridge is blocking on. Returns true when a matching
-/// pending request for this session was found; false (unknown/foreign/already-resolved id)
-/// is a no-op, since the request id crosses the untrusted IPC boundary. Agent-agnostic:
-/// every agent that can raise an approval is answered through this one command.
+/// Answer a pending tool-approval request (the per-option buttons in the UI). Resolves
+/// the request the agent's approval bridge is blocking on with the option the user
+/// selected. Returns true when a matching pending request for this session was found;
+/// false (unknown/foreign/already-resolved id) is a no-op, since the request id crosses
+/// the untrusted IPC boundary. Agent-agnostic: the pipe bridge reads the derived
+/// `allow` bool (its fixed pair uses ids "allow"/"deny"); the ACP adapter reads the
+/// selected option id itself.
 #[tauri::command]
 pub async fn respond_to_approval(
     session_id: String,
     request_id: String,
-    approve: bool,
+    selected_option_id: String,
     message: Option<String>,
     approvals: State<'_, ApprovalRegistry>,
 ) -> Result<bool, String> {
     let decision = ApprovalDecision {
-        allow: approve,
-        selected_option_id: Some(if approve { "allow".to_string() } else { "deny".to_string() }),
+        allow: selected_option_id == "allow",
+        selected_option_id: Some(selected_option_id),
         message,
     };
     Ok(approvals.resolve(&session_id, &request_id, decision))

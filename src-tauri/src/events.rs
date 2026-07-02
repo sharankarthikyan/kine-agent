@@ -1,5 +1,14 @@
 use serde::Serialize;
 
+/// One selectable answer to an approval request. The pipe path emits a fixed
+/// allow/deny pair; ACP forwards the agent-supplied options verbatim.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ApprovalOption {
+    pub id: String,
+    pub label: String,
+    pub kind: String,
+}
+
 /// Normalized agent event — every adapter maps its CLI output to this.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", tag = "kind", content = "data")]
@@ -43,6 +52,8 @@ pub enum AgentEvent {
         tool: String,
         input: String,
         prompt: String,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        options: Vec<ApprovalOption>,
     },
     Done {
         summary: String,
@@ -201,5 +212,39 @@ mod tests {
             json,
             r#"{"kind":"usage","data":{"inputTokens":10,"outputTokens":20,"cacheReadTokens":0,"cacheCreationTokens":0,"costUsd":null,"model":null}}"#
         );
+    }
+
+    #[test]
+    fn approval_needed_without_options_serializes_as_before() {
+        // Legacy shape must stay byte-identical (old persisted rows re-serialize
+        // through split_event; pipe pre-M3 events had no options key).
+        let ev = AgentEvent::ApprovalNeeded {
+            request_id: "ar-1".into(),
+            tool: "Bash".into(),
+            input: "{}".into(),
+            prompt: "Run ls?".into(),
+            options: vec![],
+        };
+        assert_eq!(
+            serde_json::to_string(&ev).unwrap(),
+            r#"{"kind":"approvalNeeded","data":{"requestId":"ar-1","tool":"Bash","input":"{}","prompt":"Run ls?"}}"#
+        );
+    }
+
+    #[test]
+    fn approval_needed_serializes_options_array() {
+        let ev = AgentEvent::ApprovalNeeded {
+            request_id: "ar-1".into(),
+            tool: "Edit".into(),
+            input: "{}".into(),
+            prompt: "Edit main.rs?".into(),
+            options: vec![ApprovalOption {
+                id: "ok".into(),
+                label: "Allow".into(),
+                kind: "allow_once".into(),
+            }],
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(json.contains(r#""options":[{"id":"ok","label":"Allow","kind":"allow_once"}]"#));
     }
 }

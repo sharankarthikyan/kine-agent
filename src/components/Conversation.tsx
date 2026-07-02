@@ -16,7 +16,7 @@ interface ConversationProps {
   running: boolean;
   onOpenFile?: (path: string) => void;
   /** Answer a pending approval request raised in this session's live turn. */
-  onApprovalRespond?: (requestId: string, approve: boolean) => void;
+  onApprovalRespond?: (requestId: string, selectedOptionId: string) => void;
   hasMore?: boolean;
   loadingMore?: boolean;
   onLoadMore?: () => void;

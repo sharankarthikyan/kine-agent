@@ -144,18 +144,40 @@ test("shows a read-only notice (no buttons) when no answer handler is wired", ()
   expect(screen.queryByRole("button", { name: "Deny" })).not.toBeInTheDocument();
 });
 
-test("Approve calls onApprovalRespond with the request id and true", async () => {
+test("Allow calls onApprovalRespond with the request id and 'allow'", async () => {
   const onApprovalRespond = vi.fn();
   render(<EventStream events={[APPROVAL]} onApprovalRespond={onApprovalRespond} />);
-  await userEvent.click(screen.getByRole("button", { name: "Approve" }));
-  expect(onApprovalRespond).toHaveBeenCalledWith("req-1", true);
+  await userEvent.click(screen.getByRole("button", { name: "Allow" }));
+  expect(onApprovalRespond).toHaveBeenCalledWith("req-1", "allow");
 });
 
-test("Deny calls onApprovalRespond with the request id and false", async () => {
+test("Deny calls onApprovalRespond with the request id and 'deny'", async () => {
   const onApprovalRespond = vi.fn();
   render(<EventStream events={[APPROVAL]} onApprovalRespond={onApprovalRespond} />);
   await userEvent.click(screen.getByRole("button", { name: "Deny" }));
-  expect(onApprovalRespond).toHaveBeenCalledWith("req-1", false);
+  expect(onApprovalRespond).toHaveBeenCalledWith("req-1", "deny");
+});
+
+test("renders one button per agent-supplied option and passes the chosen id", async () => {
+  const onApprovalRespond = vi.fn();
+  const event = {
+    kind: "approvalNeeded",
+    data: {
+      requestId: "req-9",
+      tool: "Edit",
+      input: "{}",
+      prompt: "Edit main.rs?",
+      options: [
+        { id: "opt-once", label: "Allow once", kind: "allow_once" },
+        { id: "opt-always", label: "Allow always", kind: "allow_always" },
+        { id: "opt-no", label: "Reject", kind: "reject_once" },
+      ],
+    },
+  } as AgentEvent;
+  render(<EventStream events={[event]} onApprovalRespond={onApprovalRespond} />);
+  await userEvent.click(screen.getByRole("button", { name: "Allow always" }));
+  expect(onApprovalRespond).toHaveBeenCalledWith("req-9", "opt-always");
+  expect(screen.getByRole("button", { name: "Reject" })).toBeInTheDocument();
 });
 
 test("renders nothing for an unknown event kind (forward compatibility)", () => {

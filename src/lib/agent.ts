@@ -14,6 +14,13 @@ export function assertDesktop(): void {
   }
 }
 
+/** One selectable answer to an approval request (pipe: fixed allow/deny; ACP: agent-supplied). */
+export interface ApprovalOption {
+  id: string;
+  label: string;
+  kind: string;
+}
+
 export type AgentEvent =
   | { kind: "token"; data: { text: string } }
   | { kind: "thought"; data: { text: string } }
@@ -25,7 +32,13 @@ export type AgentEvent =
   | { kind: "fileWrite"; data: { path: string } }
   | {
       kind: "approvalNeeded";
-      data: { requestId: string; tool: string; input: string; prompt: string };
+      data: {
+        requestId: string;
+        tool: string;
+        input: string;
+        prompt: string;
+        options?: ApprovalOption[];
+      };
     }
   | { kind: "done"; data: { summary: string } }
   | { kind: "error"; data: { message: string } }
@@ -90,18 +103,19 @@ export async function cleanupSession(sessionId: string): Promise<void> {
 }
 
 /**
- * Answer a pending tool-approval request (the Approve/Deny buttons). Resolves the request
- * the agent's approval bridge is blocking on. Returns true when a matching pending request
- * for this session was found; an unknown/stale id is a harmless no-op. Agent-agnostic.
+ * Answer a pending tool-approval request with the option the user selected (per-option
+ * buttons). Resolves the request the agent's approval bridge is blocking on. Returns true
+ * when a matching pending request for this session was found; an unknown/stale id is a
+ * harmless no-op. Agent-agnostic.
  */
 export async function respondToApproval(
   sessionId: string,
   requestId: string,
-  approve: boolean,
+  selectedOptionId: string,
   message?: string,
 ): Promise<boolean> {
   assertDesktop();
-  return invoke<boolean>("respond_to_approval", { sessionId, requestId, approve, message });
+  return invoke<boolean>("respond_to_approval", { sessionId, requestId, selectedOptionId, message });
 }
 
 /**
