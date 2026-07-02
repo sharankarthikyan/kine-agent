@@ -256,6 +256,11 @@ async fn run_persisting(
     // id captured on a previous run; only pipe Claude uses the Kineloop session id.
     let (adapter_id, do_resume) =
         resume_target(&session_id, resume, external_thread_id.as_deref());
+    // Cloned before `run_future` is built so the async block below captures its own owned
+    // receiver by value; otherwise it would capture `cancel_rx` by reference (for `.clone()`)
+    // and hold that borrow alive for the block's lifetime, conflicting with the `cancel_rx`
+    // mutable borrow the cancel arm of the `select!` below needs for `.changed()`.
+    let acp_cancel_rx = cancel_rx.clone();
     let run_future = async {
         match (agent.as_str(), engine.as_str()) {
             // Must stay ABOVE the ("codex", _) pipe arm below: match arms are
@@ -272,6 +277,7 @@ async fn run_persisting(
                     approvals.clone(),
                     session_id.clone(),
                     profile,
+                    acp_cancel_rx,
                 )
                 .run(prompt, cwd, adapter_id, do_resume, sink)
                 .await
@@ -309,15 +315,33 @@ async fn run_persisting(
     #[cfg(not(unix))]
     let serve_fut = std::future::pending::<()>();
 
-    // Race the run against a cancel signal from `stop_session`. On cancel, dropping
-    // `run_future` drops the adapter future, killing its child process via `kill_on_drop`
-    // and dropping the sink (whose tx end terminates the drain task below).
+    // Race the run against a cancel signal from `stop_session`. On cancel of a pipe
+    // engine, dropping `run_future` drops the adapter future, killing its child process
+    // via `kill_on_drop` and dropping the sink (whose tx end terminates the drain task
+    // below). On cancel of an ACP engine, the adapter saw the same watch signal and is
+    // sending session/cancel; give it a bounded grace window to finish the turn before
+    // falling back to the same drop-based kill.
+    tokio::pin!(run_future);
     let mut cancelled = false;
     let result = tokio::select! {
-        r = run_future => r,
+        r = &mut run_future => r,
         _ = cancel_rx.changed() => {
             cancelled = true;
-            Ok(())
+            if engine == store::ENGINE_ACP {
+                // Graceful path: the adapter saw the same signal and sent
+                // session/cancel — give the agent a bounded window to finish
+                // the turn before dropping it (drop ⇒ pgid guard kills the tree).
+                match tokio::time::timeout(ACP_CANCEL_GRACE, &mut run_future).await {
+                    Ok(r) => r,
+                    Err(_) => {
+                        eprintln!("acp: cancel grace expired for {session_id} — killing the agent");
+                        Ok(())
+                    }
+                }
+            } else {
+                // Pipe engines: immediate kill via drop, exactly as before.
+                Ok(())
+            }
         }
         _ = serve_fut => Ok(()),
     };
@@ -359,6 +383,12 @@ async fn run_persisting(
 /// surface only as a cryptic spawn failure. 256 KiB dwarfs any hand-written prompt while
 /// staying well under ARG_MAX.
 const MAX_PROMPT_BYTES: usize = 256 * 1024;
+
+/// How long a cancelled ACP run may keep running after the user's stop: the
+/// adapter has sent session/cancel and the agent is finishing the turn
+/// (final updates + stopReason "cancelled"). Past this, the future is dropped
+/// and the pgid guard kills the process tree.
+const ACP_CANCEL_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Budget for the imported-transcript portion of a continuation prompt. The assembled
 /// prompt is one process argument, so a multi-MB external session would otherwise blow
