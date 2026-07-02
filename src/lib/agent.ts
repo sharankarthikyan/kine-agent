@@ -18,7 +18,8 @@ export type AgentEvent =
   | { kind: "token"; data: { text: string } }
   | { kind: "thought"; data: { text: string } }
   | { kind: "status"; data: { text: string } }
-  | { kind: "toolCall"; data: { name: string; input: string } }
+  | { kind: "toolCall"; data: { name: string; input: string; toolCallId?: string } }
+  | { kind: "toolStatus"; data: { toolCallId: string; status: string; detail: string } }
   | { kind: "fileWrite"; data: { path: string } }
   | {
       kind: "approvalNeeded";

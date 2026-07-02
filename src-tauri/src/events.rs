@@ -12,9 +12,24 @@ pub enum AgentEvent {
     Thought {
         text: String,
     },
+    /// `tool_call_id` is set by adapters whose protocol assigns stable ids (ACP),
+    /// so later `ToolStatus` events can upgrade the matching chip. Pipe adapters
+    /// leave it `None` and the serialized shape is unchanged.
+    #[serde(rename_all = "camelCase")]
     ToolCall {
         name: String,
         input: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tool_call_id: Option<String>,
+    },
+    /// Status transition for an earlier ToolCall (ACP `tool_call_update`):
+    /// pending | in_progress | completed | failed. `detail` is the update's
+    /// human-readable title ("" when the update carried none).
+    #[serde(rename_all = "camelCase")]
+    ToolStatus {
+        tool_call_id: String,
+        status: String,
+        detail: String,
     },
     FileWrite {
         path: String,
@@ -79,11 +94,46 @@ mod tests {
         let ev = AgentEvent::ToolCall {
             name: "Write".into(),
             input: "{}".into(),
+            tool_call_id: None,
         };
         let json = serde_json::to_string(&ev).unwrap();
         assert_eq!(
             json,
             r#"{"kind":"toolCall","data":{"name":"Write","input":"{}"}}"#
+        );
+    }
+
+    #[test]
+    fn tool_call_without_id_serializes_exactly_as_before() {
+        // Pipe adapters set no id — the wire/persisted shape must stay byte-identical.
+        let ev = AgentEvent::ToolCall {
+            name: "Write".into(),
+            input: "{}".into(),
+            tool_call_id: None,
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert_eq!(json, r#"{"kind":"toolCall","data":{"name":"Write","input":"{}"}}"#);
+    }
+
+    #[test]
+    fn serializes_tool_call_with_id_and_tool_status() {
+        let ev = AgentEvent::ToolCall {
+            name: "Read".into(),
+            input: "{}".into(),
+            tool_call_id: Some("t1".into()),
+        };
+        assert_eq!(
+            serde_json::to_string(&ev).unwrap(),
+            r#"{"kind":"toolCall","data":{"name":"Read","input":"{}","toolCallId":"t1"}}"#
+        );
+        let ev = AgentEvent::ToolStatus {
+            tool_call_id: "t1".into(),
+            status: "completed".into(),
+            detail: "Read main.rs".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&ev).unwrap(),
+            r#"{"kind":"toolStatus","data":{"toolCallId":"t1","status":"completed","detail":"Read main.rs"}}"#
         );
     }
 

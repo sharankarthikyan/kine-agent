@@ -114,6 +114,7 @@ fn parse_item(item: Option<&Value>) -> Vec<AgentEvent> {
             vec![AgentEvent::ToolCall {
                 name: "shell".to_string(),
                 input: command,
+                tool_call_id: None,
             }]
         }
         Some("mcp_tool_call") => {
@@ -127,7 +128,7 @@ fn parse_item(item: Option<&Value>) -> Vec<AgentEvent> {
                 .get("arguments")
                 .map(|a| a.to_string())
                 .unwrap_or_default();
-            vec![AgentEvent::ToolCall { name, input }]
+            vec![AgentEvent::ToolCall { name, input, tool_call_id: None }]
         }
         Some("file_change") | Some("patch") => file_paths_from_change(item)
             .into_iter()
@@ -364,7 +365,7 @@ mod tests {
         let events = parse_line(line);
         assert_eq!(events.len(), 1);
         assert!(
-            matches!(&events[0], AgentEvent::ToolCall { name, input } if name == "shell" && input == "ls -la"),
+            matches!(&events[0], AgentEvent::ToolCall { name, input, .. } if name == "shell" && input == "ls -la"),
         );
     }
 

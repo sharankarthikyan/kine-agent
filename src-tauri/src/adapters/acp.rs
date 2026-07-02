@@ -299,13 +299,17 @@ fn handle_notification(
         Some(SessionUpdate::Thought { text }) => {
             sink.emit(AgentEvent::Thought { text });
         }
-        Some(SessionUpdate::ToolCall { title, raw_input }) => {
+        Some(SessionUpdate::ToolCall { title, raw_input, tool_call_id }) => {
             sink.emit(AgentEvent::ToolCall {
                 name: title,
                 input: raw_input,
+                tool_call_id,
             });
         }
-        None => {} // plan/tool_call_update/commands — M5.
+        Some(SessionUpdate::ToolCallUpdate { tool_call_id, status, detail }) => {
+            sink.emit(AgentEvent::ToolStatus { tool_call_id, status, detail });
+        }
+        None => {} // plan/commands — M5.
     }
 }
 
@@ -482,6 +486,32 @@ mod tests {
         assert!(matches!(&events[1], AgentEvent::ToolCall { name, .. } if name == "Read main.rs"));
         assert!(matches!(events.last().unwrap(), AgentEvent::Done { summary } if summary == "Hi "));
         assert_eq!(h.captured.lock().unwrap().as_deref(), Some("acp-abc"));
+    }
+
+    #[tokio::test]
+    async fn tool_call_update_emits_tool_status_event() {
+        let prompt = Prompt { text: "hello".into(), ..Default::default() };
+        let h = run_fixture(prompt, |_lines, mut w, prompt_id| async move {
+            for msg in [
+                serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{
+                    "sessionId":"acp-abc","update":{"sessionUpdate":"tool_call",
+                    "toolCallId":"t1","title":"Read main.rs","rawInput":{"path":"main.rs"}}}}),
+                serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{
+                    "sessionId":"acp-abc","update":{"sessionUpdate":"tool_call_update",
+                    "toolCallId":"t1","status":"completed"}}}),
+            ] {
+                send_line(&mut w, msg).await;
+            }
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":prompt_id,
+                "result":{"stopReason":"completed"}})).await;
+        })
+        .await;
+        let events = h.events.lock().unwrap();
+        assert!(matches!(&events[0],
+            AgentEvent::ToolCall { tool_call_id: Some(id), .. } if id == "t1"));
+        assert!(matches!(&events[1],
+            AgentEvent::ToolStatus { tool_call_id, status, .. }
+                if tool_call_id == "t1" && status == "completed"));
     }
 
     #[tokio::test]

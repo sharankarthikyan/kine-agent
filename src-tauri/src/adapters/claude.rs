@@ -120,6 +120,9 @@ fn parse_assistant(v: &Value) -> Vec<AgentEvent> {
                     .get("input")
                     .map(|i| i.to_string())
                     .unwrap_or_default(),
+                // Claude's tool_use.id exists but has no consumer yet (YAGNI) —
+                // ToolStatus is ACP-only in M2.
+                tool_call_id: None,
             }),
             _ => None,
         })

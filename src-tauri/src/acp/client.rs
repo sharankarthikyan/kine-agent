@@ -12,7 +12,8 @@ pub const PROTOCOL_VERSION: u64 = 1;
 pub enum SessionUpdate {
     AgentMessageChunk { text: String },
     Thought { text: String },
-    ToolCall { title: String, raw_input: String },
+    ToolCall { title: String, raw_input: String, tool_call_id: Option<String> },
+    ToolCallUpdate { tool_call_id: String, status: String, detail: String },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -140,8 +141,29 @@ pub fn parse_session_update(params: &Value) -> Option<SessionUpdate> {
                 .get("rawInput")
                 .map(|v| v.to_string())
                 .unwrap_or_else(|| "{}".to_string()),
+            tool_call_id: update
+                .get("toolCallId")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
         }),
-        // plan/tool_call_update/available_commands_update: M5.
+        "tool_call_update" => {
+            let tool_call_id = update
+                .get("toolCallId")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())?
+                .to_string();
+            // Updates may carry only content/locations; without a status
+            // transition there is nothing to surface.
+            let status = update.get("status").and_then(Value::as_str)?.to_string();
+            let detail = update
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            Some(SessionUpdate::ToolCallUpdate { tool_call_id, status, detail })
+        }
+        // plan/available_commands_update: M5.
         _ => None,
     }
 }
@@ -283,12 +305,45 @@ mod tests {
             }
         });
         match parse_session_update(&params) {
-            Some(SessionUpdate::ToolCall { title, raw_input }) => {
+            Some(SessionUpdate::ToolCall { title, raw_input, tool_call_id }) => {
                 assert_eq!(title, "Read file");
                 assert!(raw_input.contains("/x"));
+                assert_eq!(tool_call_id.as_deref(), Some("t1"));
             }
             other => panic!("expected ToolCall, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_tool_call_update_status() {
+        let params = serde_json::json!({
+            "sessionId": "s",
+            "update": {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "t1",
+                "status": "completed",
+                "title": "Read main.rs"
+            }
+        });
+        assert_eq!(
+            parse_session_update(&params),
+            Some(SessionUpdate::ToolCallUpdate {
+                tool_call_id: "t1".into(),
+                status: "completed".into(),
+                detail: "Read main.rs".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn tool_call_update_without_status_is_ignored() {
+        // ACP allows updates carrying only content/locations; without a status
+        // transition there is nothing for the chip to do.
+        let params = serde_json::json!({
+            "sessionId": "s",
+            "update": {"sessionUpdate": "tool_call_update", "toolCallId": "t1"}
+        });
+        assert_eq!(parse_session_update(&params), None);
     }
 
     #[test]

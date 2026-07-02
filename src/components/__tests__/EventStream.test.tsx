@@ -54,6 +54,35 @@ test("renders a tool call with its name", () => {
   expect(screen.getByText(/Write/)).toBeInTheDocument();
 });
 
+test("upgrades a tool chip via toolStatus: spinner while running, check when done", () => {
+  const events = [
+    { kind: "toolCall", data: { name: "Read", input: "{}", toolCallId: "t1" } },
+    { kind: "toolStatus", data: { toolCallId: "t1", status: "in_progress", detail: "" } },
+  ] as AgentEvent[];
+  const { rerender } = render(<EventStream events={events} />);
+  expect(screen.getByTestId("tool-status-t1")).toHaveAttribute("data-status", "in_progress");
+  rerender(
+    <EventStream
+      events={[
+        ...events,
+        { kind: "toolStatus", data: { toolCallId: "t1", status: "completed", detail: "" } } as AgentEvent,
+      ]}
+    />,
+  );
+  // Last status wins.
+  expect(screen.getByTestId("tool-status-t1")).toHaveAttribute("data-status", "completed");
+  // toolStatus events render no row of their own.
+  expect(screen.queryByText("in_progress")).not.toBeInTheDocument();
+});
+
+test("tool chips without an id render as today (pipe engine unaffected)", () => {
+  const events = [
+    { kind: "toolCall", data: { name: "Write", input: "{}" } },
+  ] as AgentEvent[];
+  render(<EventStream events={events} />);
+  expect(screen.getByText("Write")).toBeInTheDocument();
+});
+
 test("renders an error event with alert role", () => {
   const events: AgentEvent[] = [{ kind: "error", data: { message: "boom" } }];
   render(<EventStream events={events} />);

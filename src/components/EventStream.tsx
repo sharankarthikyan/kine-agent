@@ -5,7 +5,7 @@ import { Markdown } from "./Markdown";
 import { Badge, badgeVariants } from "@/components/ui/badge";
 import { Alert, AlertTitle, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
-import { Wrench, Pencil } from "lucide-react";
+import { Wrench, Pencil, Check, Loader2, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface EventStreamProps {
@@ -36,8 +36,15 @@ export function EventStream({ events, onOpenFile, onApprovalRespond }: EventStre
       />
     );
   }
-  const hasProse = events.some((e) => e.kind === "token");
-  const groups = groupEventRuns(events);
+  // Last-write-wins status per tool call id; toolStatus rows never render
+  // themselves — they upgrade the chip with the matching id.
+  const statusById = new Map<string, string>();
+  for (const e of events) {
+    if (e.kind === "toolStatus") statusById.set(e.data.toolCallId, e.data.status);
+  }
+  const visible = events.filter((e) => e.kind !== "toolStatus");
+  const hasProse = visible.some((e) => e.kind === "token");
+  const groups = groupEventRuns(visible);
   return (
     <div className="flex flex-col items-start gap-3">
       {groups.map((group, i) =>
@@ -47,7 +54,7 @@ export function EventStream({ events, onOpenFile, onApprovalRespond }: EventStre
           <div key={i} className="flex w-full flex-wrap gap-1.5">
             {group.events.map((event, j) => (
               <Fragment key={j}>
-                {renderEvent(event, hasProse, onOpenFile, onApprovalRespond)}
+                {renderEvent(event, hasProse, statusById, onOpenFile, onApprovalRespond)}
               </Fragment>
             ))}
           </div>
@@ -64,7 +71,7 @@ export function EventStream({ events, onOpenFile, onApprovalRespond }: EventStre
           </details>
         ) : (
           <Fragment key={i}>
-            {renderEvent(group.event, hasProse, onOpenFile, onApprovalRespond)}
+            {renderEvent(group.event, hasProse, statusById, onOpenFile, onApprovalRespond)}
           </Fragment>
         )
       )}
@@ -106,6 +113,7 @@ function groupEventRuns(events: AgentEvent[]): ChipGroup[] {
 function renderEvent(
   event: AgentEvent,
   hasProse: boolean,
+  statusById: Map<string, string>,
   onOpenFile?: (path: string) => void,
   onApprovalRespond?: (requestId: string, approve: boolean) => void,
 ) {
@@ -132,16 +140,33 @@ function renderEvent(
       const filePath = fileTargetPath(event.data.name, event.data.input);
       const clickable = filePath !== null && onOpenFile !== undefined;
       const className = "gap-1.5 max-w-full overflow-hidden font-normal";
-      const content = (
-        <>
+      const status = event.data.toolCallId
+        ? statusById.get(event.data.toolCallId)
+        : undefined;
+      const icon =
+        status === "completed" ? (
+          <Check aria-hidden="true" className="size-3 shrink-0" />
+        ) : status === "failed" ? (
+          <X aria-hidden="true" className="size-3 shrink-0 text-destructive" />
+        ) : status === "pending" || status === "in_progress" ? (
+          <Loader2 aria-hidden="true" className="size-3 shrink-0 animate-spin motion-reduce:animate-none" />
+        ) : (
           <Wrench aria-hidden="true" className="size-3 shrink-0" />
+        );
+      const content = (
+        <span
+          data-testid={event.data.toolCallId ? `tool-status-${event.data.toolCallId}` : undefined}
+          data-status={status}
+          className="flex items-center gap-1.5 min-w-0"
+        >
+          {icon}
           <span className="truncate">
             <span className="font-medium">{event.data.name}</span>
             {summary && (
               <span className="text-muted-foreground font-mono"> · {summary}</span>
             )}
           </span>
-        </>
+        </span>
       );
       return clickable ? (
         <button
@@ -225,6 +250,12 @@ function renderEvent(
 
     case "usage":
       // Rendered by the Context panel, not the chat stream. Ignore here.
+      return null;
+
+    case "toolStatus":
+      // Filtered out of `visible` before grouping — this event never renders
+      // its own row, it only decorates the matching toolCall chip. Case kept
+      // purely for the `never` exhaustiveness check below.
       return null;
 
     default: {
