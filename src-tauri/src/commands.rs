@@ -239,10 +239,11 @@ async fn run_persisting(
         }
     });
 
-    // Dispatch to the agent's adapter. Codex and Antigravity mint their own
-    // conversation id; `captured` collects it during the run so we can persist it for
-    // resume. On resume those adapters take the previously-captured id (not the
-    // Kineloop session id); Claude always uses the Kineloop session id directly.
+    // Dispatch to the agent's adapter. Codex, Antigravity, and claude-over-ACP mint
+    // their own conversation id; `captured` collects it during the run so we can
+    // persist it for resume. On resume those adapters take the previously-captured id
+    // (not the Kineloop session id); only pipe Claude uses the Kineloop session id
+    // directly.
     let captured: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let run_future = async {
         match (agent.as_str(), engine.as_str()) {
