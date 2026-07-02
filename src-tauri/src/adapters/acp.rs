@@ -16,9 +16,25 @@ use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, BufReader};
 use tokio::process::Command;
 
-/// Version-pinned launcher. Unpinned npx drifts to @latest; a silent protocol
-/// bump must be a deliberate, tested upgrade — not a runtime surprise.
-pub const CLAUDE_ACP_PACKAGE: &str = "@agentclientprotocol/claude-agent-acp@0.54.1";
+/// Per-agent ACP launch profile. Packages are VERSION-PINNED: unpinned npx
+/// drifts to @latest, and a silent protocol bump must be a deliberate, tested
+/// upgrade — not a runtime surprise. `login_hint` is appended to auth_required
+/// failures so the toast tells the user exactly what to run.
+#[derive(Clone, Copy)]
+pub struct AcpProfile {
+    pub package: &'static str,
+    pub login_hint: &'static str,
+}
+
+pub const CLAUDE_ACP: AcpProfile = AcpProfile {
+    package: "@agentclientprotocol/claude-agent-acp@0.54.1",
+    login_hint: "log in with the Claude CLI first (`claude`, then /login)",
+};
+
+pub const CODEX_ACP: AcpProfile = AcpProfile {
+    package: "@zed-industries/codex-acp@0.16.0",
+    login_hint: "run `codex login` in a terminal, then retry",
+};
 
 /// Emitted when a resume request degrades to a fresh session WITH replayed context.
 const RESUME_NOTICE_WITH_CONTEXT: &str = "This agent can't restore the previous session natively — Kineloop replayed recent conversation context into this turn.";
@@ -38,6 +54,8 @@ pub struct AcpAdapter {
     /// The KINELOOP session id approvals belong to. Distinct from the `session_id`
     /// run() receives, which on resume is the ACP-minted thread id.
     app_session_id: String,
+    /// Which agent's ACP package to launch, and its login hint on auth failure.
+    profile: AcpProfile,
 }
 
 impl AcpAdapter {
@@ -45,8 +63,9 @@ impl AcpAdapter {
         captured_session: Arc<Mutex<Option<String>>>,
         approvals: crate::approval::ApprovalRegistry,
         app_session_id: String,
+        profile: AcpProfile,
     ) -> Self {
-        Self { captured_session, approvals, app_session_id }
+        Self { captured_session, approvals, app_session_id, profile }
     }
 }
 
@@ -68,6 +87,7 @@ impl AgentAdapter for AcpAdapter {
             self.captured_session.clone(),
             self.approvals.clone(),
             self.app_session_id.clone(),
+            self.profile,
         )
     }
 }
@@ -83,6 +103,7 @@ async fn spawn_and_drive(
     captured_session: Arc<Mutex<Option<String>>>,
     approvals: crate::approval::ApprovalRegistry,
     app_session_id: String,
+    profile: AcpProfile,
 ) -> Result<(), SessionError> {
     // resolve_program falls back to the bare name on lookup failure, which would
     // yield a generic "No such file" from spawn — check explicitly so the user
@@ -95,14 +116,14 @@ async fn spawn_and_drive(
     let npx = crate::agent_paths::resolve_program("npx");
     let mut child = Command::new(&npx)
         .arg("--yes")
-        .arg(CLAUDE_ACP_PACKAGE)
+        .arg(profile.package)
         .current_dir(&cwd)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .map_err(|e| SessionError::Spawn(format!("npx {CLAUDE_ACP_PACKAGE}: {e}")))?;
+        .map_err(|e| SessionError::Spawn(format!("npx {}: {e}", profile.package)))?;
     let stdin = child
         .stdin
         .take()
@@ -140,6 +161,7 @@ async fn spawn_and_drive(
         captured_session,
         approvals,
         app_session_id,
+        profile.login_hint,
     )
     .await;
 
@@ -179,6 +201,7 @@ pub async fn drive_session(
     captured_session: Arc<Mutex<Option<String>>>,
     approvals: crate::approval::ApprovalRegistry,
     app_session_id: String,
+    login_hint: &str,
 ) -> Result<(), SessionError> {
     let peer = RpcPeer::start(read, write);
     let mut inbound = peer.inbound();
@@ -189,9 +212,12 @@ pub async fn drive_session(
     // with -32603, never served unguarded.
     let fs_root = std::fs::canonicalize(&cwd).ok();
 
-    let can_load = client::initialize(&peer)
-        .await
-        .map_err(|e| SessionError::Protocol(format!("ACP initialize failed: {e}")))?;
+    let can_load = client::initialize(&peer).await.map_err(|e| {
+        SessionError::Protocol(format!(
+            "ACP initialize failed: {}",
+            describe_rpc_failure(&e, login_hint)
+        ))
+    })?;
 
     // Resume when the agent supports it; a failed/unsupported load degrades to a
     // fresh session. fallback=true ⇒ this turn was supposed to resume but
@@ -210,18 +236,18 @@ pub async fn drive_session(
                 }
                 Err(e) => {
                     eprintln!("acp: session/load failed ({e}); falling back to a fresh session");
-                    let (id, modes) = new_session(&peer, &cwd).await?;
+                    let (id, modes) = new_session(&peer, &cwd, login_hint).await?;
                     (id, modes, true)
                 }
             }
         }
         Some(_) => {
             // Resume requested but the agent can't load sessions at all.
-            let (id, modes) = new_session(&peer, &cwd).await?;
+            let (id, modes) = new_session(&peer, &cwd, login_hint).await?;
             (id, modes, true)
         }
         None => {
-            let (id, modes) = new_session(&peer, &cwd).await?;
+            let (id, modes) = new_session(&peer, &cwd, login_hint).await?;
             // resume_transcript is only populated for follow-up turns
             // (send_message on an ACP session). Carrying one into a fresh
             // session means the prior thread id was never captured — without
@@ -332,10 +358,26 @@ pub async fn drive_session(
 async fn new_session(
     peer: &RpcPeer,
     cwd: &str,
+    login_hint: &str,
 ) -> Result<(String, client::SessionModes), SessionError> {
-    client::session_new(peer, cwd)
-        .await
-        .map_err(|e| SessionError::Protocol(format!("session/new failed: {e}")))
+    client::session_new(peer, cwd).await.map_err(|e| {
+        SessionError::Protocol(format!(
+            "session/new failed: {}",
+            describe_rpc_failure(&e, login_hint)
+        ))
+    })
+}
+
+/// Human-facing description of an initialize/session-setup RPC failure. ACP
+/// auth_required (-32000) answers get the per-agent login hint appended so the
+/// user sees what to run, not a bare protocol error.
+fn describe_rpc_failure(e: &crate::acp::jsonrpc::RpcError, login_hint: &str) -> String {
+    match e {
+        crate::acp::jsonrpc::RpcError::Remote { code: -32000, .. } => {
+            format!("{e} — {login_hint}")
+        }
+        _ => e.to_string(),
+    }
 }
 
 /// Await session/load while DISCARDING the replayed history. The ACP spec
@@ -853,6 +895,7 @@ mod tests {
             Arc::clone(&captured),
             approvals.clone(),
             "app-session".to_string(),
+            CLAUDE_ACP.login_hint,
         )
         .await
         .unwrap();
@@ -1861,6 +1904,68 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn describe_rpc_failure_appends_login_hint_only_for_auth_errors() {
+        let auth = crate::acp::jsonrpc::RpcError::Remote {
+            code: -32000,
+            message: "Authentication required".into(),
+        };
+        let described = describe_rpc_failure(&auth, "run `codex login` in a terminal");
+        assert!(described.contains("run `codex login`"), "got: {described}");
+
+        let other = crate::acp::jsonrpc::RpcError::Remote {
+            code: -32603,
+            message: "boom".into(),
+        };
+        let described = describe_rpc_failure(&other, "run `codex login` in a terminal");
+        assert!(!described.contains("codex login"), "got: {described}");
+        assert!(described.contains("boom"));
+    }
+
+    /// An unauthenticated agent answers session/new with auth_required (-32000).
+    /// The run must fail with a Protocol error carrying the login hint — an
+    /// actionable toast, not a bare "agent returned error -32000".
+    #[tokio::test]
+    async fn auth_required_on_session_new_surfaces_the_login_hint() {
+        let (ours, theirs) = tokio::io::duplex(64 * 1024);
+        let (read, write) = tokio::io::split(ours);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink: Box<dyn EventSink> = Box::new(Collect(Arc::clone(&events)));
+        let agent = tokio::spawn(async move {
+            let (r, mut w) = tokio::io::split(theirs);
+            let mut lines = tokio::io::BufReader::new(r).lines();
+            let req: serde_json::Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(req["method"], "initialize");
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}})).await;
+            let req: serde_json::Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(req["method"], "session/new");
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "error":{"code":-32000,"message":"Authentication required"}})).await;
+        });
+        let err = drive_session(
+            read,
+            write,
+            Prompt { text: "hi".into(), ..Default::default() },
+            "/wt".into(),
+            None,
+            sink,
+            Arc::new(Mutex::new(None)),
+            crate::approval::ApprovalRegistry::new(),
+            "app-session".to_string(),
+            CODEX_ACP.login_hint,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&err, crate::adapter::SessionError::Protocol(m) if m.contains("codex login")),
+            "expected the login hint in the failure, got {err:?}"
+        );
+        agent.await.unwrap();
+    }
+
     #[tokio::test]
     async fn initialize_error_maps_to_protocol_session_error() {
         let (ours, theirs) = tokio::io::duplex(64 * 1024);
@@ -1887,6 +1992,7 @@ mod tests {
             Arc::new(Mutex::new(None)),
             crate::approval::ApprovalRegistry::new(),
             "app-session".to_string(),
+            CLAUDE_ACP.login_hint,
         )
         .await
         .unwrap_err();
@@ -2048,6 +2154,7 @@ mod tests {
             Arc::new(Mutex::new(None)),
             crate::approval::ApprovalRegistry::new(),
             "app-session".to_string(),
+            CLAUDE_ACP.login_hint,
         )
         .await
         .unwrap();

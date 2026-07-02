@@ -258,11 +258,20 @@ async fn run_persisting(
         resume_target(&session_id, resume, external_thread_id.as_deref());
     let run_future = async {
         match (agent.as_str(), engine.as_str()) {
-            ("claude", store::ENGINE_ACP) => {
+            // Must stay ABOVE the ("codex", _) pipe arm below: match arms are
+            // tried in order, and a codex-over-ACP session would otherwise be
+            // caught by the pipe arm first and silently never reach ACP.
+            (agent @ ("claude" | "codex"), store::ENGINE_ACP) => {
+                let profile = if agent == "codex" {
+                    crate::adapters::acp::CODEX_ACP
+                } else {
+                    crate::adapters::acp::CLAUDE_ACP
+                };
                 crate::adapters::acp::AcpAdapter::new(
                     captured.clone(),
                     approvals.clone(),
                     session_id.clone(),
+                    profile,
                 )
                 .run(prompt, cwd, adapter_id, do_resume, sink)
                 .await
@@ -684,7 +693,9 @@ fn validate_agent(agent: Option<String>) -> Result<String, String> {
 fn validate_engine(engine: Option<String>, agent: &str) -> Result<String, String> {
     match engine.as_deref() {
         None | Some(store::ENGINE_PIPE) => Ok(store::ENGINE_PIPE.to_string()),
-        Some(store::ENGINE_ACP) if agent == "claude" => Ok(store::ENGINE_ACP.to_string()),
+        Some(store::ENGINE_ACP) if agent == "claude" || agent == "codex" => {
+            Ok(store::ENGINE_ACP.to_string())
+        }
         // Antigravity has no ACP adapter at all (spec matrix: never), unlike
         // codex/gemini which are just later milestones.
         Some(store::ENGINE_ACP) if agent == "antigravity" => {
@@ -2054,8 +2065,12 @@ mod tests {
             validate_engine(Some("acp".into()), "claude").unwrap(),
             "acp"
         );
-        assert!(validate_engine(Some("acp".into()), "codex").is_err()); // M6
+        assert_eq!(
+            validate_engine(Some("acp".into()), "codex").unwrap(),
+            "acp"
+        ); // M6: codex-acp
         assert!(validate_engine(Some("acp".into()), "antigravity").is_err()); // never
+        assert!(validate_engine(Some("acp".into()), "gemini").is_err()); // M7
         assert!(validate_engine(Some("warp".into()), "claude").is_err());
     }
 
