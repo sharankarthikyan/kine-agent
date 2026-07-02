@@ -96,6 +96,9 @@ pub struct AcpAdapter {
     app_session_id: String,
     /// Which agent's ACP package to launch, and its login hint on auth failure.
     profile: AcpProfile,
+    /// Flips to `true` when the user presses Stop. `drive_session`'s cancel
+    /// arm fires once on the transition — see the select arm's doc comment.
+    cancel: tokio::sync::watch::Receiver<bool>,
 }
 
 impl AcpAdapter {
@@ -104,8 +107,9 @@ impl AcpAdapter {
         approvals: crate::approval::ApprovalRegistry,
         app_session_id: String,
         profile: AcpProfile,
+        cancel: tokio::sync::watch::Receiver<bool>,
     ) -> Self {
-        Self { captured_session, approvals, app_session_id, profile }
+        Self { captured_session, approvals, app_session_id, profile, cancel }
     }
 }
 
@@ -128,6 +132,7 @@ impl AgentAdapter for AcpAdapter {
             self.approvals.clone(),
             self.app_session_id.clone(),
             self.profile,
+            self.cancel.clone(),
         )
     }
 }
@@ -144,6 +149,7 @@ async fn spawn_and_drive(
     approvals: crate::approval::ApprovalRegistry,
     app_session_id: String,
     profile: AcpProfile,
+    cancel: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), SessionError> {
     // resolve_program falls back to the bare name on lookup failure, which would
     // yield a generic "No such file" from spawn — check explicitly so the user
@@ -213,6 +219,7 @@ async fn spawn_and_drive(
         approvals,
         app_session_id,
         profile,
+        cancel,
     )
     .await;
 
@@ -261,6 +268,7 @@ pub async fn drive_session(
     approvals: crate::approval::ApprovalRegistry,
     app_session_id: String,
     profile: AcpProfile,
+    cancel: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), SessionError> {
     let peer = RpcPeer::start(read, write);
     let mut inbound = peer.inbound();
@@ -354,6 +362,8 @@ pub async fn drive_session(
     let mut final_text = String::new();
     let prompt_fut = client::session_prompt(&peer, &acp_session_id, &prompt_text);
     tokio::pin!(prompt_fut);
+    let mut cancel = cancel; // owned mutable receiver
+    let mut cancel_sent = false;
 
     loop {
         tokio::select! {
@@ -382,12 +392,36 @@ pub async fn drive_session(
                 }
                 match stop {
                     Ok(reason) if reason == "cancelled" => {
-                        sink.emit(AgentEvent::Error { message: "turn cancelled by agent".into() });
+                        if cancel_sent {
+                            // The user asked for this stop: keep the partial
+                            // output; it is not an error.
+                            sink.emit(AgentEvent::Done { summary: final_text.clone() });
+                        } else {
+                            sink.emit(AgentEvent::Error { message: "turn cancelled by agent".into() });
+                        }
                     }
                     Ok(_) => sink.emit(AgentEvent::Done { summary: final_text.clone() }),
                     Err(e) => sink.emit(AgentEvent::Error { message: format!("ACP turn failed: {e}") }),
                 }
                 return Ok(());
+            }
+            // User pressed Stop. Fire ONCE (the `if` disarms the branch): free
+            // any agent RPC blocked on an approval card (ACP requires the
+            // cancelled outcome), then notify session/cancel. The loop keeps
+            // draining updates until the agent answers session/prompt with
+            // stopReason "cancelled" — or run_persisting's grace expires and
+            // drops us (the pgid guard then kills the tree).
+            changed = cancel.changed(), if !cancel_sent => {
+                cancel_sent = true;
+                if changed.is_err() {
+                    // Sender dropped without signalling (run teardown) — treat
+                    // as a no-op; the arm stays disarmed either way.
+                } else if *cancel.borrow() {
+                    approvals.cancel_session(&app_session_id);
+                    if let Err(e) = client::session_cancel(&peer, &acp_session_id).await {
+                        eprintln!("acp: session/cancel failed: {e} — relying on the grace-timeout kill");
+                    }
+                }
             }
             msg = inbound.recv() => {
                 match msg {
@@ -867,6 +901,11 @@ mod tests {
         /// fixtures create/inspect files here (real fs_guard containment needs a
         /// real, canonicalized root; a literal "/wt" can't be canonicalized).
         worktree: PathBuf,
+        /// Kept for tests that want to flip the cancel switch after
+        /// `drive_session` returns (not needed by the resolver-based cancel
+        /// tests, which flip it concurrently via the `resolver` closure instead).
+        #[allow(dead_code)]
+        cancel_tx: tokio::sync::watch::Sender<bool>,
     }
 
     type AgentReader =
@@ -910,9 +949,15 @@ mod tests {
     }
 
     /// Spawned concurrently with `drive_session` by fixtures that need to resolve
-    /// (or cancel) a pending approval mid-run — e.g. `spawn_resolver` above.
+    /// (or cancel) a pending approval mid-run — e.g. `spawn_resolver` above. The
+    /// `watch::Sender<bool>` lets cancel fixtures flip the user-stop signal
+    /// while the protocol loop is still running.
     type Resolver = Box<
-        dyn FnOnce(Arc<Mutex<Vec<AgentEvent>>>, crate::approval::ApprovalRegistry) -> tokio::task::JoinHandle<()>
+        dyn FnOnce(
+                Arc<Mutex<Vec<AgentEvent>>>,
+                crate::approval::ApprovalRegistry,
+                tokio::sync::watch::Sender<bool>,
+            ) -> tokio::task::JoinHandle<()>
             + Send,
     >;
 
@@ -938,6 +983,7 @@ mod tests {
         let sink: Box<dyn EventSink> = Box::new(Collect(Arc::clone(&events)));
         let captured = Arc::new(Mutex::new(None));
         let approvals = crate::approval::ApprovalRegistry::new();
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
 
         let agent_task = tokio::spawn({
             let worktree = worktree.clone();
@@ -948,7 +994,7 @@ mod tests {
             }
         });
 
-        let resolver_task = resolver.map(|make| make(Arc::clone(&events), approvals.clone()));
+        let resolver_task = resolver.map(|make| make(Arc::clone(&events), approvals.clone(), cancel_tx.clone()));
 
         drive_session(
             read,
@@ -961,6 +1007,7 @@ mod tests {
             approvals.clone(),
             "app-session".to_string(),
             CLAUDE_ACP,
+            cancel_rx,
         )
         .await
         .unwrap();
@@ -968,7 +1015,7 @@ mod tests {
             handle.await.unwrap();
         }
         agent_task.await.unwrap();
-        Harness { events, captured, approvals, worktree }
+        Harness { events, captured, approvals, worktree, cancel_tx }
     }
 
     /// Concurrently: wait until an ApprovalNeeded lands in `events` — and, when
@@ -1020,8 +1067,14 @@ mod tests {
 
     /// Concurrently: wait until an ApprovalNeeded lands in `events`, then cancel
     /// the whole session's pending approvals — mirrors `run_persisting` dropping
-    /// the registry entries when a run ends before the user answers.
-    fn spawn_canceller(events: Arc<Mutex<Vec<AgentEvent>>>, approvals: crate::approval::ApprovalRegistry) -> tokio::task::JoinHandle<()> {
+    /// the registry entries when a run ends before the user answers. Matches
+    /// the `Resolver` signature directly (passed as `Box::new(spawn_canceller)`);
+    /// `_cancel` is this test's user-stop switch, unused here.
+    fn spawn_canceller(
+        events: Arc<Mutex<Vec<AgentEvent>>>,
+        approvals: crate::approval::ApprovalRegistry,
+        _cancel: tokio::sync::watch::Sender<bool>,
+    ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             loop {
                 let pending = events
@@ -1360,7 +1413,7 @@ mod tests {
             // Resolve only after the "still streaming" token has ALSO been
             // processed — an inline-await regression deadlocks here instead of
             // passing (see spawn_resolver).
-            Some(Box::new(|events, approvals| {
+            Some(Box::new(|events, approvals, _cancel| {
                 spawn_resolver(events, approvals, "ok-once", Some("still streaming"))
             })),
             |mut lines, mut w, prompt_id, _wt| async move {
@@ -1474,6 +1527,7 @@ mod tests {
             approvals.clone(),
             "app-session".to_string(),
             CODEX_ACP,
+            tokio::sync::watch::channel(false).1,
         )
         .await
         .unwrap();
@@ -1507,7 +1561,7 @@ mod tests {
             // Resolve only after the "still streaming" token has ALSO been
             // processed — an inline-await regression deadlocks here instead of
             // passing (see spawn_resolver).
-            Some(Box::new(|events, approvals| {
+            Some(Box::new(|events, approvals, _cancel| {
                 spawn_resolver(events, approvals, "not-a-real-option", Some("still streaming"))
             })),
             |mut lines, mut w, prompt_id, _wt| async move {
@@ -2034,6 +2088,118 @@ mod tests {
         );
     }
 
+    /// User presses Stop mid-stream: drive_session sends session/cancel, KEEPS
+    /// accepting updates (ACP: the agent may send final chunks), and the
+    /// agent's stopReason "cancelled" closes the turn as Done with the partial
+    /// text — a user stop is not an error.
+    #[tokio::test]
+    async fn user_cancel_sends_session_cancel_and_ends_done_with_partial_text() {
+        let prompt = Prompt { text: "hello".into(), ..Default::default() };
+        let h = run_fixture(
+            prompt,
+            // Flip the cancel switch once the first token has landed.
+            Some(Box::new(|events, _approvals, cancel_tx| {
+                tokio::spawn(async move {
+                    loop {
+                        let seen = events.lock().unwrap().iter().any(
+                            |e| matches!(e, AgentEvent::Token { text } if text == "partial "),
+                        );
+                        if seen {
+                            let _ = cancel_tx.send(true);
+                            return;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+            })),
+            |mut lines, mut w, prompt_id, _wt| async move {
+                send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{
+                    "sessionId":"acp-abc","update":{"sessionUpdate":"agent_message_chunk",
+                    "content":{"type":"text","text":"partial "}}}})).await;
+                // The user's stop must arrive as a session/cancel NOTIFICATION.
+                let msg: serde_json::Value =
+                    serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+                assert_eq!(msg["method"], "session/cancel");
+                assert_eq!(msg["params"]["sessionId"], "acp-abc");
+                assert!(msg.get("id").is_none());
+                // Final update AFTER the cancel — must still be accepted.
+                send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{
+                    "sessionId":"acp-abc","update":{"sessionUpdate":"agent_message_chunk",
+                    "content":{"type":"text","text":"wrap-up"}}}})).await;
+                send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":prompt_id,
+                    "result":{"stopReason":"cancelled"}})).await;
+            },
+        )
+        .await;
+        let events = h.events.lock().unwrap();
+        assert!(
+            events.iter().any(|e| matches!(e, AgentEvent::Token { text } if text == "wrap-up")),
+            "post-cancel updates must still be accepted: {events:?}"
+        );
+        assert!(
+            matches!(events.last().unwrap(), AgentEvent::Done { summary } if summary.contains("partial ") && summary.contains("wrap-up")),
+            "user cancel ends as Done with the partial text, got {events:?}"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, AgentEvent::Error { .. })),
+            "a user stop is not an error: {events:?}"
+        );
+    }
+
+    /// Stop while an approval card is pending: the cancel arm resolves the
+    /// registry first, so the agent's blocked permission RPC gets the
+    /// `cancelled` outcome (ACP REQUIRES this) and the agent can finish.
+    #[tokio::test]
+    async fn user_cancel_resolves_pending_approvals_with_cancelled_outcome() {
+        let prompt = Prompt { text: "hello".into(), permission_mode: None, ..Default::default() };
+        let h = run_fixture(
+            prompt,
+            // Stop once the approval card has surfaced.
+            Some(Box::new(|events, _approvals, cancel_tx| {
+                tokio::spawn(async move {
+                    loop {
+                        let pending = events.lock().unwrap().iter().any(
+                            |e| matches!(e, AgentEvent::ApprovalNeeded { .. }),
+                        );
+                        if pending {
+                            let _ = cancel_tx.send(true);
+                            return;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+            })),
+            |mut lines, mut w, prompt_id, _wt| async move {
+                send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":41,"method":"session/request_permission","params":{
+                    "sessionId":"acp-abc","toolCall":{"toolCallId":"t1","title":"Edit main.rs","rawInput":{}},
+                    "options":[{"optionId":"ok","name":"Allow","kind":"allow_once"},
+                               {"optionId":"no","name":"Reject","kind":"reject_once"}]}})).await;
+                // Two lines follow in either order: the cancelled answer to id 41
+                // and the session/cancel notification. Read both, sort them out.
+                let mut answer = None;
+                let mut cancel_seen = false;
+                for _ in 0..2 {
+                    let msg: serde_json::Value =
+                        serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+                    if msg["method"] == "session/cancel" {
+                        cancel_seen = true;
+                    } else {
+                        answer = Some(msg);
+                    }
+                }
+                assert!(cancel_seen, "session/cancel notification must be sent");
+                let answer = answer.expect("the pending permission RPC must be answered");
+                assert_eq!(answer["id"], 41);
+                assert_eq!(answer["result"]["outcome"]["outcome"], "cancelled");
+                send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":prompt_id,
+                    "result":{"stopReason":"cancelled"}})).await;
+            },
+        )
+        .await;
+        let events = h.events.lock().unwrap();
+        assert!(matches!(events.last().unwrap(), AgentEvent::Done { .. }));
+    }
+
     #[tokio::test]
     async fn cancelled_stop_reason_emits_error_not_done() {
         let prompt = Prompt {
@@ -2107,6 +2273,7 @@ mod tests {
             crate::approval::ApprovalRegistry::new(),
             "app-session".to_string(),
             CODEX_ACP,
+            tokio::sync::watch::channel(false).1,
         )
         .await
         .unwrap_err();
@@ -2144,6 +2311,7 @@ mod tests {
             crate::approval::ApprovalRegistry::new(),
             "app-session".to_string(),
             CLAUDE_ACP,
+            tokio::sync::watch::channel(false).1,
         )
         .await
         .unwrap_err();
@@ -2306,6 +2474,7 @@ mod tests {
             crate::approval::ApprovalRegistry::new(),
             "app-session".to_string(),
             CLAUDE_ACP,
+            tokio::sync::watch::channel(false).1,
         )
         .await
         .unwrap();

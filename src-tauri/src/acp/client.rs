@@ -181,6 +181,15 @@ pub async fn session_prompt(
         .to_string())
 }
 
+/// session/cancel — a NOTIFICATION (no response). The agent finishes the
+/// in-flight session/prompt with stopReason "cancelled"; the client keeps
+/// accepting updates until then and must answer pending permission requests
+/// with the cancelled outcome (the adapter's cancel arm does both).
+pub async fn session_cancel(peer: &RpcPeer, session_id: &str) -> Result<(), RpcError> {
+    peer.notify("session/cancel", serde_json::json!({"sessionId": session_id}))
+        .await
+}
+
 /// Answer a session/request_permission request: `Some(option_id)` selects that
 /// option, `None` reports the turn as cancelled. Keeps raw ACP JSON out of the
 /// adapter.
@@ -527,6 +536,21 @@ mod tests {
         let (peer, agent_task) = harness_answering(serde_json::json!({}));
         assert!(!initialize(&peer).await.unwrap());
         agent_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_cancel_sends_a_notification_without_awaiting_a_response() {
+        let (ours, theirs) = duplex(64 * 1024);
+        let (read_half, write_half) = tokio::io::split(ours);
+        let peer = RpcPeer::start(read_half, write_half);
+        let (agent_read, _w) = tokio::io::split(theirs);
+        // Notification ⇒ resolves immediately; the agent never answers.
+        session_cancel(&peer, "acp-abc").await.unwrap();
+        let mut lines = BufReader::new(agent_read).lines();
+        let msg: Value = serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        assert_eq!(msg["method"], "session/cancel");
+        assert_eq!(msg["params"]["sessionId"], "acp-abc");
+        assert!(msg.get("id").is_none(), "cancel is a notification — no id, no response");
     }
 
     #[tokio::test]
