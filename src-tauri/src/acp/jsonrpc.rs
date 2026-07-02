@@ -231,11 +231,15 @@ async fn write_line_to(
 /// Best-effort extraction of the top-level `id` and `method` from the retained
 /// head of an oversized JSON-RPC line. Heuristic: JSON serializers emit keys in
 /// insertion order, so the top-level `jsonrpc`/`id`/`method` keys precede the
-/// oversized `params`/`result` payload — the first occurrence in the head is
-/// the top-level one. The alternative to this heuristic is a guaranteed hang.
+/// oversized `params`/`result` payload — only a match BEFORE the first payload
+/// key is the top-level one; anything at or past it sits inside the nested
+/// payload and must not be trusted (a response whose result contains a nested
+/// `"method"` field would otherwise be misread as a request, leaving its
+/// pending request dangling). The alternative to this heuristic is a
+/// guaranteed hang.
 fn salvage_id_and_method(head: &str) -> (Option<Value>, Option<String>) {
-    fn scalar_after(head: &str, key: &str) -> Option<Value> {
-        let pos = head.find(key)?;
+    fn scalar_before(head: &str, key: &str, payload_pos: usize) -> Option<Value> {
+        let pos = head.find(key).filter(|&p| p < payload_pos)?;
         let rest = head[pos + key.len()..].trim_start();
         let rest = rest.strip_prefix(':')?.trim_start();
         serde_json::Deserializer::from_str(rest)
@@ -243,11 +247,18 @@ fn salvage_id_and_method(head: &str) -> (Option<Value>, Option<String>) {
             .next()?
             .ok()
     }
+    // Everything from the first `result`/`params` key onward is payload.
+    let payload_pos = ["\"result\"", "\"params\""]
+        .iter()
+        .filter_map(|key| head.find(key))
+        .min()
+        .unwrap_or(head.len());
     // Only scalar ids are trustworthy; anything else means the match landed
     // inside nested payload text.
-    let id = scalar_after(head, "\"id\"").filter(|v| v.is_number() || v.is_string());
-    let method =
-        scalar_after(head, "\"method\"").and_then(|v| v.as_str().map(str::to_string));
+    let id =
+        scalar_before(head, "\"id\"", payload_pos).filter(|v| v.is_number() || v.is_string());
+    let method = scalar_before(head, "\"method\"", payload_pos)
+        .and_then(|v| v.as_str().map(str::to_string));
     (id, method)
 }
 
@@ -539,6 +550,21 @@ mod tests {
         let (id, _) = salvage_id_and_method(r#"{"id":"abc","method":"m"#);
         assert_eq!(id, Some(serde_json::json!("abc")));
         assert_eq!(salvage_id_and_method("garbage no json"), (None, None));
+
+        // A `method` that only occurs INSIDE the result payload must not be
+        // trusted: this is a response, not a request. Trusting it would write an
+        // unsolicited error line and leave the pending request dangling.
+        let head =
+            r#"{"jsonrpc":"2.0","id":9,"result":{"items":[{"id":"x","method":"GET"},"AAAA"#;
+        let (id, method) = salvage_id_and_method(head);
+        assert_eq!(id, Some(serde_json::json!(9)));
+        assert_eq!(method, None, "payload-nested method must be untrusted");
+
+        // Likewise an `id` that only occurs inside the params payload.
+        let head = r#"{"jsonrpc":"2.0","method":"n","params":{"id":7,"blob":"AAAA"#;
+        let (id, method) = salvage_id_and_method(head);
+        assert_eq!(id, None, "payload-nested id must be untrusted");
+        assert_eq!(method.as_deref(), Some("n"));
     }
 
     #[tokio::test]
@@ -593,6 +619,37 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, RpcError::Protocol(_)), "got {err:?}");
         agent_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn oversized_response_with_nested_method_key_still_fails_the_pending_request() {
+        // The result payload contains a nested `"method"` field before the
+        // truncation point. Salvage must NOT misread it as a request (which
+        // would write an unsolicited error line and leave this request
+        // dangling) — the pending request must fail via the response branch.
+        let (peer, agent) = harness();
+        let (r, mut agent_tx) = tokio::io::split(agent);
+        let mut agent_rx = BufReader::new(r).lines();
+        let fut = peer.request("x", serde_json::json!({}));
+        let agent_task = tokio::spawn(async move {
+            let line = agent_rx.next_line().await.unwrap().unwrap();
+            let req: serde_json::Value = serde_json::from_str(&line).unwrap();
+            let blob = "A".repeat(MAX_LINE_BYTES + 1024);
+            let resp = format!(
+                "{{\"jsonrpc\":\"2.0\",\"id\":{},\"result\":{{\"items\":[{{\"id\":\"x\",\"method\":\"GET\"}},\"{blob}\"]}}}}\n",
+                req["id"]
+            );
+            agent_tx.write_all(resp.as_bytes()).await.unwrap();
+            // A misclassification would write an unsolicited error line back to
+            // the "agent"; the pending request would then hang until timeout.
+            agent_rx
+        });
+        let err = tokio::time::timeout(std::time::Duration::from_secs(10), fut)
+            .await
+            .expect("must not hang — response branch must fire")
+            .unwrap_err();
+        assert!(matches!(err, RpcError::Protocol(_)), "got {err:?}");
+        let _ = agent_task.await.unwrap();
     }
 
     #[tokio::test]
