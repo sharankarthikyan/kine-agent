@@ -6,8 +6,10 @@ import {
   FileText,
   LayoutGrid,
   Pencil,
+  Plus,
   Puzzle,
   Server,
+  Trash2,
   Webhook,
   Zap,
 } from "lucide-react";
@@ -25,8 +27,9 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import type { CustomizationCounts, HookEntry, McpServerEntry, PluginEntry } from "@/lib/conductor";
-import type { Capabilities, Capability, RuleFile } from "@/lib/inspect";
-import { readTextFile, writeTextFile } from "@/lib/inspect";
+import { addHook, addMcpServer, deleteHook, deleteMcpServer } from "@/lib/conductor";
+import type { Capabilities, Capability, CapabilityKind, RuleFile } from "@/lib/inspect";
+import { createCustomization, deleteCustomization, readTextFile, writeTextFile } from "@/lib/inspect";
 
 export type CustomizationSection =
   | "overview"
@@ -49,6 +52,8 @@ export interface CustomizationsDialogProps {
   hooks: HookEntry[];
   mcpServers: McpServerEntry[];
   plugins: PluginEntry[];
+  /** Called after any create/edit/delete so the host can re-fetch the listings. */
+  onChanged?: () => void;
 }
 
 // ─── Nav config ───────────────────────────────────────────────────────────────
@@ -191,7 +196,6 @@ function FileDetailView({ detail, loading, error, content, sessionId, onBack, on
   }
 
   async function handleSave() {
-    if (!sessionId) return; // global/user scope is read-only via IPC
     setSaving(true);
     try {
       await writeTextFile(sessionId, detail.path, editedContent);
@@ -206,9 +210,9 @@ function FileDetailView({ detail, loading, error, content, sessionId, onBack, on
     }
   }
 
-  // Only project-scope files inside the active worktree are writable via IPC; user/global
-  // (~/.claude) files are read-only by design, so the editor controls are hidden for them.
-  const canEdit = !loading && !error && content !== null && detail.editable && sessionId !== null;
+  // Every discovered capability/rule file — project or global (~/.claude) — is writable
+  // through the allowlist-gated IPC, so the editor is offered whenever a file loaded.
+  const canEdit = !loading && !error && content !== null && detail.editable;
 
   return (
     <div className="flex flex-col h-full min-h-0">
@@ -383,17 +387,75 @@ function OverviewSection({
   );
 }
 
+// ─── Inline delete control ────────────────────────────────────────────────────
+//
+// A trash button that, on click, swaps in a two-step "Delete / Cancel" confirmation
+// so a destructive action always needs a deliberate second click. Rendered as a
+// sibling (never nested inside another button) to keep the markup valid.
+
+function DeleteControl({
+  label,
+  onConfirm,
+}: {
+  label: string;
+  onConfirm: () => Promise<void>;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  if (confirming) {
+    return (
+      <span className="flex items-center gap-1 shrink-0">
+        <Button
+          variant="destructive"
+          size="sm"
+          disabled={busy}
+          onClick={async () => {
+            setBusy(true);
+            try {
+              await onConfirm();
+            } finally {
+              setBusy(false);
+              setConfirming(false);
+            }
+          }}
+        >
+          {busy ? "Deleting…" : "Delete"}
+        </Button>
+        <Button variant="ghost" size="sm" disabled={busy} onClick={() => setConfirming(false)}>
+          Cancel
+        </Button>
+      </span>
+    );
+  }
+
+  return (
+    <Button
+      variant="ghost"
+      size="icon-sm"
+      aria-label={label}
+      className="shrink-0 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 text-muted-foreground hover:text-destructive"
+      onClick={() => setConfirming(true)}
+    >
+      <Trash2 className="size-3.5" />
+    </Button>
+  );
+}
+
 // ─── Shared capability row ────────────────────────────────────────────────────
 //
-// Renders as a <button> when path is non-empty (clickable to open detail view),
-// or a plain <div> when path is empty (no backing file to show).
+// The label area is a <button> when the capability has a backing file (opens the
+// detail view); the delete control sits beside it as a sibling. The wrapping element
+// is a plain <div> so the two interactive controls are never nested.
 
 function CapabilityRow({
   capability,
   onOpen,
+  onDelete,
 }: {
   capability: Capability;
   onOpen?: () => void;
+  onDelete?: () => Promise<void>;
 }) {
   const content = (
     <>
@@ -411,121 +473,200 @@ function CapabilityRow({
     </>
   );
 
-  if (onOpen) {
-    return (
-      <button
-        type="button"
-        onClick={onOpen}
-        className="flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-muted/50 min-w-0 w-full text-left"
-      >
-        {content}
-      </button>
-    );
+  return (
+    <div className="group flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-muted/50 min-w-0">
+      {onOpen ? (
+        <button
+          type="button"
+          onClick={onOpen}
+          className="flex items-center gap-2 flex-1 min-w-0 text-left"
+        >
+          {content}
+        </button>
+      ) : (
+        <div className="flex items-center gap-2 flex-1 min-w-0">{content}</div>
+      )}
+      {onDelete && (
+        <DeleteControl label={`Delete ${capability.name}`} onConfirm={onDelete} />
+      )}
+    </div>
+  );
+}
+
+// ─── Scope selection ──────────────────────────────────────────────────────────
+
+type Scope = "project" | "user";
+
+// Where a newly added item is written. Only meaningful when there is an active session
+// (project files exist); on the global-scope view everything is user scope, so the toggle
+// is hidden and callers force `user`.
+function ScopeToggle({ value, onChange }: { value: Scope; onChange: (s: Scope) => void }) {
+  return (
+    <div className="flex items-center gap-0.5 rounded-md border border-border p-0.5 shrink-0">
+      {(["project", "user"] as const).map((s) => (
+        <button
+          key={s}
+          type="button"
+          onClick={() => onChange(s)}
+          className={cn(
+            "px-2 py-1 text-xs rounded transition-colors",
+            value === s
+              ? "bg-muted text-foreground font-medium"
+              : "text-muted-foreground hover:text-foreground"
+          )}
+        >
+          {s === "project" ? "Project" : "Global"}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// Resolve the session id a mutation should target for a chosen scope: project keeps the
+// active session (its worktree), user forces `null` (the global ~/.claude scope). With no
+// active session there is only global scope.
+function scopedSessionId(sessionId: string | null, scope: Scope): string | null {
+  if (sessionId === null) return null;
+  return scope === "project" ? sessionId : null;
+}
+
+// ─── New-capability inline form ───────────────────────────────────────────────
+//
+// A name field + Create button shown at the top of a section when "Add" is toggled.
+// A scope toggle appears when a session is active; the name is re-validated server-side.
+
+function NewCapabilityForm({
+  kind,
+  sessionId,
+  onCreated,
+  onCancel,
+}: {
+  kind: CapabilityKind;
+  sessionId: string | null;
+  onCreated: (name: string, path: string) => void;
+  onCancel: () => void;
+}) {
+  const [name, setName] = useState("");
+  const [scope, setScope] = useState<Scope>("project");
+  const [busy, setBusy] = useState(false);
+
+  async function submit() {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    setBusy(true);
+    try {
+      const path = await createCustomization(scopedSessionId(sessionId, scope), kind, trimmed);
+      toast.success(`Created ${trimmed}`);
+      onCreated(trimmed, path);
+    } catch (err) {
+      toast.error(String(err));
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (
-    <div className="flex items-center gap-2 px-2 py-1.5 rounded-md min-w-0">
-      {content}
+    <div className="flex items-center gap-2 px-2 py-1.5">
+      <Input
+        autoFocus
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") void submit();
+          if (e.key === "Escape") onCancel();
+        }}
+        placeholder={`New ${kind} name…`}
+        className="h-8 text-sm flex-1 min-w-0"
+        disabled={busy}
+      />
+      {sessionId !== null && <ScopeToggle value={scope} onChange={setScope} />}
+      <Button size="sm" onClick={() => void submit()} disabled={busy || !name.trim()}>
+        {busy ? "Creating…" : "Create"}
+      </Button>
+      <Button variant="ghost" size="sm" onClick={onCancel} disabled={busy}>
+        Cancel
+      </Button>
     </div>
   );
 }
 
 // ─── Agents section ───────────────────────────────────────────────────────────
 
-function AgentsSection({
-  capabilities,
+// A capability list (agents or skills) with search, an inline "Add" form that scaffolds
+// a new item then opens it in the editor, and per-row delete. Agents and skills share
+// this identical shape, differing only in label copy and the created capability kind.
+function CapabilitySection({
+  title,
+  description,
+  kind,
+  items,
+  emptyLabel,
   search,
   onSearchChange,
+  sessionId,
   onOpenDetail,
+  onCreated,
+  onDelete,
 }: {
-  capabilities: Capabilities | null;
+  title: string;
+  description: string;
+  kind: CapabilityKind;
+  items: Capability[];
+  emptyLabel: string;
   search: string;
   onSearchChange: (s: string) => void;
+  sessionId: string | null;
   onOpenDetail: (name: string, path: string, editable: boolean) => void;
+  onCreated: (name: string, path: string) => void;
+  onDelete: (path: string) => Promise<void>;
 }) {
-  const subagents = capabilities?.subagents ?? [];
+  const [adding, setAdding] = useState(false);
   const filtered = search
-    ? subagents.filter(
-        (a) =>
-          a.name.toLowerCase().includes(search.toLowerCase()) ||
-          (a.description?.toLowerCase().includes(search.toLowerCase()) ?? false)
+    ? items.filter(
+        (c) =>
+          c.name.toLowerCase().includes(search.toLowerCase()) ||
+          (c.description?.toLowerCase().includes(search.toLowerCase()) ?? false)
       )
-    : subagents;
+    : items;
 
   return (
     <SectionShell
-      title="Agents"
-      description="Subagents available to the active agent in this session."
+      title={title}
+      description={description}
       search={search}
       onSearchChange={onSearchChange}
+      action={
+        !adding && (
+          <Button variant="outline" size="sm" onClick={() => setAdding(true)}>
+            <Plus className="size-3.5" />
+            Add
+          </Button>
+        )
+      }
     >
-      {filtered.length === 0 ? (
-        <p className="px-4 py-2 text-sm text-muted-foreground">
-          {subagents.length === 0 ? "No agents found." : "No matches"}
-        </p>
-      ) : (
-        <div className="flex flex-col gap-0.5 px-2">
-          {filtered.map((agent) => (
-            <CapabilityRow
-              key={agent.name}
-              capability={agent}
-              onOpen={
-                agent.path
-                  ? () => void onOpenDetail(agent.name, agent.path, agent.source === "project")
-                  : undefined
-              }
-            />
-          ))}
-        </div>
+      {adding && (
+        <NewCapabilityForm
+          kind={kind}
+          sessionId={sessionId}
+          onCreated={(name, path) => {
+            setAdding(false);
+            onCreated(name, path);
+          }}
+          onCancel={() => setAdding(false)}
+        />
       )}
-    </SectionShell>
-  );
-}
-
-// ─── Skills section ───────────────────────────────────────────────────────────
-
-function SkillsSection({
-  capabilities,
-  search,
-  onSearchChange,
-  onOpenDetail,
-}: {
-  capabilities: Capabilities | null;
-  search: string;
-  onSearchChange: (s: string) => void;
-  onOpenDetail: (name: string, path: string, editable: boolean) => void;
-}) {
-  const skills = capabilities?.skills ?? [];
-  const filtered = search
-    ? skills.filter(
-        (s) =>
-          s.name.toLowerCase().includes(search.toLowerCase()) ||
-          (s.description?.toLowerCase().includes(search.toLowerCase()) ?? false)
-      )
-    : skills;
-
-  return (
-    <SectionShell
-      title="Skills"
-      description="Slash commands and reusable skill scripts available in this session."
-      search={search}
-      onSearchChange={onSearchChange}
-    >
       {filtered.length === 0 ? (
         <p className="px-4 py-2 text-sm text-muted-foreground">
-          {skills.length === 0 ? "No skills found." : "No matches"}
+          {items.length === 0 ? emptyLabel : "No matches"}
         </p>
       ) : (
         <div className="flex flex-col gap-0.5 px-2">
-          {filtered.map((skill) => (
+          {filtered.map((cap) => (
             <CapabilityRow
-              key={skill.name}
-              capability={skill}
-              onOpen={
-                skill.path
-                  ? () => void onOpenDetail(skill.name, skill.path, skill.source === "project")
-                  : undefined
-              }
+              key={`${cap.source}-${cap.name}`}
+              capability={cap}
+              onOpen={cap.path ? () => onOpenDetail(cap.name, cap.path, true) : undefined}
+              onDelete={cap.path ? () => onDelete(cap.path) : undefined}
             />
           ))}
         </div>
@@ -570,7 +711,7 @@ function InstructionsSection({
               key={rule.path}
               type="button"
               className="flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-muted/50 text-left w-full min-w-0"
-              onClick={() => onOpenDetail(rule.label, rule.path, rule.scope === "project")}
+              onClick={() => onOpenDetail(rule.label, rule.path, true)}
             >
               <FileCode className="size-3.5 text-muted-foreground shrink-0" />
               <span className="flex-1 min-w-0 truncate text-sm">{rule.label}</span>
@@ -591,11 +732,16 @@ function HooksSection({
   hooks,
   search,
   onSearchChange,
+  sessionId,
+  onChanged,
 }: {
   hooks: HookEntry[];
   search: string;
   onSearchChange: (s: string) => void;
+  sessionId: string | null;
+  onChanged: () => void;
 }) {
+  const [adding, setAdding] = useState(false);
   const filtered = search
     ? hooks.filter(
         (h) =>
@@ -604,13 +750,41 @@ function HooksSection({
       )
     : hooks;
 
+  async function handleDelete(hook: HookEntry) {
+    try {
+      await deleteHook(sessionId, hook.source, hook.event, hook.matcher, hook.command);
+      toast.success(`Deleted ${hook.event} hook`);
+      onChanged();
+    } catch (err) {
+      toast.error(String(err));
+    }
+  }
+
   return (
     <SectionShell
       title="Hooks"
       description="Lifecycle hooks that run before and after agent operations."
       search={search}
       onSearchChange={onSearchChange}
+      action={
+        !adding && (
+          <Button variant="outline" size="sm" onClick={() => setAdding(true)}>
+            <Plus className="size-3.5" />
+            Add
+          </Button>
+        )
+      }
     >
+      {adding && (
+        <HookForm
+          sessionId={sessionId}
+          onAdded={() => {
+            setAdding(false);
+            onChanged();
+          }}
+          onCancel={() => setAdding(false)}
+        />
+      )}
       {filtered.length === 0 ? (
         <p className="px-4 py-2 text-sm text-muted-foreground">
           {hooks.length === 0 ? "No hooks configured." : "No matches"}
@@ -619,8 +793,8 @@ function HooksSection({
         <div className="flex flex-col gap-0.5 px-2">
           {filtered.map((hook, i) => (
             <div
-              key={`${hook.event}-${i}`}
-              className="flex items-center gap-2 px-2 py-1.5 rounded-md min-w-0"
+              key={`${hook.source}-${hook.event}-${hook.command}-${i}`}
+              className="group flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-muted/50 min-w-0"
             >
               <span className="text-sm font-medium shrink-0 whitespace-nowrap">
                 {hook.event}
@@ -636,11 +810,94 @@ function HooksSection({
               <Badge variant="outline" className="ml-auto shrink-0 text-xs font-normal">
                 {hook.source}
               </Badge>
+              <DeleteControl
+                label={`Delete ${hook.event} hook`}
+                onConfirm={() => handleDelete(hook)}
+              />
             </div>
           ))}
         </div>
       )}
     </SectionShell>
+  );
+}
+
+// Inline form to add a hook: event (required), matcher (optional), command (required).
+function HookForm({
+  sessionId,
+  onAdded,
+  onCancel,
+}: {
+  sessionId: string | null;
+  onAdded: () => void;
+  onCancel: () => void;
+}) {
+  const [event, setEvent] = useState("");
+  const [matcher, setMatcher] = useState("");
+  const [command, setCommand] = useState("");
+  const [scope, setScope] = useState<Scope>("project");
+  const [busy, setBusy] = useState(false);
+  const valid = event.trim() !== "" && command.trim() !== "";
+
+  async function submit() {
+    if (!valid) return;
+    setBusy(true);
+    try {
+      await addHook(
+        scopedSessionId(sessionId, scope),
+        event.trim(),
+        matcher.trim() || null,
+        command.trim()
+      );
+      toast.success(`Added ${event.trim()} hook`);
+      onAdded();
+    } catch (err) {
+      toast.error(String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-2 px-2 py-2">
+      <div className="flex items-center gap-2">
+        <Input
+          autoFocus
+          value={event}
+          onChange={(e) => setEvent(e.target.value)}
+          placeholder="Event (e.g. PreToolUse)"
+          className="h-8 text-sm flex-1 min-w-0"
+          disabled={busy}
+        />
+        <Input
+          value={matcher}
+          onChange={(e) => setMatcher(e.target.value)}
+          placeholder="Matcher (optional)"
+          className="h-8 text-sm flex-1 min-w-0"
+          disabled={busy}
+        />
+        {sessionId !== null && <ScopeToggle value={scope} onChange={setScope} />}
+      </div>
+      <div className="flex items-center gap-2">
+        <Input
+          value={command}
+          onChange={(e) => setCommand(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") void submit();
+            if (e.key === "Escape") onCancel();
+          }}
+          placeholder="Command to run"
+          className="h-8 text-sm flex-1 min-w-0 font-mono"
+          disabled={busy}
+        />
+        <Button size="sm" onClick={() => void submit()} disabled={busy || !valid}>
+          {busy ? "Adding…" : "Add"}
+        </Button>
+        <Button variant="ghost" size="sm" onClick={onCancel} disabled={busy}>
+          Cancel
+        </Button>
+      </div>
+    </div>
   );
 }
 
@@ -650,11 +907,16 @@ function McpServersSection({
   mcpServers,
   search,
   onSearchChange,
+  sessionId,
+  onChanged,
 }: {
   mcpServers: McpServerEntry[];
   search: string;
   onSearchChange: (s: string) => void;
+  sessionId: string | null;
+  onChanged: () => void;
 }) {
+  const [adding, setAdding] = useState(false);
   const filtered = search
     ? mcpServers.filter(
         (s) =>
@@ -663,13 +925,41 @@ function McpServersSection({
       )
     : mcpServers;
 
+  async function handleDelete(server: McpServerEntry) {
+    try {
+      await deleteMcpServer(sessionId, server.source, server.name);
+      toast.success(`Deleted ${server.name}`);
+      onChanged();
+    } catch (err) {
+      toast.error(String(err));
+    }
+  }
+
   return (
     <SectionShell
       title="MCP Servers"
       description="Model Context Protocol servers providing tools and resources to the agent."
       search={search}
       onSearchChange={onSearchChange}
+      action={
+        !adding && (
+          <Button variant="outline" size="sm" onClick={() => setAdding(true)}>
+            <Plus className="size-3.5" />
+            Add
+          </Button>
+        )
+      }
     >
+      {adding && (
+        <McpForm
+          sessionId={sessionId}
+          onAdded={() => {
+            setAdding(false);
+            onChanged();
+          }}
+          onCancel={() => setAdding(false)}
+        />
+      )}
       {filtered.length === 0 ? (
         <p className="px-4 py-2 text-sm text-muted-foreground">
           {mcpServers.length === 0 ? "No MCP servers configured." : "No matches"}
@@ -678,8 +968,8 @@ function McpServersSection({
         <div className="flex flex-col gap-0.5 px-2">
           {filtered.map((server, i) => (
             <div
-              key={`${server.name}-${i}`}
-              className="flex items-center gap-2 px-2 py-1.5 rounded-md min-w-0"
+              key={`${server.source}-${server.name}-${i}`}
+              className="group flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-muted/50 min-w-0"
             >
               <span className="text-sm font-medium shrink-0 whitespace-nowrap">
                 {server.name}
@@ -692,11 +982,88 @@ function McpServersSection({
               <Badge variant="outline" className="ml-auto shrink-0 text-xs font-normal">
                 {server.source}
               </Badge>
+              <DeleteControl label={`Delete ${server.name}`} onConfirm={() => handleDelete(server)} />
             </div>
           ))}
         </div>
       )}
     </SectionShell>
+  );
+}
+
+// Inline form to add an stdio MCP server: name (required), command (required),
+// and optional whitespace-separated args.
+function McpForm({
+  sessionId,
+  onAdded,
+  onCancel,
+}: {
+  sessionId: string | null;
+  onAdded: () => void;
+  onCancel: () => void;
+}) {
+  const [name, setName] = useState("");
+  const [command, setCommand] = useState("");
+  const [args, setArgs] = useState("");
+  const [scope, setScope] = useState<Scope>("project");
+  const [busy, setBusy] = useState(false);
+  const valid = name.trim() !== "" && command.trim() !== "";
+
+  async function submit() {
+    if (!valid) return;
+    setBusy(true);
+    try {
+      const argList = args.trim() ? args.trim().split(/\s+/) : [];
+      await addMcpServer(scopedSessionId(sessionId, scope), name.trim(), command.trim(), argList);
+      toast.success(`Added ${name.trim()}`);
+      onAdded();
+    } catch (err) {
+      toast.error(String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-2 px-2 py-2">
+      <div className="flex items-center gap-2">
+        <Input
+          autoFocus
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="Server name"
+          className="h-8 text-sm flex-1 min-w-0"
+          disabled={busy}
+        />
+        <Input
+          value={command}
+          onChange={(e) => setCommand(e.target.value)}
+          placeholder="Command (e.g. npx)"
+          className="h-8 text-sm flex-1 min-w-0 font-mono"
+          disabled={busy}
+        />
+        {sessionId !== null && <ScopeToggle value={scope} onChange={setScope} />}
+      </div>
+      <div className="flex items-center gap-2">
+        <Input
+          value={args}
+          onChange={(e) => setArgs(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") void submit();
+            if (e.key === "Escape") onCancel();
+          }}
+          placeholder="Args (optional, space-separated)"
+          className="h-8 text-sm flex-1 min-w-0 font-mono"
+          disabled={busy}
+        />
+        <Button size="sm" onClick={() => void submit()} disabled={busy || !valid}>
+          {busy ? "Adding…" : "Add"}
+        </Button>
+        <Button variant="ghost" size="sm" onClick={onCancel} disabled={busy}>
+          Cancel
+        </Button>
+      </div>
+    </div>
   );
 }
 
@@ -763,19 +1130,25 @@ function SectionShell({
   description,
   search,
   onSearchChange,
+  action,
   children,
 }: {
   title: string;
   description: string;
   search?: string;
   onSearchChange?: (s: string) => void;
+  /** Optional control rendered at the top-right of the header (e.g. an Add button). */
+  action?: React.ReactNode;
   children: React.ReactNode;
 }) {
   return (
     <div className="flex flex-col gap-3 p-4">
-      <div>
-        <h2 className="text-base font-semibold">{title}</h2>
-        <p className="text-sm text-muted-foreground mt-0.5">{description}</p>
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <h2 className="text-base font-semibold">{title}</h2>
+          <p className="text-sm text-muted-foreground mt-0.5">{description}</p>
+        </div>
+        {action && <div className="shrink-0">{action}</div>}
       </div>
       {onSearchChange !== undefined && (
         <Input
@@ -803,7 +1176,9 @@ export function CustomizationsDialog({
   hooks,
   mcpServers,
   plugins,
+  onChanged,
 }: CustomizationsDialogProps) {
+  const notifyChanged = onChanged ?? (() => {});
   const [activeSection, setActiveSection] = useState<CustomizationSection>(initialSection);
 
   // Per-section search query — resets when section changes.
@@ -875,6 +1250,26 @@ export function CustomizationsDialog({
     setFileLoading(false);
   }
 
+  // After scaffolding a new capability: refresh the listings, then drop straight into the
+  // editor on the freshly created file so the user can fill in the template.
+  function handleCreated(name: string, path: string) {
+    notifyChanged();
+    void handleOpenDetail(name, path, true);
+  }
+
+  // Delete a capability (agent/skill) by its backing-file path, then refresh. A skill's
+  // whole directory is removed server-side. If the deleted file is open, return to the list.
+  async function handleDeleteCapability(path: string) {
+    try {
+      await deleteCustomization(sessionId, path);
+      toast.success("Deleted");
+      if (detail?.path === path) handleBack();
+      notifyChanged();
+    } catch (err) {
+      toast.error(String(err));
+    }
+  }
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
@@ -932,19 +1327,33 @@ export function CustomizationsDialog({
                   />
                 )}
                 {activeSection === "agents" && (
-                  <AgentsSection
-                    capabilities={capabilities}
+                  <CapabilitySection
+                    title="Agents"
+                    description="Subagents available to the active agent in this session."
+                    kind="agent"
+                    items={capabilities?.subagents ?? []}
+                    emptyLabel="No agents found."
                     search={search}
                     onSearchChange={setSearch}
+                    sessionId={sessionId}
                     onOpenDetail={(name, path, editable) => void handleOpenDetail(name, path, editable)}
+                    onCreated={handleCreated}
+                    onDelete={handleDeleteCapability}
                   />
                 )}
                 {activeSection === "skills" && (
-                  <SkillsSection
-                    capabilities={capabilities}
+                  <CapabilitySection
+                    title="Skills"
+                    description="Slash commands and reusable skill scripts available in this session."
+                    kind="skill"
+                    items={capabilities?.skills ?? []}
+                    emptyLabel="No skills found."
                     search={search}
                     onSearchChange={setSearch}
+                    sessionId={sessionId}
                     onOpenDetail={(name, path, editable) => void handleOpenDetail(name, path, editable)}
+                    onCreated={handleCreated}
+                    onDelete={handleDeleteCapability}
                   />
                 )}
                 {activeSection === "instructions" && (
@@ -960,6 +1369,8 @@ export function CustomizationsDialog({
                     hooks={hooks}
                     search={search}
                     onSearchChange={setSearch}
+                    sessionId={sessionId}
+                    onChanged={notifyChanged}
                   />
                 )}
                 {activeSection === "mcp" && (
@@ -967,6 +1378,8 @@ export function CustomizationsDialog({
                     mcpServers={mcpServers}
                     search={search}
                     onSearchChange={setSearch}
+                    sessionId={sessionId}
+                    onChanged={notifyChanged}
                   />
                 )}
                 {activeSection === "plugins" && (

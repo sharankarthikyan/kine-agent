@@ -299,6 +299,9 @@ export default function App() {
   const [custDialogOpen, setCustDialogOpen] = useState(false);
   const [custSection, setCustSection] =
     useState<CustomizationSection>("overview");
+  // Bumped after any create/edit/delete inside the Customizations dialog to re-run the
+  // loader effect below and refresh the listings + sidebar counts.
+  const [custReloadKey, setCustReloadKey] = useState(0);
   // Changes tab state.
   const [branchChanges, setBranchChanges] = useState<BranchChanges | null>(
     null,
@@ -1082,7 +1085,8 @@ export default function App() {
         if (activeSessionIdRef.current === sessionId) setCounts(null);
       }
     })();
-  }, [activeSessionId]);
+    // custReloadKey: refresh counts after a create/edit/delete in the dialog.
+  }, [activeSessionId, custReloadKey]);
 
   // closeRight keeps the "reset both flags together" invariant structural.
   const closeRight = () => {
@@ -1197,7 +1201,7 @@ export default function App() {
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [custDialogOpen, activeSessionId, selectedModel?.agent, sessions]);
+  }, [custDialogOpen, activeSessionId, selectedModel?.agent, sessions, custReloadKey]);
 
   // Fetch branch-level changes when the Changes tab becomes active.
   useEffect(() => {
@@ -2189,6 +2193,7 @@ export default function App() {
           hooks={hooks}
           mcpServers={mcpServers}
           plugins={plugins}
+          onChanged={() => setCustReloadKey((k) => k + 1)}
         />
       </Suspense>
 

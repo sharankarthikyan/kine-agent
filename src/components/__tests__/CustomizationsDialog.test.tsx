@@ -3,12 +3,27 @@ import userEvent from "@testing-library/user-event";
 import { CustomizationsDialog } from "../CustomizationsDialog";
 import type { CustomizationCounts, HookEntry, McpServerEntry, PluginEntry } from "../../lib/conductor";
 import type { Capabilities, RuleFile } from "../../lib/inspect";
-import { readTextFile, writeTextFile } from "../../lib/inspect";
+import {
+  createCustomization,
+  deleteCustomization,
+  readTextFile,
+  writeTextFile,
+} from "../../lib/inspect";
+import { addHook, addMcpServer, deleteHook, deleteMcpServer } from "../../lib/conductor";
 import { toast } from "sonner";
 
 vi.mock("../../lib/inspect", () => ({
   readTextFile: vi.fn(),
   writeTextFile: vi.fn(),
+  createCustomization: vi.fn(),
+  deleteCustomization: vi.fn(),
+}));
+
+vi.mock("../../lib/conductor", () => ({
+  addHook: vi.fn(),
+  deleteHook: vi.fn(),
+  addMcpServer: vi.fn(),
+  deleteMcpServer: vi.fn(),
 }));
 
 vi.mock("sonner", () => ({
@@ -95,6 +110,12 @@ beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(readTextFile).mockResolvedValue("");
   vi.mocked(writeTextFile).mockResolvedValue(undefined);
+  vi.mocked(createCustomization).mockResolvedValue("/wt/.claude/agents/new.md");
+  vi.mocked(deleteCustomization).mockResolvedValue(undefined);
+  vi.mocked(addHook).mockResolvedValue(undefined);
+  vi.mocked(deleteHook).mockResolvedValue(undefined);
+  vi.mocked(addMcpServer).mockResolvedValue(undefined);
+  vi.mocked(deleteMcpServer).mockResolvedValue(undefined);
 });
 
 test("renders the dialog when open is true", () => {
@@ -678,4 +699,143 @@ test("source badge is shown for skill items", async () => {
   // shadcn is source=user, deep-research is source=project
   expect(screen.getByText("user")).toBeInTheDocument();
   expect(screen.getByText("project")).toBeInTheDocument();
+});
+
+// ─── CRUD: capabilities (agents/skills) ────────────────────────────────────────
+
+const capsWithPaths = {
+  skills: [
+    { name: "shadcn", description: "Add shadcn", source: "user" as const, path: "/home/.claude/skills/shadcn/SKILL.md" },
+  ],
+  subagents: [
+    { name: "code-reviewer", description: "Reviews code", source: "user" as const, path: "/home/.claude/agents/code-reviewer.md" },
+  ],
+  commands: [],
+};
+
+test("Add in Agents section scaffolds a capability then opens it in the editor", async () => {
+  vi.mocked(createCustomization).mockResolvedValue("/wt/.claude/agents/triage.md");
+  vi.mocked(readTextFile).mockResolvedValue("---\nname: triage\n---\n");
+  const onChanged = vi.fn();
+  render(<CustomizationsDialog {...defaultProps} capabilities={capsWithPaths} onChanged={onChanged} />);
+  const nav = getNav();
+  await userEvent.click(within(nav).getByRole("button", { name: /agents/i }));
+
+  await userEvent.click(screen.getByRole("button", { name: /^add$/i }));
+  await userEvent.type(screen.getByPlaceholderText(/new agent name/i), "triage");
+  await userEvent.click(screen.getByRole("button", { name: /^create$/i }));
+
+  await waitFor(() =>
+    expect(createCustomization).toHaveBeenCalledWith("s1", "agent", "triage"),
+  );
+  expect(onChanged).toHaveBeenCalled();
+  // Drops into the editor on the created file.
+  await waitFor(() => expect(readTextFile).toHaveBeenCalledWith("s1", "/wt/.claude/agents/triage.md"));
+});
+
+test("Add uses global scope (null session) when the Global toggle is chosen", async () => {
+  vi.mocked(createCustomization).mockResolvedValue("/home/.claude/skills/x/SKILL.md");
+  render(<CustomizationsDialog {...defaultProps} capabilities={capsWithPaths} />);
+  const nav = getNav();
+  await userEvent.click(within(nav).getByRole("button", { name: /skills/i }));
+
+  await userEvent.click(screen.getByRole("button", { name: /^add$/i }));
+  await userEvent.type(screen.getByPlaceholderText(/new skill name/i), "x");
+  await userEvent.click(screen.getByRole("button", { name: /^global$/i }));
+  await userEvent.click(screen.getByRole("button", { name: /^create$/i }));
+
+  await waitFor(() => expect(createCustomization).toHaveBeenCalledWith(null, "skill", "x"));
+});
+
+test("deleting a capability confirms, calls deleteCustomization, and refreshes", async () => {
+  const onChanged = vi.fn();
+  render(<CustomizationsDialog {...defaultProps} capabilities={capsWithPaths} onChanged={onChanged} />);
+  const nav = getNav();
+  await userEvent.click(within(nav).getByRole("button", { name: /agents/i }));
+
+  await userEvent.click(screen.getByRole("button", { name: /delete code-reviewer/i }));
+  // Two-step confirm.
+  await userEvent.click(screen.getByRole("button", { name: /^delete$/i }));
+
+  await waitFor(() =>
+    expect(deleteCustomization).toHaveBeenCalledWith("s1", "/home/.claude/agents/code-reviewer.md"),
+  );
+  expect(onChanged).toHaveBeenCalled();
+});
+
+// ─── CRUD: editing works in global scope (null session) ─────────────────────────
+
+test("Edit is offered for a global (null-session) file and Save targets null scope", async () => {
+  vi.mocked(readTextFile).mockResolvedValue("body");
+  render(<CustomizationsDialog {...defaultProps} sessionId={null} capabilities={capsWithPaths} />);
+  const nav = getNav();
+  await userEvent.click(within(nav).getByRole("button", { name: /agents/i }));
+  await userEvent.click(screen.getByText("code-reviewer"));
+
+  await userEvent.click(await screen.findByRole("button", { name: /edit/i }));
+  await userEvent.click(screen.getByRole("button", { name: /^save$/i }));
+
+  await waitFor(() =>
+    expect(writeTextFile).toHaveBeenCalledWith(null, "/home/.claude/agents/code-reviewer.md", "body"),
+  );
+});
+
+// ─── CRUD: hooks ────────────────────────────────────────────────────────────────
+
+test("Add hook submits event/matcher/command and refreshes", async () => {
+  const onChanged = vi.fn();
+  render(<CustomizationsDialog {...defaultProps} initialSection="hooks" onChanged={onChanged} />);
+
+  await userEvent.click(screen.getByRole("button", { name: /^add$/i }));
+  await userEvent.type(screen.getByPlaceholderText(/event/i), "PreToolUse");
+  await userEvent.type(screen.getByPlaceholderText(/matcher/i), "Bash");
+  await userEvent.type(screen.getByPlaceholderText(/command to run/i), "echo hi");
+  await userEvent.click(screen.getByRole("button", { name: /^add$/i }));
+
+  await waitFor(() => expect(addHook).toHaveBeenCalledWith("s1", "PreToolUse", "Bash", "echo hi"));
+  expect(onChanged).toHaveBeenCalled();
+});
+
+test("deleting a hook passes its source and identifying fields", async () => {
+  render(<CustomizationsDialog {...defaultProps} initialSection="hooks" hooks={sampleHooks} />);
+
+  await userEvent.click(screen.getByRole("button", { name: /delete PostToolUse hook/i }));
+  await userEvent.click(screen.getByRole("button", { name: /^delete$/i }));
+
+  await waitFor(() =>
+    expect(deleteHook).toHaveBeenCalledWith(
+      "s1",
+      "user",
+      "PostToolUse",
+      "/edit",
+      "git add -A && git commit -m auto",
+    ),
+  );
+});
+
+// ─── CRUD: MCP servers ──────────────────────────────────────────────────────────
+
+test("Add MCP server splits args on whitespace and refreshes", async () => {
+  const onChanged = vi.fn();
+  render(<CustomizationsDialog {...defaultProps} initialSection="mcp" onChanged={onChanged} />);
+
+  await userEvent.click(screen.getByRole("button", { name: /^add$/i }));
+  await userEvent.type(screen.getByPlaceholderText(/server name/i), "ctx");
+  await userEvent.type(screen.getByPlaceholderText(/command/i), "npx");
+  await userEvent.type(screen.getByPlaceholderText(/args/i), "-y @context7/mcp");
+  await userEvent.click(screen.getByRole("button", { name: /^add$/i }));
+
+  await waitFor(() =>
+    expect(addMcpServer).toHaveBeenCalledWith("s1", "ctx", "npx", ["-y", "@context7/mcp"]),
+  );
+  expect(onChanged).toHaveBeenCalled();
+});
+
+test("deleting an MCP server passes its source and name", async () => {
+  render(<CustomizationsDialog {...defaultProps} initialSection="mcp" mcpServers={sampleMcpServers} />);
+
+  await userEvent.click(screen.getByRole("button", { name: /delete playwright/i }));
+  await userEvent.click(screen.getByRole("button", { name: /^delete$/i }));
+
+  await waitFor(() => expect(deleteMcpServer).toHaveBeenCalledWith("s1", "user", "playwright"));
 });

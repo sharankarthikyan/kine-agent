@@ -76,6 +76,53 @@ export async function listMcpServers(sessionId: string | null): Promise<McpServe
   return invoke<McpServerEntry[]>("list_mcp_servers", { sessionId });
 }
 
+/** Append a hook command to the scope's Claude settings.json. An active session writes to
+ *  its project config; `null` writes to the user's global ~/.claude/settings.json. */
+export async function addHook(
+  sessionId: string | null,
+  event: string,
+  matcher: string | null,
+  command: string,
+): Promise<void> {
+  assertDesktop();
+  return invoke<void>("add_hook", { sessionId, event, matcher, command });
+}
+
+/** Remove a hook leaf matching (event, matcher, command) from the settings file for the
+ *  entry's `source` ("project" | "user"). */
+export async function deleteHook(
+  sessionId: string | null,
+  source: HookEntry["source"],
+  event: string,
+  matcher: string | null,
+  command: string,
+): Promise<void> {
+  assertDesktop();
+  return invoke<void>("delete_hook", { sessionId, source, event, matcher, command });
+}
+
+/** Add an stdio MCP server (command + optional args) to the scope's MCP config. An active
+ *  session writes to <worktree>/.mcp.json; `null` writes to ~/.claude.json. */
+export async function addMcpServer(
+  sessionId: string | null,
+  name: string,
+  command: string,
+  args: string[],
+): Promise<void> {
+  assertDesktop();
+  return invoke<void>("add_mcp_server", { sessionId, name, command, args });
+}
+
+/** Remove an MCP server by name from the config file for the entry's `source`. */
+export async function deleteMcpServer(
+  sessionId: string | null,
+  source: McpServerEntry["source"],
+  name: string,
+): Promise<void> {
+  assertDesktop();
+  return invoke<void>("delete_mcp_server", { sessionId, source, name });
+}
+
 /** Return installed Claude Code plugins from ~/.claude/plugins/installed_plugins.json.
  *  Plugins are always user-scope; `sessionId` may be `null`. */
 export async function listPlugins(sessionId: string | null): Promise<PluginEntry[]> {
