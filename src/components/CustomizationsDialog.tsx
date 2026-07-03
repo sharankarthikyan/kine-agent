@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ArrowLeft,
   Bot,
@@ -21,6 +21,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { CodeBlock } from "@/components/CodeBlock";
 import {
   Dialog,
   DialogContent,
@@ -305,26 +306,13 @@ function FileDetailView({ detail, loading, error, content, sessionId, onBack, on
             {!loading && error && (
               <p className="text-sm text-muted-foreground">Couldn't read this file</p>
             )}
-            {!loading && !error && content !== null && <CodePreview content={content} />}
+            {!loading && !error && content !== null && (
+              <CodeBlock content={content} path={detail.path} />
+            )}
           </div>
         </ScrollArea>
       )}
     </div>
-  );
-}
-
-function CodePreview({ content }: { content: string }) {
-  return (
-    <pre className="m-0 grid grid-cols-[auto_1fr] gap-x-3 font-mono text-xs leading-5 text-foreground">
-      {content.split("\n").map((line, index) => (
-        <Fragment key={index}>
-          <span className="select-none text-right tabular-nums text-muted-foreground/60">
-            {index + 1}
-          </span>
-          <code className="whitespace-pre-wrap break-words">{line || " "}</code>
-        </Fragment>
-      ))}
-    </pre>
   );
 }
 

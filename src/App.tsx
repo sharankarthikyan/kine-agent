@@ -14,7 +14,8 @@ import { Loader2, Maximize2, Minimize2, X } from "lucide-react";
 import { PromptBar } from "./components/PromptBar";
 import { NewSession } from "./components/NewSession";
 import { Conversation, type Turn } from "./components/Conversation";
-import { DiffViewer } from "./components/DiffViewer";
+import { DiffReviewDialog } from "./components/DiffReviewDialog";
+import { FilePreviewDialog, type FilePreviewState } from "./components/FilePreviewDialog";
 import { TitleBar } from "./components/TitleBar";
 import {
   SessionList,
@@ -97,6 +98,7 @@ import {
   worktreeTree as fetchWorktreeTree,
   commitSession,
   customizationsCounts,
+  readWorktreeFile,
   openInEditor,
   openTerminal,
   listHooks,
@@ -320,11 +322,12 @@ export default function App() {
   const [treeNodes, setTreeNodes] = useState<TreeNode[]>([]);
   // Commit-in-flight flag.
   const [committing, setCommitting] = useState(false);
-  // File-click diff Sheet — null means closed.
-  const [diffSheet, setDiffSheet] = useState<{
+  // File-click diff review dialog — null means closed.
+  const [diffDialog, setDiffDialog] = useState<{
     path: string;
     diff: SessionDiff;
   } | null>(null);
+  const [filePreview, setFilePreview] = useState<FilePreviewState | null>(null);
 
   // Synchronous ref keeps the active session ID readable inside async callbacks
   // without stale-closure issues — the guard for cross-session contamination.
@@ -365,7 +368,8 @@ export default function App() {
     setBranchChanges(null);
     setBranchChangesStatus("idle");
     setTreeNodes([]);
-    setDiffSheet(null);
+    setDiffDialog(null);
+    setFilePreview(null);
     setHooks([]);
     setMcpServers([]);
     setPlugins([]);
@@ -1281,9 +1285,8 @@ export default function App() {
     }
   }
 
-  // Open the diff Sheet for a clicked file path. Reuses the existing `diff` state
-  // (full patch, acceptable per spec — DiffViewer has no per-file filter prop).
-  // If diff hasn't loaded yet, attempt a best-effort fetch first.
+  // Open the diff review dialog for a clicked file path. If the patch has not
+  // loaded yet, attempt a best-effort fetch first.
   async function handleOpenFile(path: string) {
     const sessionId = activeSessionIdRef.current;
     if (!sessionId) return;
@@ -1297,7 +1300,36 @@ export default function App() {
       }
     }
     if (sessionDiff && activeSessionIdRef.current === sessionId) {
-      setDiffSheet({ path, diff: sessionDiff });
+      setDiffDialog({ path, diff: sessionDiff });
+    }
+  }
+
+  async function handlePreviewWorktreeFile(path: string) {
+    const sessionId = activeSessionIdRef.current;
+    if (!sessionId) return;
+    setFilePreview({ path, content: null, status: "loading" });
+    try {
+      const content = await readWorktreeFile(sessionId, path);
+      if (activeSessionIdRef.current === sessionId) {
+        setFilePreview({ path, content, status: "ready" });
+      }
+    } catch (err) {
+      if (activeSessionIdRef.current === sessionId) {
+        setFilePreview({
+          path,
+          content: null,
+          status: "error",
+          error: safeErrorMessage(err),
+        });
+      }
+    }
+  }
+
+  async function handleOpenFilesTreeFile(path: string, node: TreeNode) {
+    if (node.status) {
+      await handleOpenFile(path);
+    } else {
+      await handlePreviewWorktreeFile(path);
     }
   }
 
@@ -2157,7 +2189,7 @@ export default function App() {
                   ) : (
                     <FilesTree
                       nodes={treeNodes}
-                      onOpenFile={(path) => void handleOpenFile(path)}
+                      onOpenFile={(path, node) => void handleOpenFilesTreeFile(path, node)}
                     />
                   )}
                 </TabsContent>
@@ -2188,25 +2220,26 @@ export default function App() {
         </SheetContent>
       </Sheet>
 
-      {/* File diff Sheet — opens when a file is clicked in Changes or Files tab.
-          Shows the full session patch (DiffViewer has no per-file filter). */}
-      <Sheet
-        open={diffSheet !== null}
-        onOpenChange={(o) => {
-          if (!o) setDiffSheet(null);
+      <DiffReviewDialog
+        open={diffDialog !== null}
+        diff={diffDialog?.diff ?? null}
+        selectedPath={diffDialog?.path ?? null}
+        committing={committing}
+        onOpenChange={(open) => {
+          if (!open) setDiffDialog(null);
         }}
-      >
-        <SheetContent className="w-[min(640px,calc(100vw-1rem))] sm:max-w-none flex flex-col rounded-l-xl">
-          <SheetHeader>
-            <SheetTitle className="font-mono text-sm">
-              {diffSheet?.path}
-            </SheetTitle>
-          </SheetHeader>
-          <ScrollArea className="flex-1 min-h-0">
-            {diffSheet && <DiffViewer diff={diffSheet.diff} />}
-          </ScrollArea>
-        </SheetContent>
-      </Sheet>
+        onSelectPath={(path) =>
+          setDiffDialog((current) => (current ? { ...current, path } : current))
+        }
+        onCommit={handleCommit}
+      />
+
+      <FilePreviewDialog
+        preview={filePreview}
+        onOpenChange={(open) => {
+          if (!open) setFilePreview(null);
+        }}
+      />
 
       {/* Customizations dialog — opened when a sidebar Customizations row is clicked. */}
       <Suspense fallback={null}>

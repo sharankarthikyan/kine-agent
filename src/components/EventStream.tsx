@@ -1,12 +1,22 @@
-import { Fragment } from "react";
+import { Fragment, useState } from "react";
 import type { AgentEvent } from "../lib/agent";
 import { EmptyState } from "./EmptyState";
 import { Markdown } from "./Markdown";
 import { Badge, badgeVariants } from "@/components/ui/badge";
-import { Alert, AlertTitle, AlertDescription } from "@/components/ui/alert";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
-import { Wrench, Pencil, Check, Loader2, X, Circle } from "lucide-react";
+import {
+  Wrench,
+  Pencil,
+  Check,
+  Loader2,
+  X,
+  Circle,
+  ChevronDown,
+  ShieldQuestion,
+} from "lucide-react";
 import { cn } from "@/lib/utils";
+import type { DiffLineKind } from "@/lib/parsePatch";
 
 interface EventStreamProps {
   events: AgentEvent[];
@@ -28,6 +38,7 @@ interface EventStreamProps {
  * it's only shown when the turn produced no prose.
  */
 export function EventStream({ events, onOpenFile, onApprovalRespond }: EventStreamProps) {
+  const [openToolKey, setOpenToolKey] = useState<string | null>(null);
   if (events.length === 0) {
     return (
       <EmptyState
@@ -66,13 +77,18 @@ export function EventStream({ events, onOpenFile, onApprovalRespond }: EventStre
         group.kind === "chips" ? (
           // A burst of tool/file calls flows inline and wraps, instead of one
           // chip per line — far less vertical noise when an agent reads N files.
-          <div key={i} className="flex w-full flex-wrap gap-1.5">
-            {group.events.map((event, j) => (
-              <Fragment key={j}>
-                {renderEvent(event, hasProse, statusById, resolvedApprovals, onOpenFile, onApprovalRespond)}
-              </Fragment>
-            ))}
-          </div>
+          <ToolChipRun
+            key={i}
+            runKey={`run-${i}`}
+            events={group.events}
+            hasProse={hasProse}
+            statusById={statusById}
+            resolvedApprovals={resolvedApprovals}
+            openToolKey={openToolKey}
+            onToggleTool={setOpenToolKey}
+            onOpenFile={onOpenFile}
+            onApprovalRespond={onApprovalRespond}
+          />
         ) : group.kind === "prose" ? (
           <Markdown key={i}>{group.text}</Markdown>
         ) : group.kind === "thought" ? (
@@ -86,9 +102,79 @@ export function EventStream({ events, onOpenFile, onApprovalRespond }: EventStre
           </details>
         ) : (
           <Fragment key={i}>
-            {renderEvent(group.event, hasProse, statusById, resolvedApprovals, onOpenFile, onApprovalRespond)}
+            {renderEvent(
+              group.event,
+              hasProse,
+              statusById,
+              resolvedApprovals,
+              onOpenFile,
+              onApprovalRespond,
+              openToolKey,
+              setOpenToolKey,
+            )}
           </Fragment>
         )
+      )}
+    </div>
+  );
+}
+
+interface ToolChipRunProps {
+  runKey: string;
+  events: AgentEvent[];
+  hasProse: boolean;
+  statusById: Map<string, string>;
+  resolvedApprovals: Map<string, string>;
+  openToolKey: string | null;
+  onToggleTool: (key: string | null) => void;
+  onOpenFile?: (path: string) => void;
+  onApprovalRespond?: (requestId: string, selectedOptionId: string) => void;
+}
+
+function ToolChipRun({
+  runKey,
+  events,
+  hasProse,
+  statusById,
+  resolvedApprovals,
+  openToolKey,
+  onToggleTool,
+  onOpenFile,
+  onApprovalRespond,
+}: ToolChipRunProps) {
+  const openIndex = events.findIndex(
+    (event, index) => toolKey(event, index, runKey) === openToolKey,
+  );
+  const openEvent = openIndex >= 0 ? events[openIndex] : null;
+  return (
+    <div className="flex w-full flex-col gap-1.5">
+      <div className="flex w-full flex-wrap gap-1.5">
+        {events.map((event, j) => (
+          <Fragment key={j}>
+            {renderEvent(
+              event,
+              hasProse,
+              statusById,
+              resolvedApprovals,
+              onOpenFile,
+              onApprovalRespond,
+              openToolKey,
+              onToggleTool,
+              toolKey(event, j, runKey),
+            )}
+          </Fragment>
+        ))}
+      </div>
+      {openEvent && (
+        <ToolDetails
+          event={openEvent}
+          status={
+            openEvent.kind === "toolCall" && openEvent.data.toolCallId
+              ? statusById.get(openEvent.data.toolCallId)
+              : undefined
+          }
+          onClose={() => onToggleTool(null)}
+        />
       )}
     </div>
   );
@@ -132,6 +218,9 @@ function renderEvent(
   resolvedApprovals: Map<string, string>,
   onOpenFile?: (path: string) => void,
   onApprovalRespond?: (requestId: string, selectedOptionId: string) => void,
+  openToolKey?: string | null,
+  onToggleTool?: (key: string | null) => void,
+  eventKey?: string,
 ) {
   switch (event.kind) {
     case "token":
@@ -154,11 +243,15 @@ function renderEvent(
     case "toolCall": {
       const summary = describeToolCall(event.data.name, event.data.input);
       const filePath = fileTargetPath(event.data.name, event.data.input);
-      const clickable = filePath !== null && onOpenFile !== undefined;
-      const className = "gap-1.5 max-w-full overflow-hidden font-normal";
+      const hasInlineDetails = editDetailsFromToolInput(event.data.name, event.data.input) !== null;
+      const clickable = filePath !== null && onOpenFile !== undefined && !hasInlineDetails;
+      const key = eventKey ?? toolKey(event, 0);
+      const detailsOpen = openToolKey === key;
+      const className = "gap-1.5 max-w-full overflow-hidden font-normal transition-colors";
       const status = event.data.toolCallId
         ? statusById.get(event.data.toolCallId)
         : undefined;
+      const label = displayToolName(event.data.name);
       const icon =
         status === "completed" ? (
           <Check aria-hidden="true" className="size-3 shrink-0" />
@@ -173,30 +266,44 @@ function renderEvent(
         <span
           data-testid={event.data.toolCallId ? `tool-status-${event.data.toolCallId}` : undefined}
           data-status={status}
-          className="flex items-center gap-1.5 min-w-0"
+          className="flex min-w-0 items-center gap-1.5"
         >
           {icon}
           <span className="truncate">
-            <span className="font-medium">{event.data.name}</span>
+            <span className="font-medium">{label}</span>
             {summary && (
-              <span className="text-muted-foreground font-mono"> · {summary}</span>
+              <span className="font-mono text-muted-foreground"> · {summary}</span>
             )}
           </span>
+          {!clickable && (
+            <ChevronDown
+              aria-hidden="true"
+              className={cn(
+                "size-3 shrink-0 text-muted-foreground transition-transform",
+                detailsOpen && "rotate-180",
+              )}
+            />
+          )}
         </span>
       );
       return clickable ? (
         <button
           type="button"
           className={cn(badgeVariants({ variant: "secondary" }), className, "cursor-pointer hover:bg-secondary/70")}
-          title={event.data.input}
+          title={`Open ${summary || label}`}
           onClick={() => onOpenFile!(filePath!)}
         >
           {content}
         </button>
       ) : (
-        <Badge variant="secondary" className={className} title={event.data.input}>
+        <button
+          type="button"
+          aria-expanded={detailsOpen}
+          className={cn(badgeVariants({ variant: "secondary" }), className, "cursor-pointer hover:bg-secondary/70")}
+          onClick={() => onToggleTool?.(detailsOpen ? null : key)}
+        >
           {content}
-        </Badge>
+        </button>
       );
     }
 
@@ -206,7 +313,7 @@ function renderEvent(
       const content = (
         <>
           <Pencil aria-hidden="true" className="size-3 shrink-0" />
-          <span className="truncate">{event.data.path}</span>
+          <span className="truncate">{compactPath(event.data.path)}</span>
         </>
       );
       return clickable ? (
@@ -241,22 +348,28 @@ function renderEvent(
           ? (options.find((o) => o.id === answeredId)?.label ?? answeredId)
           : undefined;
       return (
-        <Alert className="w-full">
-          <AlertTitle>Approval required</AlertTitle>
-          <AlertDescription>{event.data.prompt}</AlertDescription>
+        <div className="w-full max-w-2xl rounded-lg border border-border/70 bg-muted/20 px-3 py-2 text-sm">
+          <div className="flex items-start gap-2">
+            <ShieldQuestion aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+            <div className="min-w-0 flex-1">
+              <div className="font-medium">Approval needed</div>
+              <div className="mt-0.5 break-words text-muted-foreground">{event.data.prompt}</div>
+            </div>
+          </div>
           {answeredLabel !== undefined ? (
-            <div className="mt-3 flex items-center gap-1.5 text-sm text-muted-foreground">
+            <div className="mt-2 flex items-center gap-1.5 pl-6 text-xs text-muted-foreground">
               <Check aria-hidden="true" className="size-3.5 shrink-0" />
               {answeredLabel}
             </div>
           ) : (
             onApprovalRespond && (
-              <div className="mt-3 flex flex-wrap gap-2">
+              <div className="mt-2 flex flex-wrap gap-1.5 pl-6">
                 {options.map((option) => (
                   <Button
                     key={option.id}
                     size="sm"
                     variant={option.kind.startsWith("reject") ? "outline" : "default"}
+                    className="h-7 px-2 text-xs"
                     onClick={() => onApprovalRespond(event.data.requestId, option.id)}
                   >
                     {option.label}
@@ -265,7 +378,7 @@ function renderEvent(
               </div>
             )
           )}
-        </Alert>
+        </div>
       );
     }
 
@@ -360,6 +473,266 @@ function renderEvent(
   }
 }
 
+function toolKey(event: AgentEvent, index: number, scope = "single"): string {
+  if (event.kind === "toolCall") {
+    return event.data.toolCallId
+      ? `tool:${event.data.toolCallId}`
+      : `tool:${scope}:${index}:${event.data.name}`;
+  }
+  if (event.kind === "fileWrite") return `file:${scope}:${index}:${event.data.path}`;
+  return `${event.kind}:${scope}:${index}`;
+}
+
+function displayToolName(name: string): string {
+  const trimmed = name.trim().replace(/^Tool:\s*/i, "");
+  const mcp = trimmed.match(/^mcp__([^_]+)__(.+)$/);
+  if (mcp) return `${mcp[1]}/${mcp[2]}`;
+  const actionWithPath = trimmed.match(/^(Read|Write|Edit|NotebookEdit)\s+.+$/);
+  if (actionWithPath) return actionWithPath[1];
+  return trimmed;
+}
+
+function compactPath(path: string): string {
+  const cleaned = path.trim().replace(/[\\/]+$/, "");
+  if (cleaned === "") return path;
+  return cleaned.split(/[\\/]/).pop() || cleaned;
+}
+
+function ToolDetails({
+  event,
+  status,
+  onClose,
+}: {
+  event: AgentEvent;
+  status?: string;
+  onClose: () => void;
+}) {
+  if (event.kind !== "toolCall" && event.kind !== "fileWrite") return null;
+  const label = event.kind === "toolCall" ? displayToolName(event.data.name) : "File write";
+  const summary =
+    event.kind === "toolCall" ? describeToolCall(event.data.name, event.data.input) : compactPath(event.data.path);
+  const editDetails = event.kind === "toolCall" ? editDetailsFromToolInput(event.data.name, event.data.input) : null;
+  const details = event.kind === "toolCall" ? formatToolInput(event.data.input) : event.data.path;
+  return (
+    <div className="w-full max-w-3xl rounded-md border border-border/70 bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+      <div className="flex items-start gap-2">
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="font-medium text-foreground">{label}</span>
+            {status && (
+              <span className="rounded-full bg-muted px-1.5 py-0.5 font-mono text-[11px]">
+                {statusLabel(status)}
+              </span>
+            )}
+          </div>
+          {summary && <div className="mt-1 break-words font-mono">{summary}</div>}
+          {editDetails ? (
+            <ToolEditDiff details={editDetails} />
+          ) : (
+            details &&
+            details !== summary && (
+              <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-md border border-border/70 bg-muted/60 p-2 font-mono text-[11px] leading-relaxed text-foreground shadow-inner dark:bg-background/70">
+                {details}
+              </pre>
+            )
+          )}
+        </div>
+        <button
+          type="button"
+          aria-label="Close tool details"
+          className="rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+          onClick={onClose}
+        >
+          <X aria-hidden="true" className="size-3.5" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+interface ToolEditFile {
+  path: string;
+  type: string | null;
+  movePath: string | null;
+  lines: { kind: DiffLineKind; text: string }[];
+}
+
+interface ToolEditDetails {
+  files: ToolEditFile[];
+  autoApproved: boolean | null;
+}
+
+function ToolEditDiff({ details }: { details: ToolEditDetails }) {
+  return (
+    <div className="mt-2 flex flex-col gap-2">
+      {details.autoApproved !== null && (
+        <div className="text-[11px] text-muted-foreground">
+          {details.autoApproved ? "Auto approved" : "Approval required"}
+        </div>
+      )}
+      {details.files.map((file) => (
+        <section
+          key={`${file.path}:${file.movePath ?? ""}`}
+          className="overflow-hidden rounded-md border border-border/70 bg-background shadow-inner dark:bg-background/70"
+        >
+          <div className="flex min-w-0 items-center gap-2 border-b border-border/70 bg-muted/50 px-2 py-1.5">
+            <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-foreground" title={file.path}>
+              {displayWorktreePath(file.path)}
+            </span>
+            {file.type && (
+              <span className="rounded-full bg-background px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
+                {file.type}
+              </span>
+            )}
+          </div>
+          {file.movePath && (
+            <div className="border-b border-border/60 px-2 py-1 font-mono text-[11px] text-muted-foreground">
+              moved to {displayWorktreePath(file.movePath)}
+            </div>
+          )}
+          {file.lines.length > 0 ? (
+            <div className="max-h-52 overflow-auto py-1">
+              {file.lines.map((line, i) => (
+                <div
+                  key={i}
+                  className={cn(
+                    "grid grid-cols-[1.5rem_minmax(0,1fr)] gap-2 px-2 font-mono text-[11px] leading-5",
+                    line.kind === "add" && "bg-[color-mix(in_oklch,var(--status-success)_14%,transparent)] text-foreground",
+                    line.kind === "del" && "bg-[color-mix(in_oklch,var(--status-error)_12%,transparent)] text-foreground",
+                    (line.kind === "hunk" || line.kind === "meta") && "text-muted-foreground",
+                  )}
+                >
+                  <span className="select-none text-right text-muted-foreground">
+                    {diffPrefix(line.kind)}
+                  </span>
+                  <span className="min-w-0 whitespace-pre-wrap break-words">{displayDiffText(line)}</span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="px-2 py-2 text-[11px] text-muted-foreground">No inline diff available.</div>
+          )}
+        </section>
+      ))}
+    </div>
+  );
+}
+
+function statusLabel(status: string): string {
+  switch (status) {
+    case "in_progress":
+      return "running";
+    case "completed":
+      return "done";
+    case "failed":
+      return "failed";
+    default:
+      return status;
+  }
+}
+
+function formatToolInput(input: string): string {
+  try {
+    const parsed = JSON.parse(input);
+    return JSON.stringify(parsed, null, 2);
+  } catch {
+    return input;
+  }
+}
+
+function editDetailsFromToolInput(name: string, input: string): ToolEditDetails | null {
+  const normalizedName = displayToolName(name);
+  if (!["Edit", "Write", "NotebookEdit"].includes(normalizedName)) return null;
+
+  const parsed = parseToolInput(input);
+  if (!parsed) return null;
+
+  const files: ToolEditFile[] = [];
+  const changes = parsed.changes;
+  if (changes && typeof changes === "object" && !Array.isArray(changes)) {
+    for (const [path, rawChange] of Object.entries(changes as Record<string, unknown>)) {
+      if (!rawChange || typeof rawChange !== "object" || Array.isArray(rawChange)) continue;
+      const change = rawChange as Record<string, unknown>;
+      const diff = typeof change.unified_diff === "string" ? change.unified_diff : "";
+      files.push({
+        path,
+        type: typeof change.type === "string" ? change.type : null,
+        movePath: typeof change.move_path === "string" ? change.move_path : null,
+        lines: classifyUnifiedDiff(diff),
+      });
+    }
+  } else {
+    const path = firstString(parsed.file_path, parsed.path, parsed.notebook_path);
+    const diff = firstString(parsed.unified_diff, parsed.diff, parsed.patch);
+    if (path && diff) {
+      files.push({
+        path,
+        type: normalizedName === "Write" ? "write" : "update",
+        movePath: null,
+        lines: classifyUnifiedDiff(diff),
+      });
+    }
+  }
+
+  if (files.length === 0) return null;
+  return {
+    files,
+    autoApproved: typeof parsed.auto_approved === "boolean" ? parsed.auto_approved : null,
+  };
+}
+
+function parseToolInput(input: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(input);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function firstString(...values: unknown[]): string | null {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim() !== "") return value.trim();
+  }
+  return null;
+}
+
+function classifyUnifiedDiff(diff: string): { kind: DiffLineKind; text: string }[] {
+  const lines: { kind: DiffLineKind; text: string }[] = [];
+  for (const raw of diff.split("\n")) {
+    if (raw === "") continue;
+    let kind: DiffLineKind;
+    if (raw.startsWith("@@")) kind = "hunk";
+    else if (raw.startsWith("+++") || raw.startsWith("---") || raw.startsWith("diff --git") || raw.startsWith("index ")) kind = "meta";
+    else if (raw.startsWith("+")) kind = "add";
+    else if (raw.startsWith("-")) kind = "del";
+    else kind = "context";
+    lines.push({ kind, text: raw });
+  }
+  return lines;
+}
+
+function diffPrefix(kind: DiffLineKind): string {
+  if (kind === "add") return "+";
+  if (kind === "del") return "-";
+  return "";
+}
+
+function displayDiffText(line: { kind: DiffLineKind; text: string }): string {
+  if ((line.kind === "add" || line.kind === "del") && line.text.length > 0) {
+    return line.text.slice(1) || " ";
+  }
+  return line.text || " ";
+}
+
+function displayWorktreePath(path: string): string {
+  const normalized = path.replace(/\\/g, "/");
+  const match = normalized.match(/\/(?:\.(?:kineloop|agent-editor)|Kineloop)\/worktrees\/[^/]+\/(.+)$/);
+  return match ? match[1] : normalized;
+}
+
 /**
  * Human-readable summary of a tool call's most meaningful argument — e.g.
  * `Read · App.tsx`, `Bash · npm test`, `Agent · Review portfolio UI/UX`.
@@ -370,19 +743,26 @@ function renderEvent(
  * diff on click (Read/Write/Edit/NotebookEdit). Returns null for non-file tools.
  */
 function fileTargetPath(name: string, input: string): string | null {
-  if (!["Read", "Write", "Edit", "NotebookEdit"].includes(name)) return null;
+  const normalizedName = displayToolName(name);
+  if (!["Read", "Write", "Edit", "NotebookEdit"].includes(normalizedName)) return null;
   try {
     const parsed = JSON.parse(input);
     if (!parsed || typeof parsed !== "object") return null;
     const args = parsed as Record<string, unknown>;
     const path = args.file_path ?? args.path ?? args.notebook_path;
-    return typeof path === "string" && path.trim() !== "" ? path : null;
+    if (typeof path === "string" && path.trim() !== "") return path;
+    if (args.changes && typeof args.changes === "object" && !Array.isArray(args.changes)) {
+      const firstPath = Object.keys(args.changes as Record<string, unknown>)[0];
+      return firstPath && firstPath.trim() !== "" ? firstPath : null;
+    }
+    return null;
   } catch {
     return null;
   }
 }
 
 function describeToolCall(name: string, input: string): string {
+  const normalizedName = displayToolName(name);
   let args: Record<string, unknown> = {};
   try {
     const parsed = JSON.parse(input);
@@ -390,19 +770,19 @@ function describeToolCall(name: string, input: string): string {
   } catch {
     return "";
   }
-  const str = (value: unknown): string | undefined =>
-    typeof value === "string" && value.trim() !== "" ? value.trim() : undefined;
-  // Separator-agnostic: agent tool-call file paths may be absolute Windows paths.
-  const basename = (path: string): string =>
-    path.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || path;
+  const str = (value: unknown): string | undefined => cleanSummary(value);
 
-  switch (name) {
+  switch (normalizedName) {
     case "Read":
     case "Write":
     case "Edit":
     case "NotebookEdit": {
       const path = str(args.file_path) ?? str(args.path) ?? str(args.notebook_path);
-      return path ? basename(path) : "";
+      if (!path && args.changes && typeof args.changes === "object" && !Array.isArray(args.changes)) {
+        const firstPath = Object.keys(args.changes as Record<string, unknown>)[0];
+        return firstPath ? displayWorktreePath(firstPath) : "";
+      }
+      return path ? compactPath(path) : "";
     }
     case "Bash":
       return str(args.command) ?? "";
@@ -417,10 +797,50 @@ function describeToolCall(name: string, input: string): string {
     case "WebSearch":
       return str(args.query) ?? "";
     default: {
-      const firstString = Object.values(args).find(
-        (value): value is string => typeof value === "string" && value.trim() !== ""
-      );
-      return firstString ?? "";
+      const preferredKeys = [
+        "file_path",
+        "path",
+        "notebook_path",
+        "command",
+        "pattern",
+        "query",
+        "url",
+        "description",
+        "prompt",
+        "subagent_type",
+      ];
+      for (const key of preferredKeys) {
+        const value = str(args[key]);
+        if (value) return summarizeValueForKey(key, value);
+      }
+      const firstString = Object.entries(args).find(([key, value]) => {
+        if (isNoisySummaryKey(key)) return false;
+        return cleanSummary(value) !== undefined;
+      });
+      return firstString ? cleanSummary(firstString[1]) ?? "" : "";
     }
   }
+}
+
+function summarizeValueForKey(key: string, value: string): string {
+  if (["file_path", "path", "notebook_path"].includes(key)) return compactPath(value);
+  return value;
+}
+
+function cleanSummary(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const cleaned = stripAnsi(value)
+    .replace(/\s+/g, " ")
+    .trim();
+  if (cleaned === "" || /^call_[A-Za-z0-9_-]+$/.test(cleaned)) return undefined;
+  return cleaned.length > 140 ? `${cleaned.slice(0, 137)}...` : cleaned;
+}
+
+function isNoisySummaryKey(key: string): boolean {
+  return /(?:^|_)(?:id|uuid|request|call)(?:_|$)/i.test(key);
+}
+
+function stripAnsi(value: string): string {
+  // eslint-disable-next-line no-control-regex
+  return value.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
 }

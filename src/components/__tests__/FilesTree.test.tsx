@@ -41,6 +41,35 @@ test("renders a nested structure: directory name and child file name are both vi
   expect(screen.getByText("index.ts")).toBeInTheDocument();
 });
 
+test("keeps clean directories collapsed by default", () => {
+  const cleanTree: TreeNode = {
+    name: ".agents",
+    path: ".agents",
+    isDir: true,
+    status: null,
+    children: [
+      {
+        name: "skills",
+        path: ".agents/skills",
+        isDir: true,
+        status: null,
+        children: [
+          {
+            name: "SKILL.md",
+            path: ".agents/skills/example/SKILL.md",
+            isDir: false,
+            status: null,
+            children: [],
+          },
+        ],
+      },
+    ],
+  };
+  render(<FilesTree nodes={[cleanTree]} onOpenFile={noop} />);
+  expect(screen.getByText(".agents")).toBeInTheDocument();
+  expect(screen.queryByText("skills")).not.toBeInTheDocument();
+});
+
 test("maps a full-word status to its single-letter badge with a status color", () => {
   render(<FilesTree nodes={[FILE_NODE]} onOpenFile={noop} />);
   // Full-word "modified" renders as the letter "M", not the raw word.
@@ -58,14 +87,20 @@ test("clicking a file node calls onOpenFile with the file path", async () => {
   const onOpenFile = vi.fn();
   render(<FilesTree nodes={[FILE_NODE]} onOpenFile={onOpenFile} />);
   await userEvent.click(screen.getByRole("button", { name: /Open index\.ts/i }));
-  expect(onOpenFile).toHaveBeenCalledWith("src/index.ts");
+  expect(onOpenFile).toHaveBeenCalledWith(
+    "src/index.ts",
+    expect.objectContaining({ path: "src/index.ts", status: "modified" }),
+  );
 });
 
 test("clicking a file inside a directory calls onOpenFile with the file path", async () => {
   const onOpenFile = vi.fn();
   render(<FilesTree nodes={[DIR_NODE]} onOpenFile={onOpenFile} />);
   await userEvent.click(screen.getByRole("button", { name: /Open index\.ts/i }));
-  expect(onOpenFile).toHaveBeenCalledWith("src/index.ts");
+  expect(onOpenFile).toHaveBeenCalledWith(
+    "src/index.ts",
+    expect.objectContaining({ path: "src/index.ts", status: "modified" }),
+  );
 });
 
 // ── Directory interaction ──────────────────────────────────────────────────────
@@ -89,6 +124,21 @@ test("clicking a collapsed directory expands its children", async () => {
 
   // Expand again
   await userEvent.click(screen.getByRole("button", { name: "src" }));
+  expect(screen.getByText("index.ts")).toBeInTheDocument();
+});
+
+test("search renders matching files as a flat list", async () => {
+  render(<FilesTree nodes={[DIR_NODE]} onOpenFile={noop} />);
+  await userEvent.type(screen.getByLabelText("Find files"), "index");
+  expect(screen.getByText("src/index.ts")).toBeInTheDocument();
+});
+
+test("collapse and changed controls update expansion", async () => {
+  render(<FilesTree nodes={[DIR_NODE]} onOpenFile={noop} />);
+  expect(screen.getByText("index.ts")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Collapse tree" }));
+  expect(screen.queryByText("index.ts")).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Show changed files" }));
   expect(screen.getByText("index.ts")).toBeInTheDocument();
 });
 

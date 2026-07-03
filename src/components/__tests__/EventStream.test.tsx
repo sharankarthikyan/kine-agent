@@ -54,6 +54,94 @@ test("renders a tool call with its name", () => {
   expect(screen.getByText(/Write/)).toBeInTheDocument();
 });
 
+test("opens compact details for non-file tool chips", async () => {
+  const events = [
+    {
+      kind: "toolCall",
+      data: {
+        name: "Bash",
+        input: '{"command":"npm test -- --run EventStream.test.tsx"}',
+        toolCallId: "call-1",
+      },
+    },
+    { kind: "toolStatus", data: { toolCallId: "call-1", status: "completed", detail: "" } },
+  ] as AgentEvent[];
+  render(<EventStream events={events} />);
+  const chip = screen.getByRole("button", { name: /Bash/ });
+  expect(chip).toHaveAttribute("aria-expanded", "false");
+  await userEvent.click(chip);
+  expect(chip).toHaveAttribute("aria-expanded", "true");
+  expect(screen.getByText("done")).toBeInTheDocument();
+  expect(screen.getByText(/"command": "npm test/)).toBeInTheDocument();
+});
+
+test("tool chip summaries hide internal call ids and normalize mcp names", () => {
+  const events = [
+    {
+      kind: "toolCall",
+      data: {
+        name: "mcp__mem0__search_memory",
+        input: '{"call_id":"call_9KNnG4","query":"kineloop context"}',
+      },
+    },
+  ] as AgentEvent[];
+  render(<EventStream events={events} />);
+  expect(screen.getByText(/mem0\/search_memory/)).toBeInTheDocument();
+  expect(screen.getByText(/kineloop context/)).toBeInTheDocument();
+  expect(screen.queryByText(/call_9KNnG4/)).not.toBeInTheDocument();
+});
+
+test("file write chips display a compact filename but open the full path", async () => {
+  const onOpenFile = vi.fn();
+  const events = [
+    {
+      kind: "fileWrite",
+      data: { path: "/Users/me/Kineloop/worktrees/abc/docs/M6-SMOKE.md" },
+    },
+  ] as AgentEvent[];
+  render(<EventStream events={events} onOpenFile={onOpenFile} />);
+  expect(screen.getByText("M6-SMOKE.md")).toBeInTheDocument();
+  expect(screen.queryByText(/Kineloop\/worktrees/)).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: /M6-SMOKE.md/ }));
+  expect(onOpenFile).toHaveBeenCalledWith("/Users/me/Kineloop/worktrees/abc/docs/M6-SMOKE.md");
+});
+
+test("edit tool details render an inline diff instead of raw json when available", async () => {
+  const onOpenFile = vi.fn();
+  const path = "/Users/me/Kineloop/worktrees/48b590f9/docs/M6-SMOKE.md";
+  const events = [
+    {
+      kind: "toolCall",
+      data: {
+        name: `Edit ${path}`,
+        input: JSON.stringify({
+          auto_approved: false,
+          call_id: "call_J4VIOMzVo0yK0t92Ysw1pcVG",
+          changes: {
+            [path]: {
+              move_path: null,
+              type: "update",
+              unified_diff: "@@ -1 +1,2 @@\n codex over acp\n+resume works\n",
+            },
+          },
+        }),
+        toolCallId: "edit-1",
+      },
+    },
+    { kind: "toolStatus", data: { toolCallId: "edit-1", status: "completed", detail: "" } },
+  ] as AgentEvent[];
+
+  render(<EventStream events={events} onOpenFile={onOpenFile} />);
+  await userEvent.click(screen.getByRole("button", { name: /Edit/ }));
+
+  expect(onOpenFile).not.toHaveBeenCalled();
+  expect(screen.getByText("Approval required")).toBeInTheDocument();
+  expect(screen.getAllByText("docs/M6-SMOKE.md").length).toBeGreaterThanOrEqual(1);
+  expect(screen.getByText("resume works")).toBeInTheDocument();
+  expect(screen.queryByText(/auto_approved/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/call_J4VIOMz/)).not.toBeInTheDocument();
+});
+
 test("upgrades a tool chip via toolStatus: spinner while running, check when done", () => {
   const events = [
     { kind: "toolCall", data: { name: "Read", input: "{}", toolCallId: "t1" } },
@@ -136,6 +224,7 @@ test("renders a done event with its summary", () => {
 test("renders an approvalNeeded event with its prompt", () => {
   render(<EventStream events={[APPROVAL]} />);
   expect(screen.getByText(/Run rm -rf build\?/)).toBeInTheDocument();
+  expect(screen.getByText("Approval needed")).toBeInTheDocument();
 });
 
 test("shows a read-only notice (no buttons) when no answer handler is wired", () => {
