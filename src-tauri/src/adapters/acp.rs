@@ -65,36 +65,96 @@ impl AcpProfile {
     }
 }
 
-/// SIGKILLs the child's process group when dropped. `spawn_and_drive` arms one
-/// right after spawn so that EVERY exit path — normal return, the cancel-grace
-/// expiry in run_persisting, a stop-button drop of the whole future, panic
-/// unwind — tears down the full tree. tokio's `kill_on_drop` only reaches the
-/// direct child (the npx wrapper); the descendants (node shim, codex-acp's
-/// native binary) survive it and don't exit on stdin EOF (M6 smoke finding).
-/// Double-kill against the inline killpg at normal teardown is harmless
-/// (ESRCH on a dead group).
-struct KillPgOnDrop(#[cfg(unix)] Option<i32>);
+/// Kills the child's WHOLE process tree when dropped. unix: SIGKILL to the
+/// process group (`process_group(0)` at spawn made pgid == pid). windows: the
+/// guard owns the only handle to a Job Object created with
+/// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` and assigned the child right after
+/// spawn — descendants auto-join the job, and dropping the guard closes the
+/// handle, which makes the kernel terminate every process in it.
+/// `spawn_and_drive` arms one right after spawn so that EVERY exit path —
+/// normal return, the cancel-grace expiry in run_persisting, a stop-button
+/// drop of the whole future, panic unwind — tears down the full tree. tokio's
+/// `kill_on_drop` only reaches the direct child (the npx wrapper); the
+/// descendants (node shim, codex-acp's native binary) survive it and don't
+/// exit on stdin EOF (M6 smoke finding). Double-kill against the explicit
+/// `drop(kill_guard)` at normal teardown is harmless (ESRCH on a dead group /
+/// terminating an already-dead job).
+struct KillTreeOnDrop {
+    #[cfg(unix)]
+    pgid: Option<i32>,
+    #[cfg(windows)]
+    job: Option<win32job::Job>,
+}
 
-impl KillPgOnDrop {
-    fn new(child_id: Option<u32>) -> Self {
+impl KillTreeOnDrop {
+    fn new(child: &tokio::process::Child) -> Self {
         #[cfg(unix)]
-        return Self(child_id.map(|pid| pid as i32));
-        #[cfg(not(unix))]
         {
-            let _ = child_id;
-            Self()
+            Self { pgid: child.id().map(|pid| pid as i32) }
+        }
+        #[cfg(windows)]
+        {
+            Self { job: windows_job_for(child) }
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = child;
+            Self {}
         }
     }
 }
 
-impl Drop for KillPgOnDrop {
+impl Drop for KillTreeOnDrop {
     fn drop(&mut self) {
         #[cfg(unix)]
-        if let Some(pgid) = self.0 {
+        if let Some(pgid) = self.pgid {
             // process_group(0) at spawn made the child's pgid == its pid.
             unsafe { libc::killpg(pgid, libc::SIGKILL) };
         }
+        // windows: nothing to do explicitly — `self.job` (if built) drops right
+        // after this body, closing the only job handle; KILL_ON_JOB_CLOSE then
+        // terminates the whole tree.
     }
+}
+
+/// Build the kill-on-close Job Object for a freshly spawned child (windows).
+/// Assignment right after spawn captures the whole future tree: descendants
+/// auto-join the job, and the create→assign race window (microseconds) is
+/// negligible against npx's tens-of-ms shim→node startup. BEST-EFFORT: any
+/// failure logs and returns None — teardown then degrades to the direct
+/// `child.kill()` (today's behavior), never failing the spawn. Nested jobs are
+/// fine on the supported Windows versions (Win8+), so running Kineloop itself
+/// under a job (some shells/CI) does not break assignment.
+#[cfg(windows)]
+fn windows_job_for(child: &tokio::process::Child) -> Option<win32job::Job> {
+    let job = match win32job::Job::create() {
+        Ok(job) => job,
+        Err(e) => {
+            eprintln!("acp: Job Object create failed: {e} — teardown degrades to direct kill");
+            return None;
+        }
+    };
+    let mut info = match job.query_extended_limit_info() {
+        Ok(info) => info,
+        Err(e) => {
+            eprintln!("acp: Job Object limit query failed: {e} — teardown degrades to direct kill");
+            return None;
+        }
+    };
+    info.limit_kill_on_job_close();
+    if let Err(e) = job.set_extended_limit_info(&mut info) {
+        eprintln!("acp: Job Object limit set failed: {e} — teardown degrades to direct kill");
+        return None;
+    }
+    let Some(handle) = child.raw_handle() else {
+        eprintln!("acp: child handle unavailable — teardown degrades to direct kill");
+        return None;
+    };
+    if let Err(e) = job.assign_process(handle as isize) {
+        eprintln!("acp: Job Object assign failed: {e} — teardown degrades to direct kill");
+        return None;
+    }
+    Some(job)
 }
 
 /// Emitted when a resume request degrades to a fresh session WITH replayed context.
@@ -218,8 +278,8 @@ async fn spawn_and_drive(
         .take()
         .ok_or_else(|| SessionError::Spawn("no stderr".into()))?;
     // Armed before the first await: from here on, dropping this future kills
-    // the whole process group (see KillPgOnDrop).
-    let _pg_guard = KillPgOnDrop::new(child.id());
+    // the whole process tree (see KillTreeOnDrop).
+    let kill_guard = KillTreeOnDrop::new(&child);
 
     // Drain stderr concurrently so a full pipe buffer can't deadlock stdout —
     // same tail-keeping pattern as the codex adapter.
@@ -254,16 +314,12 @@ async fn spawn_and_drive(
     // and the tail task only resolves at stderr EOF (child exit). Awaiting first
     // would hang whenever the agent ignores stdin EOF after the turn completes.
     // The await stays bounded regardless: any process that escapes the kill
-    // (non-unix, or a descendant that left the group) keeps the stderr pipe
-    // open — its lifetime must never wedge the session.
+    // keeps the stderr pipe open — its lifetime must never wedge the session.
     //
-    // Kill the entire process group first (unix): the direct kill below only
-    // reaches the npx wrapper. On non-unix this degrades to the direct kill.
-    #[cfg(unix)]
-    if let Some(pid) = child.id() {
-        // process_group(0) above made the child's pgid == its pid.
-        unsafe { libc::killpg(pid as i32, libc::SIGKILL) };
-    }
+    // Dropping the guard kills the whole tree on both platforms (unix: killpg
+    // on the group; windows: job-handle close → KILL_ON_JOB_CLOSE). The direct
+    // kill below then reaps the npx wrapper itself.
+    drop(kill_guard);
     let _ = child.kill().await;
     let stderr_tail =
         match tokio::time::timeout(std::time::Duration::from_secs(2), stderr_task).await {
@@ -3430,7 +3486,7 @@ mod tests {
             .kill_on_drop(true);
         cmd.process_group(0);
         let mut child = cmd.spawn().unwrap();
-        let guard = KillPgOnDrop::new(child.id());
+        let guard = KillTreeOnDrop::new(&child);
         let mut stdout = child.stdout.take().unwrap();
         let mut out = String::new();
         while out.lines().count() < 2 {
