@@ -71,7 +71,8 @@ async fn handle_conn(
     let Ok(req) = serde_json::from_str::<DecisionRequest>(&line) else {
         return Ok(()); // ignore a malformed request rather than crash the task
     };
-    let decision = request_approval(registry, emitters, &req.session_id, &req.tool, &req.input).await;
+    let decision =
+        request_approval(registry, emitters, &req.session_id, &req.tool, &req.input).await;
     let reply = DecisionReply {
         allow: decision.allow,
         message: decision.message,
@@ -118,7 +119,11 @@ async fn request_decision_inner(
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     Ok(ApprovalDecision {
         allow: reply.allow,
-        selected_option_id: Some(if reply.allow { "allow".to_string() } else { "deny".to_string() }),
+        selected_option_id: Some(if reply.allow {
+            "allow".to_string()
+        } else {
+            "deny".to_string()
+        }),
         message: reply.message,
     })
 }

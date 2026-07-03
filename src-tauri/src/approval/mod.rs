@@ -195,7 +195,11 @@ impl SessionEmitters {
     /// Emit into a session's stream. Returns false when no live emitter is registered (no UI
     /// attached), so the caller can fail closed rather than surface an unanswerable request.
     pub fn emit(&self, session_id: &str, event: AgentEvent) -> bool {
-        let emit = self.map.lock().ok().and_then(|m| m.get(session_id).cloned());
+        let emit = self
+            .map
+            .lock()
+            .ok()
+            .and_then(|m| m.get(session_id).cloned());
         match emit {
             Some(emit) => {
                 emit(event);
@@ -266,15 +270,11 @@ pub fn run_approval_server(
 ) -> std::io::Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
-        mcp::transport::run_stdio_server(
-            tokio::io::stdin(),
-            tokio::io::stdout(),
-            move |call| {
-                let path = socket_path.clone();
-                let sid = session_id.clone();
-                async move { socket::request_decision(&path, &sid, &call).await }
-            },
-        )
+        mcp::transport::run_stdio_server(tokio::io::stdin(), tokio::io::stdout(), move |call| {
+            let path = socket_path.clone();
+            let sid = session_id.clone();
+            async move { socket::request_decision(&path, &sid, &call).await }
+        })
         .await
     })
 }
@@ -314,7 +314,11 @@ mod tests {
         assert!(!reg.resolve("sess-1", "does-not-exist", ApprovalDecision::allow()));
         // Right id, wrong session: rejected and left pending (IPC boundary hardening).
         assert!(!reg.resolve("other-session", "req-1", ApprovalDecision::allow()));
-        assert_eq!(reg.pending_count(), 1, "a mismatched resolve doesn't consume it");
+        assert_eq!(
+            reg.pending_count(),
+            1,
+            "a mismatched resolve doesn't consume it"
+        );
     }
 
     #[tokio::test]
@@ -349,13 +353,28 @@ mod tests {
                 c.fetch_add(1, Ordering::Relaxed);
             }),
         );
-        assert!(emitters.emit("s1", AgentEvent::Done { summary: String::new() }));
+        assert!(emitters.emit(
+            "s1",
+            AgentEvent::Done {
+                summary: String::new()
+            }
+        ));
         // Unknown session: no emitter, returns false so the caller can fail closed.
-        assert!(!emitters.emit("unknown", AgentEvent::Done { summary: String::new() }));
+        assert!(!emitters.emit(
+            "unknown",
+            AgentEvent::Done {
+                summary: String::new()
+            }
+        ));
         assert_eq!(count.load(Ordering::Relaxed), 1);
 
         emitters.deregister("s1");
-        assert!(!emitters.emit("s1", AgentEvent::Done { summary: String::new() }));
+        assert!(!emitters.emit(
+            "s1",
+            AgentEvent::Done {
+                summary: String::new()
+            }
+        ));
     }
 
     #[tokio::test]
@@ -374,14 +393,23 @@ mod tests {
         let reg = registry.clone();
         let emit = emitters.clone();
         let handle = tokio::spawn(async move {
-            request_approval(&reg, &emit, "s1", "Bash", &serde_json::json!({ "command": "ls" }))
-                .await
+            request_approval(
+                &reg,
+                &emit,
+                "s1",
+                "Bash",
+                &serde_json::json!({ "command": "ls" }),
+            )
+            .await
         });
 
         // Wait for the request to be surfaced, then answer it by its minted request id.
         let request_id = loop {
             if let Some(AgentEvent::ApprovalNeeded {
-                request_id, tool, options, ..
+                request_id,
+                tool,
+                options,
+                ..
             }) = captured.lock().unwrap().clone()
             {
                 assert_eq!(tool, "Bash");
@@ -418,6 +446,10 @@ mod tests {
         let decision =
             request_approval(&registry, &emitters, "s1", "Bash", &serde_json::json!({})).await;
         assert!(!decision.allow, "fails closed with no UI to answer");
-        assert_eq!(registry.pending_count(), 0, "the unanswerable request is forgotten");
+        assert_eq!(
+            registry.pending_count(),
+            0,
+            "the unanswerable request is forgotten"
+        );
     }
 }

@@ -9,14 +9,30 @@ pub const PROTOCOL_VERSION: u64 = 1;
 /// The session/update variants M1/M2 consume.
 #[derive(Debug, PartialEq)]
 pub enum SessionUpdate {
-    AgentMessageChunk { text: String },
-    Thought { text: String },
-    ToolCall { title: String, raw_input: String, tool_call_id: Option<String> },
-    ToolCallUpdate { tool_call_id: String, status: String, detail: String },
-    Plan { entries_json: String },
+    AgentMessageChunk {
+        text: String,
+    },
+    Thought {
+        text: String,
+    },
+    ToolCall {
+        title: String,
+        raw_input: String,
+        tool_call_id: Option<String>,
+    },
+    ToolCallUpdate {
+        tool_call_id: String,
+        status: String,
+        detail: String,
+    },
+    Plan {
+        entries_json: String,
+    },
     /// `available_commands_update` — `commands_json` is a JSON array of
     /// `{name, description}`; entries without a name are dropped.
-    AvailableCommands { commands_json: String },
+    AvailableCommands {
+        commands_json: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -44,7 +60,9 @@ pub async fn initialize(peer: &RpcPeer) -> Result<bool, RpcError> {
         .pointer("/agentCapabilities/loadSession")
         .and_then(Value::as_bool)
         .unwrap_or_else(|| {
-            eprintln!("acp: initialize response lacks agentCapabilities.loadSession — assuming false");
+            eprintln!(
+                "acp: initialize response lacks agentCapabilities.loadSession — assuming false"
+            );
             false
         }))
 }
@@ -98,7 +116,13 @@ pub fn acp_mode_for(permission_mode: Option<&str>, available: &[String]) -> Stri
         Some("acceptEdits") if codex_shaped => &["acceptEdits", "auto", "default"],
         Some("acceptEdits") => &["acceptEdits", "default"],
         Some("plan") => &["plan", "read-only", "default"],
-        Some("full") => &["bypassPermissions", "full-access", "acceptEdits", "auto", "default"],
+        Some("full") => &[
+            "bypassPermissions",
+            "full-access",
+            "acceptEdits",
+            "auto",
+            "default",
+        ],
         Some("dontAsk") => &["dontAsk", "full-access", "acceptEdits", "auto", "default"],
         Some("auto") => &["auto", "default"],
         _ => &["default", "read-only"],
@@ -115,7 +139,11 @@ pub fn acp_mode_for(permission_mode: Option<&str>, available: &[String]) -> Stri
 
 /// session/set_mode — point the agent at the session mode matching Kineloop's
 /// permission mode. Best-effort at the call site (a failure must not kill the run).
-pub async fn session_set_mode(peer: &RpcPeer, session_id: &str, mode_id: &str) -> Result<(), RpcError> {
+pub async fn session_set_mode(
+    peer: &RpcPeer,
+    session_id: &str,
+    mode_id: &str,
+) -> Result<(), RpcError> {
     peer.request(
         "session/set_mode",
         serde_json::json!({"sessionId": session_id, "modeId": mode_id}),
@@ -149,7 +177,10 @@ pub async fn session_set_config_option(
 /// every later session/prompt and resume.
 pub async fn session_new(peer: &RpcPeer, cwd: &str) -> Result<(String, SessionModes), RpcError> {
     let result = peer
-        .request("session/new", serde_json::json!({"cwd": cwd, "mcpServers": []}))
+        .request(
+            "session/new",
+            serde_json::json!({"cwd": cwd, "mcpServers": []}),
+        )
         .await?;
     let session_id = result
         .get("sessionId")
@@ -205,8 +236,11 @@ pub async fn session_prompt(
 /// accepting updates until then and must answer pending permission requests
 /// with the cancelled outcome (the adapter's cancel arm does both).
 pub async fn session_cancel(peer: &RpcPeer, session_id: &str) -> Result<(), RpcError> {
-    peer.notify("session/cancel", serde_json::json!({"sessionId": session_id}))
-        .await
+    peer.notify(
+        "session/cancel",
+        serde_json::json!({"sessionId": session_id}),
+    )
+    .await
 }
 
 /// Answer a session/request_permission request: `Some(option_id)` selects that
@@ -274,14 +308,20 @@ pub fn parse_session_update(params: &Value) -> Option<SessionUpdate> {
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string();
-            Some(SessionUpdate::ToolCallUpdate { tool_call_id, status, detail })
+            Some(SessionUpdate::ToolCallUpdate {
+                tool_call_id,
+                status,
+                detail,
+            })
         }
         "plan" => {
             let entries = update.get("entries")?;
             if !entries.is_array() {
                 return None;
             }
-            Some(SessionUpdate::Plan { entries_json: entries.to_string() })
+            Some(SessionUpdate::Plan {
+                entries_json: entries.to_string(),
+            })
         }
         "available_commands_update" => {
             let commands: Vec<Value> = update
@@ -437,7 +477,10 @@ mod tests {
         let (session_id, modes) = session_new(&peer, "/w").await.unwrap();
         assert_eq!(session_id, "acp-abc");
         assert_eq!(modes.current.as_deref(), Some("auto"));
-        assert_eq!(modes.available, vec!["auto".to_string(), "default".to_string()]);
+        assert_eq!(
+            modes.available,
+            vec!["auto".to_string(), "default".to_string()]
+        );
         agent_task.await.unwrap();
     }
 
@@ -451,7 +494,10 @@ mod tests {
         }));
         let modes = session_load(&peer, "s", "/w").await.unwrap();
         assert_eq!(modes.current.as_deref(), Some("acceptEdits"));
-        assert_eq!(modes.available, vec!["acceptEdits".to_string(), "default".to_string()]);
+        assert_eq!(
+            modes.available,
+            vec!["acceptEdits".to_string(), "default".to_string()]
+        );
         agent_task.await.unwrap();
     }
 
@@ -480,7 +526,11 @@ mod tests {
         assert_eq!(modes.current.as_deref(), Some("plan"));
         assert_eq!(
             modes.available,
-            vec!["plan".to_string(), "default".to_string(), "acceptEdits".to_string()]
+            vec![
+                "plan".to_string(),
+                "default".to_string(),
+                "acceptEdits".to_string()
+            ]
         );
     }
 
@@ -547,7 +597,10 @@ mod tests {
         // unknown-everything: only "default" advertised and permission_mode unmapped
         let only_default = vec!["default".to_string()];
         assert_eq!(acp_mode_for(Some("plan"), &only_default), "default");
-        assert_eq!(acp_mode_for(Some("weird-unknown-mode"), &only_default), "default");
+        assert_eq!(
+            acp_mode_for(Some("weird-unknown-mode"), &only_default),
+            "default"
+        );
     }
 
     #[tokio::test]
@@ -569,7 +622,10 @@ mod tests {
         let msg: Value = serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
         assert_eq!(msg["method"], "session/cancel");
         assert_eq!(msg["params"]["sessionId"], "acp-abc");
-        assert!(msg.get("id").is_none(), "cancel is a notification — no id, no response");
+        assert!(
+            msg.get("id").is_none(),
+            "cancel is a notification — no id, no response"
+        );
     }
 
     #[tokio::test]
@@ -607,7 +663,9 @@ mod tests {
         });
         assert_eq!(
             parse_session_update(&params),
-            Some(SessionUpdate::Thought { text: "pondering".into() })
+            Some(SessionUpdate::Thought {
+                text: "pondering".into()
+            })
         );
     }
 
@@ -623,7 +681,11 @@ mod tests {
             }
         });
         match parse_session_update(&params) {
-            Some(SessionUpdate::ToolCall { title, raw_input, tool_call_id }) => {
+            Some(SessionUpdate::ToolCall {
+                title,
+                raw_input,
+                tool_call_id,
+            }) => {
                 assert_eq!(title, "Read file");
                 assert!(raw_input.contains("/x"));
                 assert_eq!(tool_call_id.as_deref(), Some("t1"));
@@ -797,13 +859,17 @@ mod tests {
 
     #[test]
     fn parses_fs_read_params_with_optional_line_and_limit() {
-        let params = serde_json::json!({"sessionId": "s", "path": "/w/x.txt", "line": 5, "limit": 10});
+        let params =
+            serde_json::json!({"sessionId": "s", "path": "/w/x.txt", "line": 5, "limit": 10});
         assert_eq!(
             parse_fs_read(&params),
             Some(("/w/x.txt".to_string(), Some(5), Some(10)))
         );
         let bare = serde_json::json!({"sessionId": "s", "path": "/w/x.txt"});
-        assert_eq!(parse_fs_read(&bare), Some(("/w/x.txt".to_string(), None, None)));
+        assert_eq!(
+            parse_fs_read(&bare),
+            Some(("/w/x.txt".to_string(), None, None))
+        );
         assert_eq!(parse_fs_read(&serde_json::json!({"sessionId": "s"})), None);
     }
 
@@ -814,7 +880,10 @@ mod tests {
             parse_fs_write(&params),
             Some(("/w/x.txt".to_string(), "hi".to_string()))
         );
-        assert_eq!(parse_fs_write(&serde_json::json!({"path": "/w/x.txt"})), None);
+        assert_eq!(
+            parse_fs_write(&serde_json::json!({"path": "/w/x.txt"})),
+            None
+        );
     }
 
     #[tokio::test]
@@ -826,11 +895,21 @@ mod tests {
         let (agent_read, mut agent_write) = tokio::io::split(theirs);
         let agent = tokio::spawn(async move {
             let mut lines = BufReader::new(agent_read).lines();
-            let req: Value = serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
-            assert_eq!(req["params"]["clientCapabilities"]["fs"]["readTextFile"], true);
-            assert_eq!(req["params"]["clientCapabilities"]["fs"]["writeTextFile"], true);
+            let req: Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(
+                req["params"]["clientCapabilities"]["fs"]["readTextFile"],
+                true
+            );
+            assert_eq!(
+                req["params"]["clientCapabilities"]["fs"]["writeTextFile"],
+                true
+            );
             let resp = serde_json::json!({"jsonrpc":"2.0","id":req["id"],"result":{}});
-            agent_write.write_all(format!("{resp}\n").as_bytes()).await.unwrap();
+            agent_write
+                .write_all(format!("{resp}\n").as_bytes())
+                .await
+                .unwrap();
         });
         let _ = initialize(&peer).await.unwrap();
         agent.await.unwrap();
@@ -848,17 +927,26 @@ mod tests {
         let (agent_read, mut agent_write) = tokio::io::split(theirs);
         let agent = tokio::spawn(async move {
             let mut lines = BufReader::new(agent_read).lines();
-            let req: Value = serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            let req: Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
             assert_eq!(req["method"], "session/set_config_option");
             assert_eq!(req["params"]["sessionId"], "acp-abc");
             assert_eq!(req["params"]["configId"], "model");
             assert_eq!(req["params"]["value"], "sonnet");
-            assert!(req["params"]["value"].is_string(), "value must be a bare string");
+            assert!(
+                req["params"]["value"].is_string(),
+                "value must be a bare string"
+            );
             let resp = serde_json::json!({"jsonrpc": "2.0", "id": req["id"],
                 "result": {"configOptions": []}});
-            agent_write.write_all(format!("{resp}\n").as_bytes()).await.unwrap();
+            agent_write
+                .write_all(format!("{resp}\n").as_bytes())
+                .await
+                .unwrap();
         });
-        session_set_config_option(&peer, "acp-abc", "model", "sonnet").await.unwrap();
+        session_set_config_option(&peer, "acp-abc", "model", "sonnet")
+            .await
+            .unwrap();
         agent.await.unwrap();
     }
 

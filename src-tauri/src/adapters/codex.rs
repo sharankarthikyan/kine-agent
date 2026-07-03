@@ -1,8 +1,8 @@
 use crate::adapter::{AgentAdapter, EventSink, Prompt, SessionError};
-use crate::events::AgentEvent;
 use crate::adapters::{
     feed_prompt_via_stdin, is_batch_shim, read_capped_line, CappedLine, MAX_LINE_BYTES,
 };
+use crate::events::AgentEvent;
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -128,7 +128,11 @@ fn parse_item(item: Option<&Value>) -> Vec<AgentEvent> {
                 .get("arguments")
                 .map(|a| a.to_string())
                 .unwrap_or_default();
-            vec![AgentEvent::ToolCall { name, input, tool_call_id: None }]
+            vec![AgentEvent::ToolCall {
+                name,
+                input,
+                tool_call_id: None,
+            }]
         }
         Some("file_change") | Some("patch") => file_paths_from_change(item)
             .into_iter()
@@ -349,13 +353,10 @@ mod tests {
         // `item.completed` does — otherwise incrementally-streamed text duplicates.
         let updated = r#"{"type":"item.updated","item":{"type":"agent_message","text":"par"}}"#;
         assert!(parse_line(updated).is_empty());
-        let completed =
-            r#"{"type":"item.completed","item":{"type":"agent_message","text":"partial then full"}}"#;
+        let completed = r#"{"type":"item.completed","item":{"type":"agent_message","text":"partial then full"}}"#;
         let events = parse_line(completed);
         assert_eq!(events.len(), 1);
-        assert!(
-            matches!(&events[0], AgentEvent::Token { text } if text == "partial then full")
-        );
+        assert!(matches!(&events[0], AgentEvent::Token { text } if text == "partial then full"));
     }
 
     #[test]
@@ -428,7 +429,10 @@ mod tests {
         // writes; Full is not a sandbox tier — it uses the bypass flag instead.
         assert_eq!(PermissionMode::Plan.codex_sandbox(), "read-only");
         assert_eq!(PermissionMode::Default.codex_sandbox(), "read-only");
-        assert_eq!(PermissionMode::AcceptEdits.codex_sandbox(), "workspace-write");
+        assert_eq!(
+            PermissionMode::AcceptEdits.codex_sandbox(),
+            "workspace-write"
+        );
         assert!(PermissionMode::Full.is_full());
     }
 }

@@ -11,9 +11,10 @@ fn main() {
         {
             let session = flag_value(&args, "--session").unwrap_or_default();
             let socket = flag_value(&args, "--socket").unwrap_or_default();
-            if let Err(e) =
-                kineloop_lib::approval::run_approval_server(session, std::path::PathBuf::from(socket))
-            {
+            if let Err(e) = kineloop_lib::approval::run_approval_server(
+                session,
+                std::path::PathBuf::from(socket),
+            ) {
                 eprintln!("approval server error: {e}");
                 std::process::exit(1);
             }

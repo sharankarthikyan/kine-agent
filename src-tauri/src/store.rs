@@ -397,11 +397,12 @@ impl SessionStore {
     /// process is from a run that died with the app and would otherwise be stranded
     /// "running" forever (blocking nothing, but misreporting state). Returns rows updated.
     pub async fn reset_running_sessions(&self) -> Result<u64, StoreError> {
-        let result =
-            sqlx::query("UPDATE sessions SET status = 'error', updated_at = ? WHERE status = 'running'")
-                .bind(now_ms())
-                .execute(&self.pool)
-                .await?;
+        let result = sqlx::query(
+            "UPDATE sessions SET status = 'error', updated_at = ? WHERE status = 'running'",
+        )
+        .bind(now_ms())
+        .execute(&self.pool)
+        .await?;
         Ok(result.rows_affected())
     }
 
@@ -785,8 +786,14 @@ mod tests {
             .await
             .unwrap();
         // Two user turns.
-        store.append_event("s1", "prompt", r#"{"text":"one"}"#).await.unwrap();
-        store.append_event("s1", "prompt", r#"{"text":"two"}"#).await.unwrap();
+        store
+            .append_event("s1", "prompt", r#"{"text":"one"}"#)
+            .await
+            .unwrap();
+        store
+            .append_event("s1", "prompt", r#"{"text":"two"}"#)
+            .await
+            .unwrap();
         // Three tool calls.
         for _ in 0..3 {
             store
@@ -795,12 +802,27 @@ mod tests {
                 .unwrap();
         }
         // Two distinct files across three writes (a.rs written twice, b.rs once).
-        store.append_event("s1", "fileWrite", r#"{"path":"a.rs"}"#).await.unwrap();
-        store.append_event("s1", "fileWrite", r#"{"path":"a.rs"}"#).await.unwrap();
-        store.append_event("s1", "fileWrite", r#"{"path":"b.rs"}"#).await.unwrap();
+        store
+            .append_event("s1", "fileWrite", r#"{"path":"a.rs"}"#)
+            .await
+            .unwrap();
+        store
+            .append_event("s1", "fileWrite", r#"{"path":"a.rs"}"#)
+            .await
+            .unwrap();
+        store
+            .append_event("s1", "fileWrite", r#"{"path":"b.rs"}"#)
+            .await
+            .unwrap();
         // Non-counted kinds must not inflate any tally.
-        store.append_event("s1", "token", r#"{"text":"hi"}"#).await.unwrap();
-        store.append_event("s1", "done", r#"{"summary":"ok"}"#).await.unwrap();
+        store
+            .append_event("s1", "token", r#"{"text":"hi"}"#)
+            .await
+            .unwrap();
+        store
+            .append_event("s1", "done", r#"{"summary":"ok"}"#)
+            .await
+            .unwrap();
 
         let sessions = store.list_sessions().await.unwrap();
         let s1 = sessions.iter().find(|s| s.id == "s1").unwrap();
@@ -894,7 +916,10 @@ mod tests {
             .create_session("s2", "claude", "/repo", "/wt/s2", "agent/s2", "kept")
             .await
             .unwrap();
-        store.append_event("s1", "token", r#"{"text":"x"}"#).await.unwrap();
+        store
+            .append_event("s1", "token", r#"{"text":"x"}"#)
+            .await
+            .unwrap();
         store.set_title_override("s1", "renamed").await.unwrap();
 
         let removed = store.delete_session("s1").await.unwrap();

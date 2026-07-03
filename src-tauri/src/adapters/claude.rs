@@ -1,8 +1,8 @@
 use crate::adapter::{AgentAdapter, EventSink, Prompt, SessionError};
-use crate::events::AgentEvent;
 use crate::adapters::{
     feed_prompt_via_stdin, is_batch_shim, read_capped_line, CappedLine, MAX_LINE_BYTES,
 };
+use crate::events::AgentEvent;
 use serde_json::Value;
 use std::path::PathBuf;
 use tokio::io::{AsyncReadExt, BufReader};

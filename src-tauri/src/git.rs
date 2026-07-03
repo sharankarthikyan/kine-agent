@@ -414,7 +414,10 @@ mod tests {
 
         fs::create_dir_all(dir.join("src")).unwrap();
         fs::write(dir.join("src/app.rs"), "fn a() {}\n").unwrap();
-        assert_eq!(read_worktree_file(&dir, "src/app.rs").unwrap(), "fn a() {}\n");
+        assert_eq!(
+            read_worktree_file(&dir, "src/app.rs").unwrap(),
+            "fn a() {}\n"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

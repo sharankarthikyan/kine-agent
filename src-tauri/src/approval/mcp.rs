@@ -293,7 +293,10 @@ mod tests {
     #[test]
     fn describe_summarizes_common_tools() {
         assert_eq!(describe("Bash", &json!({ "command": "make" })), "Run: make");
-        assert_eq!(describe("Edit", &json!({ "file_path": "a.rs" })), "Edit: a.rs");
+        assert_eq!(
+            describe("Edit", &json!({ "file_path": "a.rs" })),
+            "Edit: a.rs"
+        );
         assert_eq!(describe("Read", &json!({})), "Read");
     }
 }

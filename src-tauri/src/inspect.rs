@@ -410,7 +410,12 @@ pub fn list_capabilities(agent: &str, worktree: &Path) -> Capabilities {
     // Subagents: their authoritative identity is the frontmatter `name` field, not the
     // filename (Claude Code invokes the agent by `name`; the filename is irrelevant). So we
     // display `name`, falling back to the file stem only when it is absent.
-    collect_md(&worktree_claude.join("agents"), "project", true, &mut subagents);
+    collect_md(
+        &worktree_claude.join("agents"),
+        "project",
+        true,
+        &mut subagents,
+    );
     if let Some(c) = &user_claude {
         collect_md(&c.join("agents"), "user", true, &mut subagents);
     }
@@ -420,7 +425,12 @@ pub fn list_capabilities(agent: &str, worktree: &Path) -> Capabilities {
     }
     // Slash commands are invoked by their filename (`/<stem>`), so the file stem is the
     // authoritative identifier — no frontmatter `name` override.
-    collect_md(&worktree_claude.join("commands"), "project", false, &mut commands);
+    collect_md(
+        &worktree_claude.join("commands"),
+        "project",
+        false,
+        &mut commands,
+    );
     if let Some(c) = &user_claude {
         collect_md(&c.join("commands"), "user", false, &mut commands);
     }
@@ -804,7 +814,9 @@ fn list_plugins_with_home(home: Option<&Path>) -> Vec<PluginEntry> {
 /// Read a JSON file into its top-level object, or an empty object when the file is absent.
 /// A present-but-non-object (or unparseable) file is rejected rather than silently
 /// clobbered, so a hand-edited config is never destroyed by a mutation.
-fn read_json_object(path: &Path) -> Result<serde_json::Map<String, serde_json::Value>, InspectError> {
+fn read_json_object(
+    path: &Path,
+) -> Result<serde_json::Map<String, serde_json::Value>, InspectError> {
     match std::fs::read_to_string(path) {
         Ok(text) => {
             let trimmed = text.trim();
@@ -967,7 +979,9 @@ impl McpTransport {
                     config.insert(
                         "args".into(),
                         serde_json::Value::Array(
-                            args.iter().map(|a| serde_json::Value::String(a.clone())).collect(),
+                            args.iter()
+                                .map(|a| serde_json::Value::String(a.clone()))
+                                .collect(),
                         ),
                     );
                 }
@@ -1296,7 +1310,11 @@ mod tests {
             "filename must not be shown when frontmatter declares a name"
         );
         // The backing path still points at the real file for read/edit/delete.
-        let cap = caps.subagents.iter().find(|c| c.name == "real-reviewer").unwrap();
+        let cap = caps
+            .subagents
+            .iter()
+            .find(|c| c.name == "real-reviewer")
+            .unwrap();
         assert!(cap.path.ends_with("/dummy.md"));
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1677,11 +1695,18 @@ mod tests {
 
         let agent = create_capability(&claude, CapabilityKind::Agent, "reviewer").unwrap();
         assert!(agent.ends_with("/.claude/agents/reviewer.md"), "{agent}");
-        assert!(std::fs::read_to_string(&agent).unwrap().contains("name: reviewer"));
+        assert!(std::fs::read_to_string(&agent)
+            .unwrap()
+            .contains("name: reviewer"));
 
         let skill = create_capability(&claude, CapabilityKind::Skill, "deploy").unwrap();
-        assert!(skill.ends_with("/.claude/skills/deploy/SKILL.md"), "{skill}");
-        assert!(std::fs::read_to_string(&skill).unwrap().contains("description:"));
+        assert!(
+            skill.ends_with("/.claude/skills/deploy/SKILL.md"),
+            "{skill}"
+        );
+        assert!(std::fs::read_to_string(&skill)
+            .unwrap()
+            .contains("description:"));
 
         let cmd = create_capability(&claude, CapabilityKind::Command, "ship").unwrap();
         assert!(cmd.ends_with("/.claude/commands/ship.md"), "{cmd}");
@@ -1772,13 +1797,12 @@ mod tests {
         // Reads back through the same parser the UI uses.
         let entries = list_hooks_with_home(&dir, None);
         assert_eq!(entries.len(), 2, "{entries:?}");
-        assert!(entries
-            .iter()
-            .any(|e| e.event == "SessionStart" && e.command == "echo start" && e.matcher.is_none()));
-        assert!(entries
-            .iter()
-            .any(|e| e.event == "PreToolUse" && e.command == "echo bash"
-                && e.matcher.as_deref() == Some("Bash")));
+        assert!(entries.iter().any(|e| e.event == "SessionStart"
+            && e.command == "echo start"
+            && e.matcher.is_none()));
+        assert!(entries.iter().any(|e| e.event == "PreToolUse"
+            && e.command == "echo bash"
+            && e.matcher.as_deref() == Some("Bash")));
 
         // Preserves unrelated existing keys.
         let raw: serde_json::Value =
@@ -1794,7 +1818,11 @@ mod tests {
         let claude = dir.join(".claude");
         std::fs::create_dir_all(&claude).unwrap();
         let settings = claude.join("settings.json");
-        std::fs::write(&settings, r#"{"model":"opus","permissions":{"allow":["Bash"]}}"#).unwrap();
+        std::fs::write(
+            &settings,
+            r#"{"model":"opus","permissions":{"allow":["Bash"]}}"#,
+        )
+        .unwrap();
 
         add_hook(&settings, "Stop", None, "echo done").unwrap();
 
@@ -1901,15 +1929,32 @@ mod tests {
         assert_eq!(server["url"], "https://example.com/mcp");
         // The listing surfaces the url as the detail (no command present).
         let entries = list_mcp_servers_with_home(&dir, None);
-        assert_eq!(entries[0].detail.as_deref(), Some("https://example.com/mcp"));
+        assert_eq!(
+            entries[0].detail.as_deref(),
+            Some("https://example.com/mcp")
+        );
 
         // Unknown transport kind and empty url are rejected.
         assert!(matches!(
-            add_mcp_server(&mcp, "bad", &McpTransport::Remote { kind: "ftp".into(), url: "x".into() }),
+            add_mcp_server(
+                &mcp,
+                "bad",
+                &McpTransport::Remote {
+                    kind: "ftp".into(),
+                    url: "x".into()
+                }
+            ),
             Err(InspectError::InvalidConfig(_))
         ));
         assert!(matches!(
-            add_mcp_server(&mcp, "empty", &McpTransport::Remote { kind: "http".into(), url: "  ".into() }),
+            add_mcp_server(
+                &mcp,
+                "empty",
+                &McpTransport::Remote {
+                    kind: "http".into(),
+                    url: "  ".into()
+                }
+            ),
             Err(InspectError::InvalidName(_))
         ));
 

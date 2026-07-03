@@ -263,10 +263,9 @@ fn salvage_id_and_method(head: &str) -> (Option<Value>, Option<String>) {
         .unwrap_or(head.len());
     // Only scalar ids are trustworthy; anything else means the match landed
     // inside nested payload text.
-    let id =
-        scalar_before(head, "\"id\"", payload_pos).filter(|v| v.is_number() || v.is_string());
-    let method = scalar_before(head, "\"method\"", payload_pos)
-        .and_then(|v| v.as_str().map(str::to_string));
+    let id = scalar_before(head, "\"id\"", payload_pos).filter(|v| v.is_number() || v.is_string());
+    let method =
+        scalar_before(head, "\"method\"", payload_pos).and_then(|v| v.as_str().map(str::to_string));
     (id, method)
 }
 
@@ -304,7 +303,10 @@ async fn handle_oversized(
         (Some(id), None) => {
             // A response to one of our requests, too big to parse.
             let key = id.to_string();
-            let tx = pending.lock().unwrap_or_else(|p| p.into_inner()).remove(&key);
+            let tx = pending
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(&key);
             if let Some(tx) = tx {
                 let _ = tx.send(Err(RpcError::Protocol(format!(
                     "oversized response dropped ({total} bytes)"
@@ -433,7 +435,9 @@ mod tests {
         let (_r, mut agent_tx) = tokio::io::split(agent);
         let mut inbound = peer.inbound();
         agent_tx
-            .write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"n\":1}}\n")
+            .write_all(
+                b"{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"n\":1}}\n",
+            )
             .await
             .unwrap();
         agent_tx
@@ -532,10 +536,7 @@ mod tests {
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         let (inbound_tx, _inbound_rx) = mpsc::unbounded_channel();
         let (tx, rx) = oneshot::channel();
-        pending
-            .lock()
-            .unwrap()
-            .insert("\"abc\"".to_string(), tx);
+        pending.lock().unwrap().insert("\"abc\"".to_string(), tx);
         route_line(
             "{\"jsonrpc\":\"2.0\",\"id\":\"abc\",\"result\":{\"ok\":true}}",
             &pending,
@@ -576,8 +577,7 @@ mod tests {
         // A `method` that only occurs INSIDE the result payload must not be
         // trusted: this is a response, not a request. Trusting it would write an
         // unsolicited error line and leave the pending request dangling.
-        let head =
-            r#"{"jsonrpc":"2.0","id":9,"result":{"items":[{"id":"x","method":"GET"},"AAAA"#;
+        let head = r#"{"jsonrpc":"2.0","id":9,"result":{"items":[{"id":"x","method":"GET"},"AAAA"#;
         let (id, method) = salvage_id_and_method(head);
         assert_eq!(id, Some(serde_json::json!(9)));
         assert_eq!(method, None, "payload-nested method must be untrusted");
@@ -593,7 +593,10 @@ mod tests {
         let head = r#"{"jsonrpc":"2.0","id":12,"error":{"code":-32000,"message":"m","data":{"method":"GET","blob":"AAAA"#;
         let (id, method) = salvage_id_and_method(head);
         assert_eq!(id, Some(serde_json::json!(12)));
-        assert_eq!(method, None, "error-payload-nested method must be untrusted");
+        assert_eq!(
+            method, None,
+            "error-payload-nested method must be untrusted"
+        );
     }
 
     #[tokio::test]
@@ -616,7 +619,10 @@ mod tests {
             serde_json::from_str(&agent_rx.next_line().await.unwrap().unwrap()).unwrap();
         assert_eq!(ans["id"], 5);
         assert_eq!(ans["error"]["code"], -32600);
-        assert!(ans["error"]["message"].as_str().unwrap().contains("line limit"));
+        assert!(ans["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("line limit"));
         // The transport stays alive: a normal follow-up line still routes.
         let mut agent_tx = writer_task.await.unwrap();
         agent_tx
@@ -733,7 +739,10 @@ mod tests {
             tokio::io::AsyncReadExt::read_to_end(&mut BufReader::new(stdin_agent_read), &mut buf),
         )
         .await;
-        assert!(eof.is_ok(), "agent must see stdin EOF once all peer clones drop");
+        assert!(
+            eof.is_ok(),
+            "agent must see stdin EOF once all peer clones drop"
+        );
     }
 
     #[tokio::test]

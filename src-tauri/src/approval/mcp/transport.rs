@@ -47,7 +47,10 @@ where
             continue; // skip junk lines rather than aborting the session
         };
         let id = req.get("id").cloned().unwrap_or(Value::Null);
-        let method = req.get("method").and_then(Value::as_str).unwrap_or_default();
+        let method = req
+            .get("method")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         let params = req.get("params").cloned().unwrap_or(Value::Null);
 
         let response: Option<Value> = match method {
@@ -61,7 +64,11 @@ where
                     let decision = decide(call).await;
                     Some(tool_call_result(&id, &decision, &input))
                 }
-                None => Some(error_response(&id, -32602, "unknown or malformed tool call")),
+                None => Some(error_response(
+                    &id,
+                    -32602,
+                    "unknown or malformed tool call",
+                )),
             },
             "ping" => Some(json!({ "jsonrpc": "2.0", "id": id, "result": {} })),
             // Unknown notification (no id): ignore. Unknown request (has id): error.
@@ -132,7 +139,9 @@ mod tests {
         );
         let responses = drive(input, true).await;
         assert_eq!(responses.len(), 1);
-        let text = responses[0]["result"]["content"][0]["text"].as_str().unwrap();
+        let text = responses[0]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap();
         let decision: Value = serde_json::from_str(text).unwrap();
         assert_eq!(decision["behavior"], "allow");
         assert_eq!(decision["updatedInput"], json!({ "command": "ls" }));
@@ -145,7 +154,9 @@ mod tests {
             "\n",
         );
         let responses = drive(input, false).await;
-        let text = responses[0]["result"]["content"][0]["text"].as_str().unwrap();
+        let text = responses[0]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap();
         let decision: Value = serde_json::from_str(text).unwrap();
         assert_eq!(decision["behavior"], "deny");
         assert_eq!(decision["message"], "user denied");
@@ -159,7 +170,11 @@ mod tests {
             "\n",
         );
         let responses = drive(input, true).await;
-        assert_eq!(responses.len(), 1, "junk line skipped, only the request answered");
+        assert_eq!(
+            responses.len(),
+            1,
+            "junk line skipped, only the request answered"
+        );
         assert_eq!(responses[0]["id"], 9);
         assert_eq!(responses[0]["error"]["code"], -32601);
     }

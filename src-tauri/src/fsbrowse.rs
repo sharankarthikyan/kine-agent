@@ -105,7 +105,11 @@ mod tests {
         let entries = list_dir(dir.to_str().unwrap()).unwrap();
         assert_eq!(entries[0].name, "sub");
         assert!(entries[0].is_dir);
-        let files: Vec<_> = entries.iter().filter(|e| !e.is_dir).map(|e| &e.name).collect();
+        let files: Vec<_> = entries
+            .iter()
+            .filter(|e| !e.is_dir)
+            .map(|e| &e.name)
+            .collect();
         assert_eq!(files, vec!["a.txt", "z.txt"]);
 
         let _ = fs::remove_dir_all(&dir);
@@ -124,7 +128,10 @@ mod tests {
     fn read_file_reads_and_rejects_directories() {
         let dir = test_dir("read");
         fs::write(dir.join("hi.txt"), "hello\n").unwrap();
-        assert_eq!(read_file(dir.join("hi.txt").to_str().unwrap()).unwrap(), "hello\n");
+        assert_eq!(
+            read_file(dir.join("hi.txt").to_str().unwrap()).unwrap(),
+            "hello\n"
+        );
         assert!(read_file(dir.to_str().unwrap()).is_err());
         let _ = fs::remove_dir_all(&dir);
     }

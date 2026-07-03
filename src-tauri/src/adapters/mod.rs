@@ -128,7 +128,10 @@ mod tests {
             CappedLine::Skipped { total, head } => {
                 assert_eq!(*total, 64);
                 assert!(head.len() <= SKIPPED_HEAD_BYTES);
-                assert!(head.starts_with(b"xxxx"), "head must hold the line's first bytes");
+                assert!(
+                    head.starts_with(b"xxxx"),
+                    "head must hold the line's first bytes"
+                );
             }
             _other => panic!("expected Skipped, got a different variant"),
         }
@@ -169,12 +172,16 @@ mod tests {
     fn batch_shim_detected_case_insensitively() {
         use std::ffi::OsString;
         // Windows npm shims — prompt must go via stdin.
-        assert!(is_batch_shim(&OsString::from(r"C:\Users\me\AppData\Roaming\npm\claude.cmd")));
+        assert!(is_batch_shim(&OsString::from(
+            r"C:\Users\me\AppData\Roaming\npm\claude.cmd"
+        )));
         assert!(is_batch_shim(&OsString::from(r"C:\npm\codex.CMD")));
         assert!(is_batch_shim(&OsString::from("agy.bat")));
         // Real executables and Unix paths — prompt stays a CLI argument.
         assert!(!is_batch_shim(&OsString::from("/usr/local/bin/claude")));
-        assert!(!is_batch_shim(&OsString::from(r"C:\Program Files\nodejs\claude.exe")));
+        assert!(!is_batch_shim(&OsString::from(
+            r"C:\Program Files\nodejs\claude.exe"
+        )));
         assert!(!is_batch_shim(&OsString::from("claude")));
     }
 }

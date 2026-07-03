@@ -93,7 +93,10 @@ mod tests {
 
     #[test]
     fn from_wire_parses_every_known_id() {
-        assert_eq!(PermissionMode::from_wire("plan"), Some(PermissionMode::Plan));
+        assert_eq!(
+            PermissionMode::from_wire("plan"),
+            Some(PermissionMode::Plan)
+        );
         assert_eq!(
             PermissionMode::from_wire("default"),
             Some(PermissionMode::Default)
@@ -102,7 +105,10 @@ mod tests {
             PermissionMode::from_wire("acceptEdits"),
             Some(PermissionMode::AcceptEdits)
         );
-        assert_eq!(PermissionMode::from_wire("full"), Some(PermissionMode::Full));
+        assert_eq!(
+            PermissionMode::from_wire("full"),
+            Some(PermissionMode::Full)
+        );
         assert_eq!(
             PermissionMode::from_wire("dontAsk"),
             Some(PermissionMode::DontAsk)
@@ -132,7 +138,10 @@ mod tests {
         // The quirk-fix: Default must be read-only (Codex used to write on default).
         assert_eq!(PermissionMode::Default.codex_sandbox(), "read-only");
         assert_eq!(PermissionMode::Plan.codex_sandbox(), "read-only");
-        assert_eq!(PermissionMode::AcceptEdits.codex_sandbox(), "workspace-write");
+        assert_eq!(
+            PermissionMode::AcceptEdits.codex_sandbox(),
+            "workspace-write"
+        );
         assert!(PermissionMode::Full.is_full());
     }
 
