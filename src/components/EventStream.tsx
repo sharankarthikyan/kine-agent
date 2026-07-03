@@ -695,6 +695,7 @@ function ToolDetails({
           {summary && <div className="mt-1 break-words font-mono">{summary}</div>}
           {terminalText !== undefined && (
             <TerminalView
+              className="mt-2"
               text={terminalText}
               running={status === "pending" || status === "in_progress"}
               exitCode={terminalExit?.exitCode ?? null}
