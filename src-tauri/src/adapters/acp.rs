@@ -13,7 +13,7 @@ use crate::acp::client::{self, SessionUpdate};
 use crate::acp::jsonrpc::{Inbound, RpcPeer};
 use crate::adapter::{AgentAdapter, EventSink, Prompt, SessionError};
 use crate::events::AgentEvent;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -207,9 +207,30 @@ impl TerminalBuffer {
 #[derive(Default)]
 struct TerminalCoalescer {
     terminals: HashMap<String, TerminalBuffer>,
+    /// tool_call_ids whose `TerminalExit` has already been processed
+    /// (`finish` called). Guards two things: (1) `is_new` below must never
+    /// re-arm the synthetic in_progress status for a stray post-exit delta —
+    /// that would flip a completed chip back to a spinner under the
+    /// frontend's last-write-wins statusById; (2) `push` drops post-exit
+    /// bytes outright rather than opening a fresh buffer for the same id —
+    /// a fresh buffer would reset `emitted_bytes` to 0, reopening the exact
+    /// per-terminal cap hole `TERMINAL_EMIT_CAP_BYTES` exists to close.
+    finished: HashSet<String>,
 }
 
 impl TerminalCoalescer {
+    /// True when `tool_call_id` has neither a live buffer nor a recorded
+    /// finish — i.e. the FIRST time this terminal's output is seen. The
+    /// caller (`handle_notification`) uses this to synthesize an
+    /// `in_progress` ToolStatus on the first output byte: neither pinned
+    /// agent emits a status-bearing update mid-run (codex deltas are
+    /// status-less; claude's only status rides the completion message), so
+    /// without this the frontend's live tail — gated on a pending/
+    /// in_progress statusById — never renders (final-review finding).
+    fn is_new(&self, tool_call_id: &str) -> bool {
+        !self.terminals.contains_key(tool_call_id) && !self.finished.contains(tool_call_id)
+    }
+
     /// Appends `data` to `tool_call_id`'s buffer. Cumulative emitted+buffered
     /// bytes per terminal are capped at `TERMINAL_EMIT_CAP_BYTES`: bytes
     /// beyond the cap are counted into `dropped_bytes`, never stored — one
@@ -217,8 +238,14 @@ impl TerminalCoalescer {
     /// applied UTF-8 char-boundary safe (walking `char_indices`, no nightly
     /// APIs) so a multi-byte char straddling the cap is dropped whole, never
     /// split. When the buffer reaches `TERMINAL_FLUSH_BYTES` it emits ONE
-    /// `AgentEvent::TerminalOutput` with the buffered string and clears.
+    /// `AgentEvent::TerminalOutput` with the buffered string and clears. A
+    /// tool_call_id already recorded in `finished` (a stray delta arriving
+    /// after its TerminalExit) is dropped outright — see the `finished`
+    /// field doc comment.
     fn push(&mut self, tool_call_id: &str, data: &str, sink: &dyn EventSink) {
+        if self.finished.contains(tool_call_id) {
+            return;
+        }
         let buf = self
             .terminals
             .entry(tool_call_id.to_string())
@@ -265,8 +292,12 @@ impl TerminalCoalescer {
     /// count for the `TerminalExit` event (`None` when nothing was dropped,
     /// so the event's `dropped_bytes` field serializes as absent). A
     /// terminal that never called `push` (no buffer present) also returns
-    /// `None`.
+    /// `None`. Records `tool_call_id` into `finished` unconditionally
+    /// (even on the no-buffer path) so a later stray delta for this id is
+    /// recognized as post-exit — never re-arming the synthetic status or
+    /// reopening a fresh buffer.
     fn finish(&mut self, tool_call_id: &str, sink: &dyn EventSink) -> Option<u64> {
+        self.finished.insert(tool_call_id.to_string());
         let mut buf = self.terminals.remove(tool_call_id)?;
         Self::flush_buffer(tool_call_id, &mut buf, sink);
         Some(buf.dropped_bytes).filter(|d| *d > 0)
@@ -947,6 +978,17 @@ fn handle_notification(
                 });
             }
             SessionUpdate::TerminalOutput { tool_call_id, data } => {
+                // First byte for this tool_call_id: synthesize in_progress
+                // BEFORE the data lands, so the frontend's live tail (gated
+                // on a pending/in_progress statusById) has something to key
+                // off — see `TerminalCoalescer::is_new`.
+                if coalescer.is_new(&tool_call_id) {
+                    sink.emit(AgentEvent::ToolStatus {
+                        tool_call_id: tool_call_id.clone(),
+                        status: "in_progress".to_string(),
+                        detail: String::new(),
+                    });
+                }
                 coalescer.push(&tool_call_id, &data, sink);
             }
             SessionUpdate::TerminalExit { tool_call_id, exit_code, signal } => {
@@ -3951,9 +3993,17 @@ mod tests {
         // `status` (-> ToolStatus) before its `_meta.terminal_exit` (->
         // TerminalExit) when one message carries both, so the exit's
         // ToolStatus lands before finish()'s flush of the buffered delta.
+        // The leading synthetic in_progress fires off the FIRST message
+        // (the status-less delta) — see `first_terminal_output_emits_
+        // synthetic_in_progress_status` for that behavior in isolation.
         assert_eq!(
             *events.lock().unwrap(),
             vec![
+                AgentEvent::ToolStatus {
+                    tool_call_id: "c1".into(),
+                    status: "in_progress".into(),
+                    detail: "".into()
+                },
                 AgentEvent::ToolStatus {
                     tool_call_id: "c1".into(),
                     status: "completed".into(),
@@ -3963,6 +4013,242 @@ mod tests {
                 AgentEvent::TerminalOutput {
                     tool_call_id: "c1".into(),
                     data: "tick 1\n".into()
+                },
+                AgentEvent::TerminalExit {
+                    tool_call_id: "c1".into(),
+                    exit_code: Some(0),
+                    signal: None,
+                    dropped_bytes: None
+                },
+            ]
+        );
+    }
+
+    /// Final-review finding: neither pinned agent emits a status-bearing
+    /// `tool_call_update` mid-run (codex deltas are status-less; claude's
+    /// only status rides the completion message) — so the frontend's live
+    /// tail, gated on `statusById` being pending/in_progress, never rendered.
+    /// The first byte of terminal output for a NEW tool_call_id must
+    /// synthesize an `in_progress` ToolStatus, before the data itself is
+    /// pushed into the coalescer.
+    #[test]
+    fn first_terminal_output_emits_synthetic_in_progress_status() {
+        let (sink, events) = collect_sink();
+        let mut coalescer = TerminalCoalescer::default();
+        let mut final_text = String::new();
+        let mut usage_snapshot: Option<UsageSnapshot> = None;
+        // codex-shaped: bare _meta.terminal_output deltas, no status ever.
+        let delta1 = serde_json::json!({
+            "sessionId": "s",
+            "update": {
+                "_meta": {"terminal_output": {"terminal_id": "c1", "data": "chunk-1\n"}},
+                "toolCallId": "c1",
+                "sessionUpdate": "tool_call_update"
+            }
+        });
+        let delta2 = serde_json::json!({
+            "sessionId": "s",
+            "update": {
+                "_meta": {"terminal_output": {"terminal_id": "c1", "data": "chunk-2\n"}},
+                "toolCallId": "c1",
+                "sessionUpdate": "tool_call_update"
+            }
+        });
+        handle_notification(
+            "session/update",
+            &delta1,
+            &sink,
+            &mut final_text,
+            &mut usage_snapshot,
+            &mut coalescer,
+        );
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![AgentEvent::ToolStatus {
+                tool_call_id: "c1".into(),
+                status: "in_progress".into(),
+                detail: "".into()
+            }],
+            "first output byte for a new tool_call_id must synthesize in_progress \
+             before the (sub-threshold, still-buffered) data is emitted"
+        );
+        handle_notification(
+            "session/update",
+            &delta2,
+            &sink,
+            &mut final_text,
+            &mut usage_snapshot,
+            &mut coalescer,
+        );
+        assert_eq!(
+            events.lock().unwrap().len(),
+            1,
+            "a second delta for the same tool_call_id must not re-arm the synthetic status"
+        );
+        coalescer.finish("c1", &sink);
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![
+                AgentEvent::ToolStatus {
+                    tool_call_id: "c1".into(),
+                    status: "in_progress".into(),
+                    detail: "".into()
+                },
+                AgentEvent::TerminalOutput {
+                    tool_call_id: "c1".into(),
+                    data: "chunk-1\nchunk-2\n".into()
+                },
+            ]
+        );
+    }
+
+    /// claude-shaped: ONE message carries the output, the completion status,
+    /// AND the terminal_exit together (parse order is output -> status ->
+    /// exit — see `parse_session_updates`). The synthetic in_progress fires
+    /// on the output piece before the real "completed" status lands; the
+    /// last-write-wins statusById on the frontend must still end up
+    /// "completed", never stuck spinning.
+    #[test]
+    fn combined_claude_message_keeps_final_status_completed() {
+        let (sink, events) = collect_sink();
+        let mut coalescer = TerminalCoalescer::default();
+        let mut final_text = String::new();
+        let mut usage_snapshot: Option<UsageSnapshot> = None;
+        let combined = serde_json::json!({
+            "sessionId": "s",
+            "update": {
+                "_meta": {
+                    "terminal_output": {"terminal_id": "t1", "data": "tick 1\n"},
+                    "terminal_exit": {"terminal_id": "t1", "exit_code": 0, "signal": null}
+                },
+                "toolCallId": "t1",
+                "sessionUpdate": "tool_call_update",
+                "status": "completed"
+            }
+        });
+        handle_notification(
+            "session/update",
+            &combined,
+            &sink,
+            &mut final_text,
+            &mut usage_snapshot,
+            &mut coalescer,
+        );
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![
+                AgentEvent::ToolStatus {
+                    tool_call_id: "t1".into(),
+                    status: "in_progress".into(),
+                    detail: "".into()
+                },
+                AgentEvent::ToolStatus {
+                    tool_call_id: "t1".into(),
+                    status: "completed".into(),
+                    detail: "".into()
+                },
+                AgentEvent::TerminalOutput {
+                    tool_call_id: "t1".into(),
+                    data: "tick 1\n".into()
+                },
+                AgentEvent::TerminalExit {
+                    tool_call_id: "t1".into(),
+                    exit_code: Some(0),
+                    signal: None,
+                    dropped_bytes: None
+                },
+            ]
+        );
+    }
+
+    /// A stray vendor delta arriving AFTER `finish()` (the TerminalExit was
+    /// already processed) must never re-arm the synthetic in_progress status —
+    /// that would flip a completed chip back to a spinner (statusById is
+    /// last-write-wins). Chosen behavior: the stray bytes are dropped
+    /// outright rather than opening a fresh buffer, because `finish()`
+    /// forgets the old buffer entry — accepting post-exit data would start a
+    /// NEW `TerminalBuffer` with `emitted_bytes` reset to 0, reopening the
+    /// exact per-terminal 512KiB cap hole `TERMINAL_EMIT_CAP_BYTES` exists to
+    /// close (a stray/duplicated post-exit stream could otherwise re-buffer
+    /// unboundedly under the same tool_call_id).
+    #[test]
+    fn stray_output_after_exit_does_not_reemit_in_progress() {
+        let (sink, events) = collect_sink();
+        let mut coalescer = TerminalCoalescer::default();
+        let mut final_text = String::new();
+        let mut usage_snapshot: Option<UsageSnapshot> = None;
+        let delta = serde_json::json!({
+            "sessionId": "s",
+            "update": {
+                "_meta": {"terminal_output": {"terminal_id": "c1", "data": "chunk-1\n"}},
+                "toolCallId": "c1",
+                "sessionUpdate": "tool_call_update"
+            }
+        });
+        let exit = serde_json::json!({
+            "sessionId": "s",
+            "update": {
+                "_meta": {"terminal_exit": {"terminal_id": "c1", "exit_code": 0, "signal": null}},
+                "toolCallId": "c1",
+                "sessionUpdate": "tool_call_update",
+                "status": "completed"
+            }
+        });
+        let stray = serde_json::json!({
+            "sessionId": "s",
+            "update": {
+                "_meta": {"terminal_output": {"terminal_id": "c1", "data": "late\n"}},
+                "toolCallId": "c1",
+                "sessionUpdate": "tool_call_update"
+            }
+        });
+        handle_notification(
+            "session/update",
+            &delta,
+            &sink,
+            &mut final_text,
+            &mut usage_snapshot,
+            &mut coalescer,
+        );
+        handle_notification(
+            "session/update",
+            &exit,
+            &sink,
+            &mut final_text,
+            &mut usage_snapshot,
+            &mut coalescer,
+        );
+        let before_stray = events.lock().unwrap().clone();
+        handle_notification(
+            "session/update",
+            &stray,
+            &sink,
+            &mut final_text,
+            &mut usage_snapshot,
+            &mut coalescer,
+        );
+        assert_eq!(
+            *events.lock().unwrap(),
+            before_stray,
+            "a post-exit delta must not add any event — no re-armed in_progress, \
+             no fresh-buffer TerminalOutput"
+        );
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![
+                AgentEvent::ToolStatus {
+                    tool_call_id: "c1".into(),
+                    status: "in_progress".into(),
+                    detail: "".into()
+                },
+                AgentEvent::ToolStatus {
+                    tool_call_id: "c1".into(),
+                    status: "completed".into(),
+                    detail: "".into()
+                },
+                AgentEvent::TerminalOutput {
+                    tool_call_id: "c1".into(),
+                    data: "chunk-1\n".into()
                 },
                 AgentEvent::TerminalExit {
                     tool_call_id: "c1".into(),
