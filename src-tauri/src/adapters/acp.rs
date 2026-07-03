@@ -3522,13 +3522,15 @@ mod tests {
         let _ = child.kill().await;
     }
 
-    /// Spawn a powershell child that launches a DETACHED grandchild sleeper
-    /// (Start-Process ⇒ separate process, exactly the npx→node shape) and
-    /// prints the grandchild PID on stdout. Returns (child, grandchild_pid).
+    /// Spawn the powershell parent that will launch a detached grandchild
+    /// sleeper and print its PID. Callers that need the Job Object must arm
+    /// KillTreeOnDrop IMMEDIATELY after this returns — BEFORE
+    /// read_grandchild_pid — because job membership only propagates to
+    /// processes created after assignment (production arms the guard right
+    /// after spawn too).
     #[cfg(windows)]
-    async fn spawn_windows_tree() -> (tokio::process::Child, u32) {
-        use tokio::io::AsyncBufReadExt;
-        let mut child = tokio::process::Command::new("powershell")
+    fn spawn_windows_tree() -> tokio::process::Child {
+        tokio::process::Command::new("powershell")
             .args([
                 "-NoProfile",
                 "-Command",
@@ -3540,7 +3542,13 @@ mod tests {
             .stdout(std::process::Stdio::piped())
             .kill_on_drop(true)
             .spawn()
-            .expect("spawn powershell tree");
+            .expect("spawn powershell tree")
+    }
+
+    /// Read the grandchild PID the parent prints — the synchronization point
+    /// proving the detached grandchild exists.
+    #[cfg(windows)]
+    async fn read_grandchild_pid(child: &mut tokio::process::Child) -> u32 {
         let stdout = child.stdout.take().expect("stdout piped");
         let mut lines = tokio::io::BufReader::new(stdout).lines();
         let pid_line = tokio::time::timeout(std::time::Duration::from_secs(30), lines.next_line())
@@ -3548,8 +3556,7 @@ mod tests {
             .expect("grandchild pid within 30s")
             .expect("read pid line")
             .expect("pid line present");
-        let grandchild: u32 = pid_line.trim().parse().expect("numeric pid");
-        (child, grandchild)
+        pid_line.trim().parse().expect("numeric pid")
     }
 
     /// True while `tasklist` still reports the PID. Filter output contains the
@@ -3572,6 +3579,11 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
+        // Best-effort cleanup so a regression never strands a 300s sleeper on
+        // the runner — then fail loudly with the same message.
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .output();
         panic!("{context}: pid {pid} still alive after 3s");
     }
 
@@ -3582,7 +3594,8 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test]
     async fn direct_kill_leaves_the_detached_grandchild_alive_on_windows() {
-        let (mut child, grandchild) = spawn_windows_tree().await;
+        let mut child = spawn_windows_tree();
+        let grandchild = read_grandchild_pid(&mut child).await;
         assert!(windows_pid_alive(grandchild), "grandchild must start alive");
         child.kill().await.expect("direct kill");
         // Give the OS a moment; the grandchild must STILL be there.
@@ -3602,8 +3615,11 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test]
     async fn dropping_the_job_guard_kills_the_detached_grandchild() {
-        let (child, grandchild) = spawn_windows_tree().await;
+        let mut child = spawn_windows_tree();
+        // Armed BEFORE the grandchild spawns — the production ordering, and
+        // the reason descendants join the job at all.
         let guard = KillTreeOnDrop::new(&child);
+        let grandchild = read_grandchild_pid(&mut child).await;
         assert!(windows_pid_alive(grandchild), "grandchild must start alive");
         drop(guard);
         assert_windows_pid_dies(grandchild, "job-guard drop").await;
