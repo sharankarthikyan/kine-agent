@@ -40,6 +40,16 @@ pub enum SessionUpdate {
     /// codex-acp emits {used,size} only and skips emission entirely when its
     /// model_context_window is unknown.
     UsageUpdate { used: u64, size: u64, cost_usd: Option<f64> },
+    /// Vendor `_meta.terminal_output` on a `tool_call_update` — live output
+    /// bytes for an execute tool call. NON-STANDARD, unversioned extension
+    /// (claude-agent-acp sends ONE full-output blob at tool_result time;
+    /// codex-acp streams per-read chunks). Keyed by toolCallId — both pinned
+    /// agents set terminal_id == toolCallId, so terminal_id is ignored.
+    TerminalOutput { tool_call_id: String, data: String },
+    /// Vendor `_meta.terminal_exit` — command completion. Rides the same
+    /// update as the final status for both agents; parsed as its own variant
+    /// so one inbound message can yield ToolCallUpdate + TerminalExit.
+    TerminalExit { tool_call_id: String, exit_code: Option<i64>, signal: Option<String> },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -58,7 +68,15 @@ pub async fn initialize(peer: &RpcPeer) -> Result<bool, RpcError> {
                 "protocolVersion": PROTOCOL_VERSION,
                 // M4: the fs proxy is live — the agent routes file access through
                 // fs/read_text_file / fs/write_text_file, worktree-enforced by us.
-                "clientCapabilities": {"fs": {"readTextFile": true, "writeTextFile": true}},
+                // Vendor display flag (claude-agent-acp 0.54.1 / codex-acp 0.16.0): stream
+                // command output as _meta.terminal_output deltas instead of a trailing
+                // fenced block. Display-only — execution stays in the agent's own process
+                // (security review 2026-07-03 §5). NOT the standard `terminal` capability,
+                // which stays un-advertised by decision (§4).
+                "clientCapabilities": {
+                    "fs": {"readTextFile": true, "writeTextFile": true},
+                    "_meta": {"terminal_output": true}
+                },
                 "clientInfo": {"name": "kineloop", "version": env!("CARGO_PKG_VERSION")}
             }),
         )
@@ -291,25 +309,22 @@ pub async fn respond_permission(
     peer.respond(id, outcome).await
 }
 
-/// Parse a session/update notification's params into the M1 subset.
-pub fn parse_session_update(params: &Value) -> Option<SessionUpdate> {
-    let update = params.get("update")?;
-    match update.get("sessionUpdate").and_then(Value::as_str)? {
-        "agent_message_chunk" => {
-            let text = update
-                .pointer("/content/text")
-                .and_then(Value::as_str)?
-                .to_string();
-            Some(SessionUpdate::AgentMessageChunk { text })
-        }
-        "agent_thought_chunk" => {
-            let text = update
-                .pointer("/content/text")
-                .and_then(Value::as_str)?
-                .to_string();
-            Some(SessionUpdate::Thought { text })
-        }
-        "tool_call" => Some(SessionUpdate::ToolCall {
+/// Parse a session/update notification's params into the M1 subset. One
+/// inbound update can yield multiple SessionUpdates — e.g. a claude-agent-acp
+/// tool_call_update carrying both a status transition and _meta.terminal_exit.
+pub fn parse_session_updates(params: &Value) -> Vec<SessionUpdate> {
+    let Some(update) = params.get("update") else { return Vec::new() };
+    let Some(kind) = update.get("sessionUpdate").and_then(Value::as_str) else { return Vec::new() };
+    match kind {
+        "agent_message_chunk" => match update.pointer("/content/text").and_then(Value::as_str) {
+            Some(text) => vec![SessionUpdate::AgentMessageChunk { text: text.to_string() }],
+            None => Vec::new(),
+        },
+        "agent_thought_chunk" => match update.pointer("/content/text").and_then(Value::as_str) {
+            Some(text) => vec![SessionUpdate::Thought { text: text.to_string() }],
+            None => Vec::new(),
+        },
+        "tool_call" => vec![SessionUpdate::ToolCall {
             title: update
                 .get("title")
                 .and_then(Value::as_str)
@@ -324,40 +339,60 @@ pub fn parse_session_update(params: &Value) -> Option<SessionUpdate> {
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty())
                 .map(str::to_string),
-        }),
+        }],
         "tool_call_update" => {
-            let tool_call_id = update
+            let Some(tool_call_id) = update
                 .get("toolCallId")
                 .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())?
-                .to_string();
+                .filter(|s| !s.is_empty())
+            else {
+                return Vec::new();
+            };
+            let mut updates = Vec::new();
+            // Vendor terminal_output _meta (display-only; see SessionUpdate docs).
+            // Malformed shapes are skipped with a log line — never fatal.
+            if let Some(out) = update.pointer("/_meta/terminal_output") {
+                match out.get("data").and_then(Value::as_str) {
+                    Some(data) => updates.push(SessionUpdate::TerminalOutput {
+                        tool_call_id: tool_call_id.to_string(),
+                        data: data.to_string(),
+                    }),
+                    None => eprintln!("acp: terminal_output _meta without string data — skipped"),
+                }
+            }
             // Updates may carry only content/locations; without a status
-            // transition there is nothing to surface.
-            let status = update.get("status").and_then(Value::as_str)?.to_string();
-            let detail = update
-                .get("title")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            Some(SessionUpdate::ToolCallUpdate {
-                tool_call_id,
-                status,
-                detail,
-            })
+            // transition there is no ToolCallUpdate to surface.
+            if let Some(status) = update.get("status").and_then(Value::as_str) {
+                updates.push(SessionUpdate::ToolCallUpdate {
+                    tool_call_id: tool_call_id.to_string(),
+                    status: status.to_string(),
+                    detail: update.get("title").and_then(Value::as_str).unwrap_or("").to_string(),
+                });
+            }
+            if let Some(exit) = update.pointer("/_meta/terminal_exit") {
+                updates.push(SessionUpdate::TerminalExit {
+                    tool_call_id: tool_call_id.to_string(),
+                    exit_code: exit.get("exit_code").and_then(Value::as_i64),
+                    signal: exit.get("signal").and_then(Value::as_str).map(str::to_string),
+                });
+            }
+            updates
         }
         "plan" => {
-            let entries = update.get("entries")?;
+            let Some(entries) = update.get("entries") else { return Vec::new(); };
             if !entries.is_array() {
-                return None;
+                return Vec::new();
             }
-            Some(SessionUpdate::Plan {
+            vec![SessionUpdate::Plan {
                 entries_json: entries.to_string(),
-            })
+            }]
         }
         "available_commands_update" => {
-            let commands: Vec<Value> = update
-                .get("availableCommands")
-                .and_then(Value::as_array)?
+            let Some(commands_array) = update.get("availableCommands").and_then(Value::as_array)
+            else {
+                return Vec::new();
+            };
+            let commands: Vec<Value> = commands_array
                 .iter()
                 .filter_map(|c| {
                     let name = c.get("name").and_then(Value::as_str)?;
@@ -367,19 +402,23 @@ pub fn parse_session_update(params: &Value) -> Option<SessionUpdate> {
                     }))
                 })
                 .collect();
-            Some(SessionUpdate::AvailableCommands {
+            vec![SessionUpdate::AvailableCommands {
                 commands_json: Value::Array(commands).to_string(),
-            })
+            }]
         }
         "usage_update" => {
             // used/size are schema-required; drop malformed updates silently.
-            let used = update.get("used").and_then(Value::as_u64)?;
-            let size = update.get("size").and_then(Value::as_u64)?;
+            let Some(used) = update.get("used").and_then(Value::as_u64) else {
+                return Vec::new();
+            };
+            let Some(size) = update.get("size").and_then(Value::as_u64) else {
+                return Vec::new();
+            };
             let cost_usd = update.pointer("/cost/amount").and_then(Value::as_f64);
-            Some(SessionUpdate::UsageUpdate { used, size, cost_usd })
+            vec![SessionUpdate::UsageUpdate { used, size, cost_usd }]
         }
         // unknown/future update kinds — ignored by design
-        _ => None,
+        _ => Vec::new(),
     }
 }
 
@@ -684,8 +723,8 @@ mod tests {
                        "cost": {"amount": 0.0731, "currency": "USD"}}
         });
         assert_eq!(
-            parse_session_update(&with_cost),
-            Some(SessionUpdate::UsageUpdate { used: 48213, size: 200000, cost_usd: Some(0.0731) })
+            parse_session_updates(&with_cost),
+            vec![SessionUpdate::UsageUpdate { used: 48213, size: 200000, cost_usd: Some(0.0731) }]
         );
         // Mid-stream / codex shape — no cost key at all.
         let no_cost = serde_json::json!({
@@ -693,8 +732,8 @@ mod tests {
             "update": {"sessionUpdate": "usage_update", "used": 31044, "size": 1000000}
         });
         assert_eq!(
-            parse_session_update(&no_cost),
-            Some(SessionUpdate::UsageUpdate { used: 31044, size: 1000000, cost_usd: None })
+            parse_session_updates(&no_cost),
+            vec![SessionUpdate::UsageUpdate { used: 31044, size: 1000000, cost_usd: None }]
         );
     }
 
@@ -705,12 +744,12 @@ mod tests {
             "sessionId": "s",
             "update": {"sessionUpdate": "usage_update", "used": 10}
         });
-        assert_eq!(parse_session_update(&missing_size), None);
+        assert_eq!(parse_session_updates(&missing_size), Vec::<SessionUpdate>::new());
         let missing_used = serde_json::json!({
             "sessionId": "s",
             "update": {"sessionUpdate": "usage_update", "size": 200000}
         });
-        assert_eq!(parse_session_update(&missing_used), None);
+        assert_eq!(parse_session_updates(&missing_used), Vec::<SessionUpdate>::new());
     }
 
     #[test]
@@ -767,10 +806,10 @@ mod tests {
             }
         });
         assert_eq!(
-            parse_session_update(&params),
-            Some(SessionUpdate::AgentMessageChunk {
+            parse_session_updates(&params),
+            vec![SessionUpdate::AgentMessageChunk {
                 text: "hello".into()
-            })
+            }]
         );
     }
 
@@ -784,10 +823,10 @@ mod tests {
             }
         });
         assert_eq!(
-            parse_session_update(&params),
-            Some(SessionUpdate::Thought {
+            parse_session_updates(&params),
+            vec![SessionUpdate::Thought {
                 text: "pondering".into()
-            })
+            }]
         );
     }
 
@@ -802,7 +841,7 @@ mod tests {
                 "rawInput": {"path": "/x"}
             }
         });
-        match parse_session_update(&params) {
+        match parse_session_updates(&params).into_iter().next() {
             Some(SessionUpdate::ToolCall {
                 title,
                 raw_input,
@@ -828,12 +867,12 @@ mod tests {
             }
         });
         assert_eq!(
-            parse_session_update(&params),
-            Some(SessionUpdate::ToolCallUpdate {
+            parse_session_updates(&params),
+            vec![SessionUpdate::ToolCallUpdate {
                 tool_call_id: "t1".into(),
                 status: "completed".into(),
                 detail: "Read main.rs".into(),
-            })
+            }]
         );
     }
 
@@ -845,7 +884,126 @@ mod tests {
             "sessionId": "s",
             "update": {"sessionUpdate": "tool_call_update", "toolCallId": "t1"}
         });
-        assert_eq!(parse_session_update(&params), None);
+        assert_eq!(parse_session_updates(&params), Vec::<SessionUpdate>::new());
+    }
+
+    #[test]
+    fn parses_codex_terminal_output_delta_without_status() {
+        // codex-acp streams deltas as tool_call_update with EMPTY fields (no status).
+        let params = serde_json::json!({
+            "sessionId": "s",
+            "update": {
+                "_meta": {"terminal_output": {"terminal_id": "c1", "data": "chunk-1\n"}},
+                "toolCallId": "c1",
+                "sessionUpdate": "tool_call_update"
+            }
+        });
+        assert_eq!(
+            parse_session_updates(&params),
+            vec![SessionUpdate::TerminalOutput { tool_call_id: "c1".into(), data: "chunk-1\n".into() }]
+        );
+    }
+
+    #[test]
+    fn parses_claude_combined_status_and_terminal_exit_update() {
+        // claude-agent-acp's FINAL update carries status + terminal_exit together.
+        let params = serde_json::json!({
+            "sessionId": "s",
+            "update": {
+                "_meta": {
+                    "claudeCode": {"toolName": "Bash"},
+                    "terminal_exit": {"terminal_id": "t1", "exit_code": 0, "signal": null}
+                },
+                "toolCallId": "t1",
+                "sessionUpdate": "tool_call_update",
+                "status": "completed",
+                "content": [{"type": "terminal", "terminalId": "t1"}]
+            }
+        });
+        assert_eq!(
+            parse_session_updates(&params),
+            vec![
+                SessionUpdate::ToolCallUpdate { tool_call_id: "t1".into(), status: "completed".into(), detail: "".into() },
+                SessionUpdate::TerminalExit { tool_call_id: "t1".into(), exit_code: Some(0), signal: None },
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_codex_terminal_exit_with_failure_code() {
+        let params = serde_json::json!({
+            "sessionId": "s",
+            "update": {
+                "_meta": {"terminal_exit": {"terminal_id": "c1", "exit_code": 127, "signal": null}},
+                "toolCallId": "c1",
+                "sessionUpdate": "tool_call_update",
+                "status": "failed"
+            }
+        });
+        assert_eq!(
+            parse_session_updates(&params),
+            vec![
+                SessionUpdate::ToolCallUpdate { tool_call_id: "c1".into(), status: "failed".into(), detail: "".into() },
+                SessionUpdate::TerminalExit { tool_call_id: "c1".into(), exit_code: Some(127), signal: None },
+            ]
+        );
+    }
+
+    #[test]
+    fn tolerates_malformed_terminal_meta_shapes() {
+        // data not a string → that piece skipped; status still parsed. Never panics.
+        let params = serde_json::json!({
+            "sessionId": "s",
+            "update": {
+                "_meta": {"terminal_output": {"terminal_id": "x", "data": 42}},
+                "toolCallId": "x",
+                "sessionUpdate": "tool_call_update",
+                "status": "in_progress"
+            }
+        });
+        assert_eq!(
+            parse_session_updates(&params),
+            vec![SessionUpdate::ToolCallUpdate { tool_call_id: "x".into(), status: "in_progress".into(), detail: "".into() }]
+        );
+        // exit_code non-numeric → None, event still emitted (exit is still real).
+        let params = serde_json::json!({
+            "sessionId": "s",
+            "update": {
+                "_meta": {"terminal_exit": {"terminal_id": "x", "exit_code": "boom"}},
+                "toolCallId": "x",
+                "sessionUpdate": "tool_call_update"
+            }
+        });
+        assert_eq!(
+            parse_session_updates(&params),
+            vec![SessionUpdate::TerminalExit { tool_call_id: "x".into(), exit_code: None, signal: None }]
+        );
+    }
+
+    #[test]
+    fn statusless_update_without_terminal_meta_yields_nothing() {
+        // Pre-existing behavior preserved: content/locations-only updates are not surfaced.
+        let params = serde_json::json!({
+            "sessionId": "s",
+            "update": {"toolCallId": "t", "sessionUpdate": "tool_call_update", "content": []}
+        });
+        assert_eq!(parse_session_updates(&params), Vec::<SessionUpdate>::new());
+    }
+
+    #[test]
+    fn terminal_signal_string_is_captured() {
+        let params = serde_json::json!({
+            "sessionId": "s",
+            "update": {
+                "_meta": {"terminal_exit": {"terminal_id": "t", "exit_code": null, "signal": "SIGKILL"}},
+                "toolCallId": "t",
+                "sessionUpdate": "tool_call_update"
+            }
+        });
+        assert_eq!(
+            parse_session_updates(&params),
+            vec![SessionUpdate::TerminalExit { tool_call_id: "t".into(), exit_code: None, signal: Some("SIGKILL".into()) }]
+        );
     }
 
     #[test]
@@ -854,7 +1012,7 @@ mod tests {
             "sessionId": "s",
             "update": {"sessionUpdate": "sparkles_v9", "entries": []}
         });
-        assert_eq!(parse_session_update(&params), None);
+        assert_eq!(parse_session_updates(&params), Vec::<SessionUpdate>::new());
     }
 
     #[test]
@@ -866,7 +1024,7 @@ mod tests {
                 {"content": "Edit it", "status": "in_progress", "priority": "high"}
             ]}
         });
-        match parse_session_update(&params) {
+        match parse_session_updates(&params).into_iter().next() {
             Some(SessionUpdate::Plan { entries_json }) => {
                 assert!(entries_json.contains("Read the file"));
                 assert!(entries_json.contains("in_progress"));
@@ -881,7 +1039,7 @@ mod tests {
             "sessionId": "s",
             "update": {"sessionUpdate": "plan"}
         });
-        assert_eq!(parse_session_update(&params), None);
+        assert_eq!(parse_session_updates(&params), Vec::<SessionUpdate>::new());
     }
 
     #[test]
@@ -894,7 +1052,7 @@ mod tests {
                 {"name": "plan", "description": "Plan first"}
             ]}
         });
-        match parse_session_update(&params) {
+        match parse_session_updates(&params).into_iter().next() {
             Some(SessionUpdate::AvailableCommands { commands_json }) => {
                 let parsed: serde_json::Value = serde_json::from_str(&commands_json).unwrap();
                 let arr = parsed.as_array().unwrap();
@@ -1026,6 +1184,10 @@ mod tests {
             assert_eq!(
                 req["params"]["clientCapabilities"]["fs"]["writeTextFile"],
                 true
+            );
+            assert_eq!(
+                req.pointer("/params/clientCapabilities/_meta/terminal_output"),
+                Some(&serde_json::json!(true))
             );
             let resp = serde_json::json!({"jsonrpc":"2.0","id":req["id"],"result":{}});
             agent_write

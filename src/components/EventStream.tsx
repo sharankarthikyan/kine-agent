@@ -2,6 +2,7 @@ import { Fragment, useState } from "react";
 import type { AgentEvent } from "../lib/agent";
 import { EmptyState } from "./EmptyState";
 import { Markdown } from "./Markdown";
+import { TerminalView } from "./TerminalView";
 import { Badge, badgeVariants } from "@/components/ui/badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -65,6 +66,21 @@ export function EventStream({ events, onOpenFile, onOpenAuthLogin, onApprovalRes
   for (const e of events) {
     if (e.kind === "toolStatus") statusById.set(e.data.toolCallId, e.data.status);
   }
+  // Ordered concat of terminal output per tool call; exit metadata last-write-wins.
+  const terminalTextById = new Map<string, string>();
+  const terminalExitById = new Map<string, { exitCode: number | null; signal: string | null; droppedBytes?: number }>();
+  for (const e of events) {
+    if (e.kind === "terminalOutput") {
+      terminalTextById.set(e.data.toolCallId, (terminalTextById.get(e.data.toolCallId) ?? "") + e.data.data);
+    }
+    if (e.kind === "terminalExit") {
+      terminalExitById.set(e.data.toolCallId, {
+        exitCode: e.data.exitCode ?? null,
+        signal: e.data.signal ?? null,
+        droppedBytes: e.data.droppedBytes,
+      });
+    }
+  }
   // Last-write-wins answer per approval request id; approvalResolved rows never
   // render themselves — they flip the matching approvalNeeded card to answered.
   const resolvedApprovals = new Map<string, string>();
@@ -78,6 +94,8 @@ export function EventStream({ events, onOpenFile, onOpenAuthLogin, onApprovalRes
   const visible = events.filter(
     (e, i) =>
       e.kind !== "toolStatus" &&
+      e.kind !== "terminalOutput" &&
+      e.kind !== "terminalExit" &&
       e.kind !== "approvalResolved" &&
       (e.kind !== "plan" || i === lastPlanIndex),
   );
@@ -96,6 +114,8 @@ export function EventStream({ events, onOpenFile, onOpenAuthLogin, onApprovalRes
             hasProse={hasProse}
             statusById={statusById}
             resolvedApprovals={resolvedApprovals}
+            terminalTextById={terminalTextById}
+            terminalExitById={terminalExitById}
             openToolKey={openToolKey}
             onToggleTool={setOpenToolKey}
             onOpenFile={onOpenFile}
@@ -143,6 +163,8 @@ interface ToolChipRunProps {
   hasProse: boolean;
   statusById: Map<string, string>;
   resolvedApprovals: Map<string, string>;
+  terminalTextById: Map<string, string>;
+  terminalExitById: Map<string, { exitCode: number | null; signal: string | null; droppedBytes?: number }>;
   openToolKey: string | null;
   onToggleTool: (key: string | null) => void;
   onOpenFile?: (path: string) => void;
@@ -158,6 +180,8 @@ function ToolChipRun({
   hasProse,
   statusById,
   resolvedApprovals,
+  terminalTextById,
+  terminalExitById,
   openToolKey,
   onToggleTool,
   onOpenFile,
@@ -192,12 +216,40 @@ function ToolChipRun({
           </Fragment>
         ))}
       </div>
+      {events
+        .filter(
+          (e) =>
+            e.kind === "toolCall" &&
+            e.data.toolCallId &&
+            terminalTextById.has(e.data.toolCallId) &&
+            ["pending", "in_progress"].includes(statusById.get(e.data.toolCallId) ?? ""),
+        )
+        .map((e) =>
+          e.kind === "toolCall" && e.data.toolCallId ? (
+            <TerminalView
+              key={`term-${e.data.toolCallId}`}
+              text={terminalTextById.get(e.data.toolCallId) ?? ""}
+              running
+              maxLines={12}
+            />
+          ) : null,
+        )}
       {openEvent && (
         <ToolDetails
           event={openEvent}
           status={
             openEvent.kind === "toolCall" && openEvent.data.toolCallId
               ? statusById.get(openEvent.data.toolCallId)
+              : undefined
+          }
+          terminalText={
+            openEvent.kind === "toolCall" && openEvent.data.toolCallId
+              ? terminalTextById.get(openEvent.data.toolCallId)
+              : undefined
+          }
+          terminalExit={
+            openEvent.kind === "toolCall" && openEvent.data.toolCallId
+              ? terminalExitById.get(openEvent.data.toolCallId)
               : undefined
           }
           onClose={() => onToggleTool(null)}
@@ -526,6 +578,12 @@ function renderEvent(
       // purely for the `never` exhaustiveness check below.
       return null;
 
+    case "terminalOutput":
+    case "terminalExit":
+      // Filtered out of `visible`; they decorate the matching toolCall chip
+      // (renderer lands with the TerminalView task). Kept for exhaustiveness.
+      return null;
+
     case "plan": {
       let entries: { content: string; status: string }[];
       try {
@@ -606,10 +664,14 @@ function compactPath(path: string): string {
 function ToolDetails({
   event,
   status,
+  terminalText,
+  terminalExit,
   onClose,
 }: {
   event: AgentEvent;
   status?: string;
+  terminalText?: string;
+  terminalExit?: { exitCode: number | null; signal: string | null; droppedBytes?: number };
   onClose: () => void;
 }) {
   if (event.kind !== "toolCall" && event.kind !== "fileWrite") return null;
@@ -631,6 +693,15 @@ function ToolDetails({
             )}
           </div>
           {summary && <div className="mt-1 break-words font-mono">{summary}</div>}
+          {terminalText !== undefined && (
+            <TerminalView
+              text={terminalText}
+              running={status === "pending" || status === "in_progress"}
+              exitCode={terminalExit?.exitCode ?? null}
+              signal={terminalExit?.signal ?? null}
+              droppedBytes={terminalExit?.droppedBytes}
+            />
+          )}
           {editDetails ? (
             <ToolEditDiff details={editDetails} />
           ) : (

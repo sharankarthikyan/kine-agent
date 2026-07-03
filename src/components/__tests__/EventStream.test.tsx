@@ -392,6 +392,30 @@ test("renders a notice event as a muted inline note", () => {
   expect(screen.getByText("Native resume unavailable — context replayed.")).toBeInTheDocument();
 });
 
+test("terminal events never render their own rows", () => {
+  render(
+    <EventStream
+      events={[
+        { kind: "token", data: { text: "before " } },
+        { kind: "toolCall", data: { name: "Bash", input: "{\"command\":\"ls\"}", toolCallId: "t1" } },
+        { kind: "token", data: { text: "af" } },
+        { kind: "terminalOutput", data: { toolCallId: "t1", data: "<img src=x onerror=alert(1)>\n" } },
+        { kind: "token", data: { text: "ter" } },
+        { kind: "terminalExit", data: { toolCallId: "t1", exitCode: 0, signal: null } },
+      ]}
+    />,
+  );
+  // Chip renders; the raw terminal events do not appear as standalone rows.
+  expect(screen.getByText("Bash")).toBeInTheDocument();
+  expect(document.querySelector("img")).toBeNull();
+  // Discriminating assertion: "af" and "ter" only coalesce into one prose block
+  // if both terminal events are excluded from `visible` before grouping — if the
+  // filter were absent, the terminal event between them would split the token
+  // run into two separate prose groups ("af", "ter") and this text would never
+  // appear as one node.
+  expect(screen.getByText("after")).toBeInTheDocument();
+});
+
 test("coalesces consecutive thought chunks into one collapsed Thinking block", () => {
   const events = [
     { kind: "thought", data: { text: "step one " } },
@@ -406,4 +430,50 @@ test("coalesces consecutive thought chunks into one collapsed Thinking block", (
   expect(details).not.toHaveAttribute("open");
   expect(screen.getByText(/step one step two/)).toBeInTheDocument(); // present in DOM (native details)
   expect(screen.getByText("answer")).toBeInTheDocument();
+});
+
+test("running terminal chip shows a live tail beneath the chip row", () => {
+  render(
+    <EventStream
+      events={[
+        { kind: "toolCall", data: { name: "Bash", input: '{"command":"make build"}', toolCallId: "t1" } },
+        { kind: "toolStatus", data: { toolCallId: "t1", status: "in_progress", detail: "" } },
+        { kind: "terminalOutput", data: { toolCallId: "t1", data: "compiling...\n" } },
+      ]}
+    />,
+  );
+  expect(screen.getByText(/compiling/)).toBeInTheDocument();
+});
+
+test("completed terminal chip hides the live tail; ToolDetails shows full output on click", async () => {
+  render(
+    <EventStream
+      events={[
+        { kind: "toolCall", data: { name: "Bash", input: '{"command":"ls"}', toolCallId: "t1" } },
+        { kind: "terminalOutput", data: { toolCallId: "t1", data: "file-a\nfile-b\n" } },
+        { kind: "terminalExit", data: { toolCallId: "t1", exitCode: 0, signal: null } },
+        { kind: "toolStatus", data: { toolCallId: "t1", status: "completed", detail: "" } },
+      ]}
+    />,
+  );
+  expect(screen.queryByText(/file-a/)).toBeNull();
+  await userEvent.click(screen.getByText("Bash"));
+  expect(screen.getByText(/file-a/)).toBeInTheDocument();
+  expect(screen.getByText(/exit 0/)).toBeInTheDocument();
+});
+
+test("terminal chunks concatenate in arrival order", async () => {
+  render(
+    <EventStream
+      events={[
+        { kind: "toolCall", data: { name: "Bash", input: '{"command":"seq"}', toolCallId: "t1" } },
+        { kind: "terminalOutput", data: { toolCallId: "t1", data: "one " } },
+        { kind: "terminalOutput", data: { toolCallId: "t1", data: "two" } },
+        { kind: "terminalExit", data: { toolCallId: "t1", exitCode: 0, signal: null } },
+        { kind: "toolStatus", data: { toolCallId: "t1", status: "completed", detail: "" } },
+      ]}
+    />,
+  );
+  await userEvent.click(screen.getByText("Bash"));
+  expect(screen.getByText(/one two/)).toBeInTheDocument();
 });

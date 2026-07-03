@@ -40,6 +40,26 @@ pub enum AgentEvent {
         status: String,
         detail: String,
     },
+    /// Live terminal output for an execute tool call (ACP vendor
+    /// `_meta.terminal_output`, display-only). Adapter-coalesced and capped
+    /// (TERMINAL_EMIT_CAP_BYTES) so IPC, the append-only store, and the DOM
+    /// are all bounded upstream. Rendered inside the matching tool chip.
+    #[serde(rename_all = "camelCase")]
+    TerminalOutput {
+        tool_call_id: String,
+        data: String,
+    },
+    /// Command completion for a terminal-bearing tool call (ACP vendor
+    /// `_meta.terminal_exit`). `dropped_bytes` > 0 means the emit cap
+    /// truncated the stream; omitted from JSON when None.
+    #[serde(rename_all = "camelCase")]
+    TerminalExit {
+        tool_call_id: String,
+        exit_code: Option<i64>,
+        signal: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        dropped_bytes: Option<u64>,
+    },
     FileWrite {
         path: String,
     },
@@ -353,5 +373,38 @@ mod tests {
         };
         let json = serde_json::to_string(&ev).unwrap();
         assert!(json.contains(r#""options":[{"id":"ok","label":"Allow","kind":"allow_once"}]"#));
+    }
+
+    #[test]
+    fn serializes_terminal_output_as_tagged_camelcase() {
+        let ev = AgentEvent::TerminalOutput { tool_call_id: "t1".into(), data: "hi\n".into() };
+        assert_eq!(
+            serde_json::to_string(&ev).unwrap(),
+            r#"{"kind":"terminalOutput","data":{"toolCallId":"t1","data":"hi\n"}}"#
+        );
+    }
+
+    #[test]
+    fn serializes_terminal_exit_omitting_absent_dropped_bytes() {
+        let ev = AgentEvent::TerminalExit {
+            tool_call_id: "t1".into(),
+            exit_code: Some(0),
+            signal: None,
+            dropped_bytes: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&ev).unwrap(),
+            r#"{"kind":"terminalExit","data":{"toolCallId":"t1","exitCode":0,"signal":null}}"#
+        );
+        let ev = AgentEvent::TerminalExit {
+            tool_call_id: "t1".into(),
+            exit_code: None,
+            signal: Some("SIGKILL".into()),
+            dropped_bytes: Some(2048),
+        };
+        assert_eq!(
+            serde_json::to_string(&ev).unwrap(),
+            r#"{"kind":"terminalExit","data":{"toolCallId":"t1","exitCode":null,"signal":"SIGKILL","droppedBytes":2048}}"#
+        );
     }
 }
