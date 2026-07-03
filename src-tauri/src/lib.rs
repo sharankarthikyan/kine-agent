@@ -90,6 +90,7 @@ pub fn run() {
             commands::commit_session,
             commands::open_in_editor,
             commands::open_terminal,
+            commands::open_agent_login,
             commands::list_hooks,
             commands::list_mcp_servers,
             commands::list_plugins

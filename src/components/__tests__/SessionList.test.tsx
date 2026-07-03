@@ -144,6 +144,24 @@ test("labels external CLI sessions distinctly", () => {
   expect(screen.queryByText("+0")).not.toBeInTheDocument();
 });
 
+test("labels auth-required sessions as login, not generic error", () => {
+  render(
+    <SessionList
+      {...defaultProps}
+      groups={[
+        {
+          workspace: "my-app",
+          sessions: [
+            { ...sessions[0], status: "auth" },
+          ],
+        },
+      ]}
+    />,
+  );
+  expect(screen.getByText("Login")).toBeInTheDocument();
+  expect(screen.queryByText("Error")).not.toBeInTheDocument();
+});
+
 test("double-clicking a session title opens an inline editor seeded with the title", async () => {
   render(<SessionList {...defaultProps} />);
   fireEvent.doubleClick(screen.getByText("add auth"));

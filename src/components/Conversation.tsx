@@ -15,6 +15,8 @@ interface ConversationProps {
   turns: Turn[];
   running: boolean;
   onOpenFile?: (path: string) => void;
+  /** Open the selected agent's real interactive login flow. */
+  onOpenAuthLogin?: (agent: string) => void;
   /** Answer a pending approval request raised in this session's live turn. */
   onApprovalRespond?: (requestId: string, selectedOptionId: string) => void;
   hasMore?: boolean;
@@ -43,6 +45,7 @@ export function Conversation({
   turns,
   running,
   onOpenFile,
+  onOpenAuthLogin,
   onApprovalRespond,
   hasMore = false,
   loadingMore = false,
@@ -163,6 +166,7 @@ export function Conversation({
               <EventStream
                 events={turn.events}
                 onOpenFile={onOpenFile}
+                onOpenAuthLogin={onOpenAuthLogin}
                 // Approvals are only answerable on the latest turn (the live run); older
                 // turns' requests have already resolved, so they stay read-only.
                 onApprovalRespond={

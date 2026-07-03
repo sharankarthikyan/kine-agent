@@ -99,22 +99,24 @@ impl Drop for RunGuard<'_> {
 /// that a drain task persists to the store. Keeps the IPC path non-blocking — DB
 /// writes happen on the drain task, not in `emit`.
 ///
-/// `saw_error` is set when any `AgentEvent::Error` flows through, so `run_persisting`
-/// can stamp the session status correctly even when the adapter returns `Ok` (i.e.
-/// the agent ran to completion but reported an in-band error).
+/// `saw_error`/`saw_auth_required` stamp the session status correctly even when the
+/// adapter returns `Ok` (i.e. the agent ran to completion but reported an in-band
+/// terminal state).
 struct StoreSink {
     channel: Channel<AgentEvent>,
     tx: mpsc::UnboundedSender<AgentEvent>,
     saw_error: Arc<AtomicBool>,
+    saw_auth_required: Arc<AtomicBool>,
 }
 
 impl EventSink for StoreSink {
     fn emit(&self, event: AgentEvent) {
-        if matches!(
-            event,
-            AgentEvent::Error { .. } | AgentEvent::AuthRequired { .. }
-        ) {
-            self.saw_error.store(true, Ordering::Release);
+        match &event {
+            AgentEvent::Error { .. } => self.saw_error.store(true, Ordering::Release),
+            AgentEvent::AuthRequired { .. } => {
+                self.saw_auth_required.store(true, Ordering::Release)
+            }
+            _ => {}
         }
         let _ = self.channel.send(event.clone());
         let _ = self.tx.send(event);
@@ -236,10 +238,12 @@ async fn run_persisting(
         );
     }
     let saw_error = Arc::new(AtomicBool::new(false));
+    let saw_auth_required = Arc::new(AtomicBool::new(false));
     let sink = Box::new(StoreSink {
         channel: on_event,
         tx,
         saw_error: Arc::clone(&saw_error),
+        saw_auth_required: Arc::clone(&saw_auth_required),
     });
 
     // Drain task: persist events as they arrive. Ends when the sink (and its tx)
@@ -347,9 +351,11 @@ async fn run_persisting(
         }
     }
     // A user-initiated stop is not a failure: mark the session idle (stopped, resumable).
-    // Otherwise "error" iff the run returned Err OR an in-band Error event flowed through.
+    // Auth is distinct from generic failure; the user needs a login action, not a red error.
     let status = if !cancelled && (result.is_err() || saw_error.load(Ordering::Acquire)) {
         "error"
+    } else if !cancelled && saw_auth_required.load(Ordering::Acquire) {
+        "auth"
     } else {
         "idle"
     };
@@ -1880,6 +1886,16 @@ pub async fn open_in_editor(session_id: String) -> Result<(), String> {
     .map_err(|e| e.to_string())?
 }
 
+#[cfg(any(target_os = "macos", all(unix, not(target_os = "macos"))))]
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+#[cfg(target_os = "macos")]
+fn applescript_string(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 /// Spawn the platform's terminal at `dir`. Best-effort and per-OS:
 /// - macOS: `open -a Terminal <dir>`
 /// - Windows: Windows Terminal (`wt -d <dir>`), falling back to a classic console
@@ -1939,6 +1955,63 @@ fn open_terminal_at(dir: &Path) -> Result<(), String> {
     }
 }
 
+/// Spawn the platform's terminal at `dir` and run a shell command. Used for CLI
+/// authentication flows that require a real interactive terminal/TTY.
+fn open_terminal_command_at(dir: &Path, command: &str) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let script = format!("cd {} && {}", shell_quote(&dir.to_string_lossy()), command);
+        std::process::Command::new("osascript")
+            .args(["-e", "tell application \"Terminal\" to activate"])
+            .arg("-e")
+            .arg(format!(
+                "tell application \"Terminal\" to do script \"{}\"",
+                applescript_string(&script)
+            ))
+            .spawn()
+            .map_err(|e| format!("failed to open Terminal: {e}"))?;
+        Ok(())
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let script = format!("cd /d \"{}\" && {}", dir.display(), command);
+        if std::process::Command::new(crate::agent_paths::resolve_program("wt"))
+            .args(["-d"])
+            .arg(dir)
+            .args(["cmd", "/K", &script])
+            .spawn()
+            .is_ok()
+        {
+            return Ok(());
+        }
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", "cmd", "/K", &script])
+            .spawn()
+            .map_err(|e| format!("failed to open a terminal: {e}"))?;
+        Ok(())
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        for (term, args) in [
+            ("x-terminal-emulator", vec!["-e", "sh", "-lc"]),
+            ("gnome-terminal", vec!["--", "sh", "-lc"]),
+            ("konsole", vec!["-e", "sh", "-lc"]),
+            ("xfce4-terminal", vec!["-e", "sh", "-lc"]),
+            ("alacritty", vec!["-e", "sh", "-lc"]),
+            ("kitty", vec!["sh", "-lc"]),
+            ("xterm", vec!["-e", "sh", "-lc"]),
+        ] {
+            let script = format!("cd {} && {}", shell_quote(&dir.to_string_lossy()), command);
+            let mut cmd = std::process::Command::new(term);
+            cmd.args(args).arg(script);
+            if cmd.spawn().is_ok() {
+                return Ok(());
+            }
+        }
+        Err("No terminal emulator found (tried x-terminal-emulator, gnome-terminal, konsole, xfce4-terminal, alacritty, kitty, xterm)".into())
+    }
+}
+
 /// Open a terminal at the session's worktree. Supported on macOS, Windows, and Linux;
 /// returns a friendly error if no terminal could be launched.
 #[tauri::command]
@@ -1947,6 +2020,25 @@ pub async fn open_terminal(session_id: String) -> Result<(), String> {
     tokio::task::spawn_blocking(move || -> Result<(), String> {
         let wt = worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
         open_terminal_at(&wt.path)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Open the selected agent's interactive login flow in a real terminal. Antigravity
+/// has no non-interactive `login` subcommand; its browser access-code prompt is owned
+/// by `agy --prompt-interactive <prompt>`, so the code must be pasted into that terminal.
+#[tauri::command]
+pub async fn open_agent_login(agent: String, session_id: String) -> Result<(), String> {
+    if agent != "antigravity" {
+        return Err(format!(
+            "no interactive login launcher is configured for {agent}"
+        ));
+    }
+    let root = worktree_root_for(&session_id);
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let wt = worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
+        open_terminal_command_at(&wt.path, "agy --prompt-interactive \"Sign in to Antigravity\"")
     })
     .await
     .map_err(|e| e.to_string())?

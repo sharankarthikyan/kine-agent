@@ -11,6 +11,7 @@ const STATUS_CONFIG: Record<SessionStatus, StatusConfig> = {
   running: { label: "Running", color: "var(--status-running)" },
   idle: { label: "Idle", color: "var(--status-success)" },
   error: { label: "Error", color: "var(--status-error)" },
+  auth: { label: "Login", color: "var(--status-warning)" },
 };
 
 const FALLBACK_CONFIG: StatusConfig = {

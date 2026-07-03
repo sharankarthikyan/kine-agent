@@ -56,6 +56,7 @@ const STATUS_CONFIG: Record<SessionStatus, StatusConfig> = {
   running: { label: "Running", color: "var(--status-running)" },
   idle: { label: "Idle", color: "var(--status-success)" },
   error: { label: "Error", color: "var(--status-error)" },
+  auth: { label: "Login", color: "var(--status-warning)" },
 };
 
 const FALLBACK_CONFIG: StatusConfig = {
@@ -219,6 +220,7 @@ export function SessionList({
                 <DropdownMenuRadioItem value="all">All</DropdownMenuRadioItem>
                 <DropdownMenuRadioItem value="running">Running</DropdownMenuRadioItem>
                 <DropdownMenuRadioItem value="idle">Idle</DropdownMenuRadioItem>
+                <DropdownMenuRadioItem value="auth">Login</DropdownMenuRadioItem>
                 <DropdownMenuRadioItem value="error">Error</DropdownMenuRadioItem>
               </DropdownMenuRadioGroup>
               <DropdownMenuSeparator />

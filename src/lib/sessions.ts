@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { assertDesktop } from "./agent";
 
-export type SessionStatus = "running" | "idle" | "error";
+export type SessionStatus = "running" | "idle" | "error" | "auth";
 
 export interface SessionSummary {
   id: string;

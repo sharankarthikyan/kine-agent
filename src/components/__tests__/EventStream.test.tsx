@@ -228,8 +228,50 @@ test("renders authRequired as a compact sign-in action", () => {
   ];
   render(<EventStream events={events} />);
   expect(screen.getByText("Sign in required")).toBeInTheDocument();
+  expect(screen.getByText("Run in terminal")).toBeInTheDocument();
   expect(screen.getByText("codex login")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Copy codex sign-in command" })).toBeInTheDocument();
+});
+
+test("copying an auth command gives visible feedback", async () => {
+  const events: AgentEvent[] = [
+    {
+      kind: "authRequired",
+      data: {
+        agent: "codex",
+        command: "codex login",
+        message: "Sign in to Codex CLI in a terminal, then retry this message.",
+      },
+    },
+  ];
+  render(<EventStream events={events} />);
+  await userEvent.click(screen.getByRole("button", { name: "Copy codex sign-in command" }));
+  expect(screen.getByText("Copied")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Copied codex sign-in command" })).toBeInTheDocument();
+});
+
+test("renders Antigravity auth as an access-code login flow", async () => {
+  const onOpenAuthLogin = vi.fn();
+  const events: AgentEvent[] = [
+    {
+      kind: "authRequired",
+      data: {
+        agent: "antigravity",
+        command: "agy --prompt-interactive \"Sign in to Antigravity\"",
+        message:
+          "Antigravity is not signed in. Kineloop can open the real CLI login prompt, but the browser access code must be pasted into Antigravity's terminal prompt.",
+      },
+    },
+  ];
+  render(<EventStream events={events} onOpenAuthLogin={onOpenAuthLogin} />);
+  expect(screen.getByText("Antigravity login needed")).toBeInTheDocument();
+  expect(screen.getByText("Manual terminal command")).toBeInTheDocument();
+  expect(screen.getByText("agy --prompt-interactive \"Sign in to Antigravity\"")).toBeInTheDocument();
+  expect(screen.getByText(/Choose a login method/)).toBeInTheDocument();
+  expect(screen.getByText(/Kineloop does not accept the code in chat/)).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Open login terminal" }));
+  expect(onOpenAuthLogin).toHaveBeenCalledWith("antigravity");
+  expect(screen.getByRole("button", { name: "Copy antigravity sign-in command" })).toBeInTheDocument();
 });
 
 test("renders a done event with its summary", () => {

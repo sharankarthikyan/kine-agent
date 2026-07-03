@@ -24,6 +24,8 @@ interface EventStreamProps {
   events: AgentEvent[];
   /** Open a file's diff when a file-related tool chip is clicked. */
   onOpenFile?: (path: string) => void;
+  /** Open the agent's real interactive login flow when auth is required. */
+  onOpenAuthLogin?: (agent: string) => void;
   /**
    * Answer a pending approval request. When provided, an `approvalNeeded` event renders
    * one button per option; when omitted (e.g. historical turns), it renders a read-only
@@ -39,8 +41,16 @@ interface EventStreamProps {
  * is NOT re-rendered when prose already exists — the streamed text is the answer;
  * it's only shown when the turn produced no prose.
  */
-export function EventStream({ events, onOpenFile, onApprovalRespond }: EventStreamProps) {
+export function EventStream({ events, onOpenFile, onOpenAuthLogin, onApprovalRespond }: EventStreamProps) {
   const [openToolKey, setOpenToolKey] = useState<string | null>(null);
+  const [copiedCommand, setCopiedCommand] = useState<string | null>(null);
+  const handleCopyCommand = (command: string) => {
+    void navigator.clipboard?.writeText(command).catch(() => undefined);
+    setCopiedCommand(command);
+    window.setTimeout(() => {
+      setCopiedCommand((current) => (current === command ? null : current));
+    }, 1400);
+  };
   if (events.length === 0) {
     return (
       <EmptyState
@@ -90,6 +100,8 @@ export function EventStream({ events, onOpenFile, onApprovalRespond }: EventStre
             onToggleTool={setOpenToolKey}
             onOpenFile={onOpenFile}
             onApprovalRespond={onApprovalRespond}
+            copiedCommand={copiedCommand}
+            onCopyCommand={handleCopyCommand}
           />
         ) : group.kind === "prose" ? (
           <Markdown key={i}>{group.text}</Markdown>
@@ -110,9 +122,13 @@ export function EventStream({ events, onOpenFile, onApprovalRespond }: EventStre
               statusById,
               resolvedApprovals,
               onOpenFile,
+              onOpenAuthLogin,
               onApprovalRespond,
               openToolKey,
               setOpenToolKey,
+              undefined,
+              copiedCommand,
+              handleCopyCommand,
             )}
           </Fragment>
         )
@@ -130,7 +146,10 @@ interface ToolChipRunProps {
   openToolKey: string | null;
   onToggleTool: (key: string | null) => void;
   onOpenFile?: (path: string) => void;
+  onOpenAuthLogin?: (agent: string) => void;
   onApprovalRespond?: (requestId: string, selectedOptionId: string) => void;
+  copiedCommand: string | null;
+  onCopyCommand: (command: string) => void;
 }
 
 function ToolChipRun({
@@ -142,7 +161,10 @@ function ToolChipRun({
   openToolKey,
   onToggleTool,
   onOpenFile,
+  onOpenAuthLogin,
   onApprovalRespond,
+  copiedCommand,
+  onCopyCommand,
 }: ToolChipRunProps) {
   const openIndex = events.findIndex(
     (event, index) => toolKey(event, index, runKey) === openToolKey,
@@ -159,10 +181,13 @@ function ToolChipRun({
               statusById,
               resolvedApprovals,
               onOpenFile,
+              onOpenAuthLogin,
               onApprovalRespond,
               openToolKey,
               onToggleTool,
               toolKey(event, j, runKey),
+              copiedCommand,
+              onCopyCommand,
             )}
           </Fragment>
         ))}
@@ -219,10 +244,13 @@ function renderEvent(
   statusById: Map<string, string>,
   resolvedApprovals: Map<string, string>,
   onOpenFile?: (path: string) => void,
+  onOpenAuthLogin?: (agent: string) => void,
   onApprovalRespond?: (requestId: string, selectedOptionId: string) => void,
   openToolKey?: string | null,
   onToggleTool?: (key: string | null) => void,
   eventKey?: string,
+  copiedCommand?: string | null,
+  onCopyCommand?: (command: string) => void,
 ) {
   switch (event.kind) {
     case "token":
@@ -402,37 +430,80 @@ function renderEvent(
         </Alert>
       );
 
-    case "authRequired":
+    case "authRequired": {
+      const isAntigravity = event.data.agent === "antigravity";
+      const title = isAntigravity ? "Antigravity login needed" : "Sign in required";
+      const commandLabel = isAntigravity ? "Manual terminal command" : "Run in terminal";
+      const commandCopied = copiedCommand === event.data.command;
       return (
         <div className="w-full max-w-2xl rounded-lg border border-border/70 bg-muted/20 px-3 py-2.5 text-sm">
           <div className="flex items-start gap-2">
             <Terminal aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
             <div className="min-w-0 flex-1">
-              <div className="font-medium">Sign in required</div>
+              <div className="font-medium">{title}</div>
               <div className="mt-0.5 break-words text-muted-foreground">
                 {event.data.message}
               </div>
-              <div className="mt-2 flex min-w-0 items-center gap-1.5">
-                <code className="min-w-0 truncate rounded-md bg-muted px-2 py-1 font-mono text-xs text-foreground">
-                  {event.data.command}
-                </code>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  className="size-7 shrink-0"
-                  aria-label={`Copy ${event.data.agent} sign-in command`}
-                  onClick={() => {
-                    void navigator.clipboard?.writeText(event.data.command);
-                  }}
-                >
-                  <Copy aria-hidden="true" className="size-3.5" />
-                </Button>
+              {isAntigravity && (
+                <ol className="mt-2 list-decimal space-y-1 pl-4 text-xs text-muted-foreground">
+                  <li>Open Antigravity's login terminal from Kineloop.</li>
+                  <li>Choose a login method in that terminal.</li>
+                  <li>Finish the browser step.</li>
+                  <li>Paste the browser access code into the terminal prompt, then retry here.</li>
+                </ol>
+              )}
+              {isAntigravity && onOpenAuthLogin && (
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  <Button
+                    type="button"
+                    size="sm"
+                    className="h-7 px-2 text-xs"
+                    onClick={() => onOpenAuthLogin(event.data.agent)}
+                  >
+                    Open login terminal
+                  </Button>
+                  <div className="text-xs text-muted-foreground">
+                    Kineloop does not accept the code in chat.
+                  </div>
+                </div>
+              )}
+              <div className="mt-2 min-w-0">
+                <div className="mb-1 text-xs font-medium text-muted-foreground">{commandLabel}</div>
+                <div className="flex min-w-0 items-center gap-1.5">
+                  <code className="min-w-0 truncate rounded-md bg-muted px-2 py-1 font-mono text-xs text-foreground">
+                    {event.data.command}
+                  </code>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className={cn(
+                      "size-7 shrink-0 transition-colors",
+                      commandCopied && "text-foreground",
+                    )}
+                    aria-label={
+                      commandCopied
+                        ? `Copied ${event.data.agent} sign-in command`
+                        : `Copy ${event.data.agent} sign-in command`
+                    }
+                    onClick={() => onCopyCommand?.(event.data.command)}
+                  >
+                    {commandCopied ? (
+                      <Check aria-hidden="true" className="size-3.5" />
+                    ) : (
+                      <Copy aria-hidden="true" className="size-3.5" />
+                    )}
+                  </Button>
+                  {commandCopied && (
+                    <span className="shrink-0 text-xs text-muted-foreground">Copied</span>
+                  )}
+                </div>
               </div>
             </div>
           </div>
         </div>
       );
+    }
 
     case "notice":
       // Adapter-surfaced note (e.g. resume fallback). Quiet by design — it is

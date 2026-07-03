@@ -43,6 +43,7 @@ import {
   engineForSession,
   listTrustedRepos,
   nodeAvailable,
+  openAgentLogin,
   pickRepository,
   respondToApproval,
   startSession,
@@ -1261,6 +1262,17 @@ export default function App() {
     });
   }
 
+  async function handleOpenAgentLogin(sessionId: string, agent: string) {
+    try {
+      await openAgentLogin(agent, sessionId);
+      toast.info("Login terminal opened", {
+        description: "Choose a login method, finish the browser step, paste the code into that terminal, then retry.",
+      });
+    } catch (err) {
+      toast.error(safeErrorMessage(err));
+    }
+  }
+
   // Commit the session's worktree changes. Shows toast feedback and refreshes
   // the Changes tab data after a successful commit.
   // Returns true on a successful commit so the composer can close itself; false on
@@ -1467,8 +1479,16 @@ export default function App() {
         toast.info(event.data.message);
       }
       if (event.kind === "authRequired") {
-        toast.info("Sign in required", {
-          description: `${event.data.agent}: ${event.data.command}`,
+        const isAntigravity = event.data.agent === "antigravity";
+        setSessions((prev) =>
+          prev.map((session) =>
+            session.id === sessionId ? { ...session, status: "auth" } : session,
+          ),
+        );
+        toast.info(isAntigravity ? "Antigravity login required" : "Sign in required", {
+          description: isAntigravity
+            ? "Open the login terminal, paste the browser code there, then retry."
+            : `${event.data.agent}: ${event.data.command}`,
         });
       }
       appendToLastTurn(sessionId, event);
@@ -2006,6 +2026,12 @@ export default function App() {
                                           requestId,
                                           selectedOptionId,
                                         )
+                                    : undefined
+                                }
+                                onOpenAuthLogin={
+                                  pane.sessionId !== null
+                                    ? (agent) =>
+                                        void handleOpenAgentLogin(pane.sessionId!, agent)
                                     : undefined
                                 }
                               />

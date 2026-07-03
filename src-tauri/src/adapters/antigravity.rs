@@ -4,10 +4,12 @@ use crate::adapters::{
 };
 use crate::events::AgentEvent;
 use serde_json::Value;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, BufReader};
 use tokio::process::Command;
+use tokio::time::{timeout, Duration};
 
 /// Adapter that drives the Antigravity CLI (`agy`).
 ///
@@ -63,6 +65,11 @@ pub async fn spawn_and_stream(
     captured_conversation: Arc<Mutex<Option<String>>>,
 ) -> Result<(), SessionError> {
     let program = crate::agent_paths::resolve_program("agy");
+    if antigravity_auth_probe(&program).await == AntigravityAuthProbe::Unauthenticated {
+        sink.emit(antigravity_auth_required_event());
+        return Ok(());
+    }
+
     // On a Windows batch shim the prompt cannot be a CLI argument (Rust rejects `\r`/`\n`
     // args to `.cmd`/`.bat`), so a multi-line prompt is fed over stdin instead. NOTE:
     // `agy --print` consuming its prompt from stdin is not yet verified live — needs a
@@ -151,6 +158,7 @@ pub async fn spawn_and_stream(
     // bounds memory against a pathological huge line.
     let mut reader = BufReader::new(stdout);
     let mut emitted_any = false;
+    let mut stdout_auth_required = false;
     loop {
         match read_capped_line(&mut reader, MAX_LINE_BYTES).await? {
             CappedLine::Eof => break,
@@ -161,6 +169,10 @@ pub async fn spawn_and_stream(
                 let mut text = String::from_utf8_lossy(&buf).into_owned();
                 text.push('\n');
                 emitted_any = true;
+                if auth_required_text(&text) {
+                    stdout_auth_required = true;
+                    continue;
+                }
                 sink.emit(AgentEvent::Token { text });
             }
         }
@@ -177,6 +189,8 @@ pub async fn spawn_and_stream(
         };
         if let Some(event) = auth_required_from_stderr(&message) {
             sink.emit(event);
+        } else if stdout_auth_required {
+            sink.emit(antigravity_auth_required_event());
         } else {
             sink.emit(AgentEvent::Error { message });
         }
@@ -201,24 +215,81 @@ pub async fn spawn_and_stream(
 }
 
 fn auth_required_from_stderr(message: &str) -> Option<AgentEvent> {
+    if !auth_required_text(message) {
+        return None;
+    }
+    Some(antigravity_auth_required_event())
+}
+
+fn auth_required_text(message: &str) -> bool {
     let lower = message.to_lowercase();
-    let authish = lower.contains("not authenticated")
+    lower.contains("not authenticated")
         || lower.contains("unauthenticated")
         || lower.contains("authentication required")
+        || lower.contains("authentication failed")
         || lower.contains("auth required")
         || lower.contains("not logged in")
         || lower.contains("login required")
+        || lower.contains("please sign in")
         || lower.contains("sign in")
         || lower.contains("sign-in")
-        || (lower.contains("credential") && lower.contains("login"));
-    if !authish {
-        return None;
-    }
-    Some(AgentEvent::AuthRequired {
+        || (lower.contains("auth") && lower.contains("timed out"))
+        || (lower.contains("credential") && lower.contains("login"))
+}
+
+fn antigravity_auth_required_event() -> AgentEvent {
+    AgentEvent::AuthRequired {
         agent: "antigravity".to_string(),
-        command: "agy --prompt-interactive".to_string(),
-        message: "Sign in to Antigravity CLI in a terminal, then retry this message.".to_string(),
-    })
+        command: "agy --prompt-interactive \"Sign in to Antigravity\"".to_string(),
+        message: "Antigravity is not signed in. Kineloop can open the real CLI login prompt, but the browser access code must be pasted into Antigravity's terminal prompt.".to_string(),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AntigravityAuthProbe {
+    Authenticated,
+    Unauthenticated,
+    Unknown,
+}
+
+async fn antigravity_auth_probe(program: &OsStr) -> AntigravityAuthProbe {
+    let mut command = Command::new(program);
+    command
+        .arg("models")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+
+    let output = match timeout(Duration::from_secs(8), command.output()).await {
+        Ok(Ok(output)) => output,
+        Ok(Err(err)) => {
+            eprintln!("agy auth probe failed to spawn: {err}");
+            return AntigravityAuthProbe::Unknown;
+        }
+        Err(_) => {
+            eprintln!("agy auth probe timed out");
+            return AntigravityAuthProbe::Unknown;
+        }
+    };
+
+    classify_auth_probe(
+        output.status.success(),
+        &String::from_utf8_lossy(&output.stdout),
+        &String::from_utf8_lossy(&output.stderr),
+    )
+}
+
+fn classify_auth_probe(status_success: bool, stdout: &str, stderr: &str) -> AntigravityAuthProbe {
+    if status_success {
+        return AntigravityAuthProbe::Authenticated;
+    }
+    let combined = format!("{stdout}\n{stderr}");
+    if auth_required_text(&combined) {
+        AntigravityAuthProbe::Unauthenticated
+    } else {
+        AntigravityAuthProbe::Unknown
+    }
 }
 
 /// The newest Antigravity conversation id whose recorded `workspace` matches `cwd`,
@@ -342,8 +413,21 @@ mod tests {
         .expect("auth event");
         assert!(matches!(
             event,
-            crate::events::AgentEvent::AuthRequired { agent, command, .. }
-                if agent == "antigravity" && command == "agy --prompt-interactive"
+            crate::events::AgentEvent::AuthRequired { agent, command, message }
+                if agent == "antigravity"
+                    && command == "agy --prompt-interactive \"Sign in to Antigravity\""
+                    && message.contains("access code")
+        ));
+    }
+
+    #[test]
+    fn auth_required_text_classifies_antigravity_timeout_output() {
+        assert!(super::auth_required_text(
+            "Error: authentication failed or timed out"
+        ));
+        assert!(super::auth_required_text("auth flow timed out"));
+        assert!(super::auth_required_text(
+            "Error: Please sign in to view available models. Launch the CLI without arguments to sign in."
         ));
     }
 
@@ -351,6 +435,35 @@ mod tests {
     fn auth_required_from_stderr_ignores_regular_failures() {
         assert!(
             super::auth_required_from_stderr("agy exited with exit status: 1: no prompt").is_none()
+        );
+        assert!(!super::auth_required_text("agy exited with exit status: 1"));
+    }
+
+    #[test]
+    fn auth_probe_classifies_models_sign_in_output() {
+        assert_eq!(
+            super::classify_auth_probe(
+                false,
+                "",
+                "Error: Please sign in to view available models. Launch the CLI without arguments to sign in."
+            ),
+            super::AntigravityAuthProbe::Unauthenticated,
+        );
+    }
+
+    #[test]
+    fn auth_probe_success_means_authenticated() {
+        assert_eq!(
+            super::classify_auth_probe(true, "gemini-2.5-pro\n", ""),
+            super::AntigravityAuthProbe::Authenticated,
+        );
+    }
+
+    #[test]
+    fn auth_probe_unknown_failure_still_allows_real_run_to_surface_details() {
+        assert_eq!(
+            super::classify_auth_probe(false, "", "network unavailable"),
+            super::AntigravityAuthProbe::Unknown,
         );
     }
 }

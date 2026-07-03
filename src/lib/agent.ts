@@ -158,6 +158,12 @@ export async function stopSession(sessionId: string): Promise<boolean> {
   return invoke<boolean>("stop_session", { sessionId });
 }
 
+/** Open an agent's real interactive login flow. Antigravity accepts browser access codes in its terminal prompt. */
+export async function openAgentLogin(agent: string, sessionId: string): Promise<void> {
+  assertDesktop();
+  await invoke("open_agent_login", { agent, sessionId });
+}
+
 export interface SendMessageArgs {
   sessionId: string;
   prompt: string;
