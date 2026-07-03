@@ -33,6 +33,13 @@ pub enum SessionUpdate {
     AvailableCommands {
         commands_json: String,
     },
+    /// `usage_update` — context-window occupancy for the session. `used` =
+    /// tokens currently in context, `size` = total window. `cost_usd` rides
+    /// only on claude-agent-acp's turn-final update (cumulative for the acp
+    /// process, which Kineloop spawns per turn — effectively per-turn).
+    /// codex-acp emits {used,size} only and skips emission entirely when its
+    /// model_context_window is unknown.
+    UsageUpdate { used: u64, size: u64, cost_usd: Option<f64> },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -92,6 +99,28 @@ pub fn parse_modes(result: &Value) -> SessionModes {
             })
             .unwrap_or_default(),
     }
+}
+
+/// Per-turn token split from the session/prompt RESPONSE's `usage` object
+/// (claude-agent-acp populates it; codex-acp does not — UNSTABLE-flagged
+/// upstream, so every field degrades to 0 and an absent object to None).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct TurnUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+}
+
+pub fn parse_turn_usage(result: &Value) -> Option<TurnUsage> {
+    let usage = result.get("usage")?;
+    let n = |k: &str| usage.get(k).and_then(Value::as_u64).unwrap_or(0);
+    Some(TurnUsage {
+        input_tokens: n("inputTokens"),
+        output_tokens: n("outputTokens"),
+        cache_read_tokens: n("cachedReadTokens"),
+        cache_write_tokens: n("cachedWriteTokens"),
+    })
 }
 
 /// The ACP session mode a Kineloop permission mode should run under. The agent
@@ -206,12 +235,13 @@ pub async fn session_load(
     Ok(parse_modes(&result))
 }
 
-/// session/prompt → stopReason ("completed" | "cancelled" | "resource_not_found").
+/// session/prompt → (stopReason, per-turn token usage if the agent reported
+/// one in the response). stopReason: "completed" | "cancelled" | …
 pub async fn session_prompt(
     peer: &RpcPeer,
     session_id: &str,
     text: &str,
-) -> Result<String, RpcError> {
+) -> Result<(String, Option<TurnUsage>), RpcError> {
     let result = peer
         .request(
             "session/prompt",
@@ -221,14 +251,15 @@ pub async fn session_prompt(
             }),
         )
         .await?;
-    Ok(result
+    let stop_reason = result
         .get("stopReason")
         .and_then(Value::as_str)
         .unwrap_or_else(|| {
             eprintln!("acp: session/prompt response lacks stopReason — assuming completed");
             "completed"
         })
-        .to_string())
+        .to_string();
+    Ok((stop_reason, parse_turn_usage(&result)))
 }
 
 /// session/cancel — a NOTIFICATION (no response). The agent finishes the
@@ -339,6 +370,13 @@ pub fn parse_session_update(params: &Value) -> Option<SessionUpdate> {
             Some(SessionUpdate::AvailableCommands {
                 commands_json: Value::Array(commands).to_string(),
             })
+        }
+        "usage_update" => {
+            // used/size are schema-required; drop malformed updates silently.
+            let used = update.get("used").and_then(Value::as_u64)?;
+            let size = update.get("size").and_then(Value::as_u64)?;
+            let cost_usd = update.pointer("/cost/amount").and_then(Value::as_f64);
+            Some(SessionUpdate::UsageUpdate { used, size, cost_usd })
         }
         // unknown/future update kinds — ignored by design
         _ => None,
@@ -631,7 +669,91 @@ mod tests {
     #[tokio::test]
     async fn session_prompt_defaults_stop_reason_completed() {
         let (peer, agent_task) = harness_answering(serde_json::json!({}));
-        assert_eq!(session_prompt(&peer, "s", "hi").await.unwrap(), "completed");
+        let (stop, usage) = session_prompt(&peer, "s", "hi").await.unwrap();
+        assert_eq!(stop, "completed");
+        assert_eq!(usage, None);
+        agent_task.await.unwrap();
+    }
+
+    #[test]
+    fn parses_usage_update_with_and_without_cost() {
+        // Turn-final shape (claude-agent-acp result site — the only one with cost).
+        let with_cost = serde_json::json!({
+            "sessionId": "s",
+            "update": {"sessionUpdate": "usage_update", "used": 48213, "size": 200000,
+                       "cost": {"amount": 0.0731, "currency": "USD"}}
+        });
+        assert_eq!(
+            parse_session_update(&with_cost),
+            Some(SessionUpdate::UsageUpdate { used: 48213, size: 200000, cost_usd: Some(0.0731) })
+        );
+        // Mid-stream / codex shape — no cost key at all.
+        let no_cost = serde_json::json!({
+            "sessionId": "s",
+            "update": {"sessionUpdate": "usage_update", "used": 31044, "size": 1000000}
+        });
+        assert_eq!(
+            parse_session_update(&no_cost),
+            Some(SessionUpdate::UsageUpdate { used: 31044, size: 1000000, cost_usd: None })
+        );
+    }
+
+    #[test]
+    fn usage_update_missing_required_fields_is_ignored() {
+        // used/size are schema-required; a malformed update must be dropped, not panic.
+        let missing_size = serde_json::json!({
+            "sessionId": "s",
+            "update": {"sessionUpdate": "usage_update", "used": 10}
+        });
+        assert_eq!(parse_session_update(&missing_size), None);
+        let missing_used = serde_json::json!({
+            "sessionId": "s",
+            "update": {"sessionUpdate": "usage_update", "size": 200000}
+        });
+        assert_eq!(parse_session_update(&missing_used), None);
+    }
+
+    #[test]
+    fn parses_turn_usage_from_prompt_response() {
+        // claude-agent-acp 0.54.1 response shape (UNSTABLE-flagged upstream).
+        let result = serde_json::json!({
+            "stopReason": "end_turn",
+            "usage": {"inputTokens": 1200, "outputTokens": 340,
+                      "cachedReadTokens": 18000, "cachedWriteTokens": 500, "totalTokens": 20040}
+        });
+        assert_eq!(
+            parse_turn_usage(&result),
+            Some(TurnUsage {
+                input_tokens: 1200,
+                output_tokens: 340,
+                cache_read_tokens: 18000,
+                cache_write_tokens: 500,
+            })
+        );
+        // codex-acp populates no usage — None, not zeros.
+        assert_eq!(parse_turn_usage(&serde_json::json!({"stopReason": "end_turn"})), None);
+        // Nullable fields (cachedReadTokens etc.) may be null — degrade to 0.
+        let nulls = serde_json::json!({
+            "usage": {"inputTokens": 5, "outputTokens": 2, "cachedReadTokens": null, "totalTokens": 7}
+        });
+        assert_eq!(
+            parse_turn_usage(&nulls),
+            Some(TurnUsage { input_tokens: 5, output_tokens: 2, cache_read_tokens: 0, cache_write_tokens: 0 })
+        );
+    }
+
+    #[tokio::test]
+    async fn session_prompt_returns_stop_reason_and_turn_usage() {
+        let (peer, agent_task) = harness_answering(serde_json::json!({
+            "stopReason": "end_turn",
+            "usage": {"inputTokens": 10, "outputTokens": 4, "totalTokens": 14}
+        }));
+        let (stop, usage) = session_prompt(&peer, "s", "hi").await.unwrap();
+        assert_eq!(stop, "end_turn");
+        assert_eq!(
+            usage,
+            Some(TurnUsage { input_tokens: 10, output_tokens: 4, cache_read_tokens: 0, cache_write_tokens: 0 })
+        );
         agent_task.await.unwrap();
     }
 

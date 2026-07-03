@@ -482,7 +482,7 @@ pub async fn drive_session(
                     }
                 }
                 match stop {
-                    Ok(reason) if reason == "cancelled" => {
+                    Ok((reason, _turn_usage)) if reason == "cancelled" => {
                         if user_cancelled {
                             // The user asked for this stop: keep the partial
                             // output; it is not an error.
@@ -713,6 +713,9 @@ fn handle_notification(
         }
         Some(SessionUpdate::AvailableCommands { commands_json }) => {
             sink.emit(AgentEvent::Commands { commands_json });
+        }
+        Some(SessionUpdate::UsageUpdate { .. }) => {
+            // Task 3 will consume this value; for now, ignore it.
         }
         None => {} // unknown/future update kinds — ignored by design
     }
