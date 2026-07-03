@@ -68,7 +68,15 @@ pub async fn initialize(peer: &RpcPeer) -> Result<bool, RpcError> {
                 "protocolVersion": PROTOCOL_VERSION,
                 // M4: the fs proxy is live — the agent routes file access through
                 // fs/read_text_file / fs/write_text_file, worktree-enforced by us.
-                "clientCapabilities": {"fs": {"readTextFile": true, "writeTextFile": true}},
+                // Vendor display flag (claude-agent-acp 0.54.1 / codex-acp 0.16.0): stream
+                // command output as _meta.terminal_output deltas instead of a trailing
+                // fenced block. Display-only — execution stays in the agent's own process
+                // (security review 2026-07-03 §5). NOT the standard `terminal` capability,
+                // which stays un-advertised by decision (§4).
+                "clientCapabilities": {
+                    "fs": {"readTextFile": true, "writeTextFile": true},
+                    "_meta": {"terminal_output": true}
+                },
                 "clientInfo": {"name": "kineloop", "version": env!("CARGO_PKG_VERSION")}
             }),
         )
@@ -1176,6 +1184,10 @@ mod tests {
             assert_eq!(
                 req["params"]["clientCapabilities"]["fs"]["writeTextFile"],
                 true
+            );
+            assert_eq!(
+                req.pointer("/params/clientCapabilities/_meta/terminal_output"),
+                Some(&serde_json::json!(true))
             );
             let resp = serde_json::json!({"jsonrpc":"2.0","id":req["id"],"result":{}});
             agent_write
