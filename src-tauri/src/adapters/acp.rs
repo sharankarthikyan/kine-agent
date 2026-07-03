@@ -942,7 +942,7 @@ fn build_usage_event(
         // turn). Revisit if the process ever outlives a turn.
         cost_usd: s.cost_usd,
         model: None,
-        context_used: snapshot.map(|s| s.used),
+        context_used: snapshot.map(|s| s.used).filter(|used| *used > 0),
         context_window: snapshot.map(|s| s.size).filter(|size| *size > 0),
     })
 }

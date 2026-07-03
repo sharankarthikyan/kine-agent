@@ -161,7 +161,9 @@ function WindowUsage({
           {hasBreakdown && (
             <>
               <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-1 text-xs">
-                <span className="text-muted-foreground">Loaded input</span>
+                <span className="text-muted-foreground">
+                  {usage.contextUsed !== null ? "In context" : "Loaded input"}
+                </span>
                 <span className="tabular-nums text-right">{formatTokens(latestContextLoad)}</span>
                 <span className="text-muted-foreground">Generated output</span>
                 <span className="tabular-nums text-right">{formatTokens(usage.outputTokens)}</span>

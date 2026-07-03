@@ -157,6 +157,27 @@ test("context meter uses the reported window over the model's", () => {
   expect(screen.getByText("7% of window")).toBeInTheDocument();
 });
 
+test("labels the token row 'In context' when the agent reports whole-window occupancy", () => {
+  render(
+    <ContextPanel
+      {...base}
+      agent="codex"
+      usage={{
+        inputTokens: 1200,
+        outputTokens: 340,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        costUsd: null,
+        model: null,
+        contextUsed: 48213,
+        contextWindow: 200000,
+      }}
+    />,
+  );
+  expect(screen.getByText("In context")).toBeInTheDocument();
+  expect(screen.queryByText("Loaded input")).not.toBeInTheDocument();
+});
+
 test("token breakdown rows hide when the agent reports no split (context-only usage)", () => {
   render(
     <ContextPanel
