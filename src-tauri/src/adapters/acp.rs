@@ -111,9 +111,12 @@ impl Drop for KillTreeOnDrop {
             // process_group(0) at spawn made the child's pgid == its pid.
             unsafe { libc::killpg(pgid, libc::SIGKILL) };
         }
-        // windows: nothing to do explicitly — `self.job` (if built) drops right
-        // after this body, closing the only job handle; KILL_ON_JOB_CLOSE then
-        // terminates the whole tree.
+        // windows: closing the LAST job handle fires KILL_ON_JOB_CLOSE and the
+        // kernel terminates every process in the job. take()+drop makes the
+        // teardown explicit (and keeps the otherwise-unread field from
+        // tripping dead_code under CI's -D warnings).
+        #[cfg(windows)]
+        drop(self.job.take());
     }
 }
 
