@@ -178,7 +178,8 @@ export function PermissionModeSelect({
             <DialogDescription className="space-y-2 pt-1 text-left">
               <span className="block">
                 Full access auto-approves <strong>everything</strong> (file edits, shell commands, and
-                network) with no gating. It runs only inside this session's isolated worktree.
+                network) with no gating. Kineloop reviews file edits in this session's worktree; it
+                does not sandbox what the agent's own process can access on your machine.
               </span>
               {(agent === "claude" || agent === "antigravity") && (
                 <span className="block">
