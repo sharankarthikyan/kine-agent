@@ -329,6 +329,40 @@ impl TerminalCoalescer {
     }
 }
 
+/// Security review §6 prerequisite: post-cancel fs traffic must be observable
+/// before any future decision to freeze it. Counts fs/* requests served while
+/// `user_cancelled`; one stderr summary per turn, only when nonzero. Pure
+/// observation — serving behavior is unchanged (spec invariant: fs/* stays
+/// served during the cancel wind-down by design).
+#[derive(Default)]
+struct PostCancelFsCounts {
+    reads: u32,
+    writes: u32,
+}
+
+impl PostCancelFsCounts {
+    /// Count an inbound request served while user_cancelled. No-op for
+    /// non-fs methods; caller gates on user_cancelled.
+    fn note(&mut self, method: &str) {
+        match method {
+            "fs/read_text_file" => self.reads += 1,
+            "fs/write_text_file" => self.writes += 1,
+            _ => {}
+        }
+    }
+
+    /// One-line summary, None when nothing was counted.
+    fn summary(&self, app_session_id: &str) -> Option<String> {
+        if self.reads == 0 && self.writes == 0 {
+            return None;
+        }
+        Some(format!(
+            "acp: post-cancel fs served — {} reads, {} writes (session {})",
+            self.reads, self.writes, app_session_id
+        ))
+    }
+}
+
 /// Adapter that drives an ACP agent (Claude in M1) as a subprocess.
 ///
 /// The agent mints its own ACP session id in `session/new`; we capture it into
@@ -681,6 +715,8 @@ pub async fn drive_session(
     // stopReason still maps to Error when no user stop actually happened.
     let mut cancel_arm_disarmed = false;
     let mut user_cancelled = false;
+    // Security review §6 evidence channel — see PostCancelFsCounts doc comment.
+    let mut post_cancel_fs = PostCancelFsCounts::default();
 
     loop {
         tokio::select! {
@@ -703,6 +739,9 @@ pub async fn drive_session(
                             // After session/cancel, ANY permission request answers
                             // cancelled (ACP mandate) — never re-open an approval
                             // card the user already stopped.
+                            if user_cancelled {
+                                post_cancel_fs.note(&method);
+                            }
                             let answer = if user_cancelled && method == "session/request_permission" {
                                 InboundAnswer::Immediate(None)
                             } else {
@@ -726,6 +765,9 @@ pub async fn drive_session(
                 // mutually exclusive outcomes of this same match, so no
                 // buffered terminal byte can survive past this point unflushed.
                 coalescer.flush_all(sink.as_ref());
+                if let Some(line) = post_cancel_fs.summary(&app_session_id) {
+                    eprintln!("{line}");
+                }
                 match stop {
                     Ok((reason, _turn_usage)) if reason == "cancelled" => {
                         if user_cancelled {
@@ -764,6 +806,9 @@ pub async fn drive_session(
                 match msg {
                     None => {
                         coalescer.flush_all(sink.as_ref());
+                        if let Some(line) = post_cancel_fs.summary(&app_session_id) {
+                            eprintln!("{line}");
+                        }
                         sink.emit(AgentEvent::Error { message: "ACP agent closed the connection".into() });
                         return Ok(());
                     }
@@ -778,6 +823,9 @@ pub async fn drive_session(
                         // After session/cancel, ANY permission request answers
                         // cancelled (ACP mandate) — never re-open an approval
                         // card the user already stopped.
+                        if user_cancelled {
+                            post_cancel_fs.note(&method);
+                        }
                         let answer = if user_cancelled && method == "session/request_permission" {
                             InboundAnswer::Immediate(None)
                         } else {
@@ -3314,6 +3362,89 @@ mod tests {
             h.events.lock().unwrap().last().unwrap(),
             AgentEvent::Error { message } if message.contains("cancelled")
         ));
+    }
+
+    /// Security review §6 evidence-channel invariant: fs/* stays served during
+    /// the cancel wind-down BY DESIGN. A scripted fs/read_text_file arriving
+    /// AFTER session/cancel — while the agent is still winding down — must get
+    /// a real answer (not -32601, not the `cancelled` outcome permission
+    /// requests get post-cancel). `PostCancelFsCounts` observes exactly this
+    /// traffic; this test pins the invariant it observes.
+    #[tokio::test]
+    async fn fs_read_is_served_after_user_cancel() {
+        let prompt = Prompt {
+            text: "hello".into(),
+            ..Default::default()
+        };
+        let h = run_fixture(
+            prompt,
+            // Flip the cancel switch once the first token has landed.
+            Some(Box::new(|events, _approvals, cancel_tx| {
+                tokio::spawn(async move {
+                    loop {
+                        let seen = events.lock().unwrap().iter().any(
+                            |e| matches!(e, AgentEvent::Token { text } if text == "partial "),
+                        );
+                        if seen {
+                            let _ = cancel_tx.send(true);
+                            return;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+            })),
+            |mut lines, mut w, prompt_id, wt| async move {
+                std::fs::write(wt.join("notes.txt"), "post-cancel\n").unwrap();
+                send_line(
+                    &mut w,
+                    serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{
+                    "sessionId":"acp-abc","update":{"sessionUpdate":"agent_message_chunk",
+                    "content":{"type":"text","text":"partial "}}}}),
+                )
+                .await;
+                let msg: serde_json::Value =
+                    serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+                assert_eq!(msg["method"], "session/cancel");
+                // A scripted fs read AFTER the cancel notification went out —
+                // the serve-during-wind-down invariant this counter observes.
+                send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":77,"method":"fs/read_text_file",
+                    "params":{"sessionId":"acp-abc",
+                        "path":wt.join("notes.txt").to_string_lossy().to_string()}})).await;
+                let ans: serde_json::Value =
+                    serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+                assert_eq!(ans["id"], 77);
+                assert_eq!(
+                    ans["result"]["content"], "post-cancel\n",
+                    "fs/* must still be served post-cancel, got {ans:?}"
+                );
+                send_line(
+                    &mut w,
+                    serde_json::json!({"jsonrpc":"2.0","id":prompt_id,
+                    "result":{"stopReason":"cancelled"}}),
+                )
+                .await;
+            },
+        )
+        .await;
+        assert!(matches!(
+            h.events.lock().unwrap().last().unwrap(),
+            AgentEvent::Done { .. }
+        ));
+    }
+
+    #[test]
+    fn post_cancel_fs_counts_note_and_summary() {
+        let mut c = PostCancelFsCounts::default();
+        assert_eq!(c.summary("s1"), None, "nothing counted → no log line");
+        c.note("fs/read_text_file");
+        c.note("fs/write_text_file");
+        c.note("fs/write_text_file");
+        c.note("session/request_permission"); // never counted
+        c.note("terminal/create");            // never counted
+        assert_eq!(
+            c.summary("s1").as_deref(),
+            Some("acp: post-cancel fs served — 1 reads, 2 writes (session s1)")
+        );
     }
 
     #[test]
