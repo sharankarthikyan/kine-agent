@@ -8,8 +8,8 @@ them in one structured orchestrator UI: a session list, live status, diff viewer
 and approval gates, with per-session git-worktree isolation.
 
 Instead of juggling several agent CLIs across terminal tabs, you drive them all from
-one window. Each session runs in its own isolated git worktree, so an agent's edits
-never touch your working tree until you review them.
+one window. Each session runs in its own git worktree, so the edits agents make
+land on a dedicated branch for you to review before anything merges into your repo.
 
 > Formerly "agent-editor". Existing `~/.agent-editor/` data is migrated to
 > `~/.kineloop/` automatically on first launch.
@@ -18,9 +18,9 @@ never touch your working tree until you review them.
 
 - **Multiple agents, one UI.** Start a session with Claude, Codex, or Antigravity;
   the session list, diff viewer, and approval flow are identical across agents.
-- **Per-session isolation.** Every session gets its own git worktree
-  (`~/.kineloop/worktrees/<id>`) on a dedicated branch — blast-radius containment by
-  default. Review the diff, then merge or discard.
+- **Per-session review boundary.** Every session gets its own git worktree
+  (`~/Kineloop/worktrees/<id>`) on a dedicated branch, so every change is diffable
+  and revertible before it reaches your repo. Review the diff, then merge or discard.
 - **Live, normalized events.** Three different agent CLIs emit three different JSON
   shapes; an adapter layer normalizes them to one event stream (tokens, tool calls,
   file writes, usage, done/error).
@@ -89,9 +89,12 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets
 
 ## Data & privacy
 
-- All data is local. Sessions, worktrees, and the event log live under `~/.kineloop/`.
+- All data is local. Sessions and the event log live under `~/.kineloop/`; session
+  worktrees under `~/Kineloop/worktrees/`.
 - Agent CLIs run under your own subscription/auth; Kineloop does not store API keys.
-- Agents default to their own sandbox; full-access modes are opt-in per session.
+- Kineloop reviews file edits in each session's worktree; it does not sandbox what
+  the agent's own process can access on your machine. Some CLIs apply their own
+  sandboxing; full-access modes are opt-in per session.
 
 ## Status
 
