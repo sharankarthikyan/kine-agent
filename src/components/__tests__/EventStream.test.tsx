@@ -354,8 +354,11 @@ test("terminal events never render their own rows", () => {
   render(
     <EventStream
       events={[
+        { kind: "token", data: { text: "before " } },
         { kind: "toolCall", data: { name: "Bash", input: "{\"command\":\"ls\"}", toolCallId: "t1" } },
+        { kind: "token", data: { text: "af" } },
         { kind: "terminalOutput", data: { toolCallId: "t1", data: "<img src=x onerror=alert(1)>\n" } },
+        { kind: "token", data: { text: "ter" } },
         { kind: "terminalExit", data: { toolCallId: "t1", exitCode: 0, signal: null } },
       ]}
     />,
@@ -363,6 +366,12 @@ test("terminal events never render their own rows", () => {
   // Chip renders; the raw terminal events do not appear as standalone rows.
   expect(screen.getByText("Bash")).toBeInTheDocument();
   expect(document.querySelector("img")).toBeNull();
+  // Discriminating assertion: "af" and "ter" only coalesce into one prose block
+  // if both terminal events are excluded from `visible` before grouping — if the
+  // filter were absent, the terminal event between them would split the token
+  // run into two separate prose groups ("af", "ter") and this text would never
+  // appear as one node.
+  expect(screen.getByText("after")).toBeInTheDocument();
 });
 
 test("coalesces consecutive thought chunks into one collapsed Thinking block", () => {
