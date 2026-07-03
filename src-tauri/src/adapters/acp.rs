@@ -3,7 +3,7 @@
 //!
 //! M1 scope: text + tool-call streaming, permissions auto-answered from the
 //! session's permission mode, no usage event (ACP does not standardize usage),
-//! immediate-kill cancel via `kill_on_drop`. M4 adds the fs proxy: reads/writes
+//! immediate-kill cancel via `kill_on_drop`. The user's model pick is forwarded per turn via session/set_config_option (configId "model"). M4 adds the fs proxy: reads/writes
 //! the agent routes through fs/read_text_file / fs/write_text_file are served
 //! here, contained to the session worktree (`acp::fs_guard`).
 
@@ -355,6 +355,23 @@ pub async fn drive_session(
         if let Err(e) = client::session_set_mode(&peer, &acp_session_id, &target_mode).await {
             eprintln!(
                 "acp: session/set_mode {target_mode} failed: {e} — the agent may not honor this session's permission mode"
+            );
+        }
+    }
+
+    // Forward the user's model pick — session/set_config_option {configId:"model"}
+    // (ground truth 2026-07-02: same wire mechanism on claude-agent-acp 0.54.1 and
+    // codex-acp 0.16.0; claude resolves aliases like "sonnet", codex treats unknown
+    // values as raw model slugs). Neither agent restores a per-session model across
+    // a process restart, so the pick is re-asserted on EVERY turn — fresh or
+    // resumed. Best-effort: a failure means the turn runs on the agent's default
+    // model, never that it dies.
+    if let Some(model) = prompt.model.as_deref() {
+        if let Err(e) =
+            client::session_set_config_option(&peer, &acp_session_id, "model", model).await
+        {
+            eprintln!(
+                "acp: session/set_config_option model={model} failed: {e} — the turn runs on the agent's default model"
             );
         }
     }
@@ -1335,6 +1352,127 @@ mod tests {
             h.events.lock().unwrap().last().unwrap(),
             AgentEvent::Done { .. }
         ));
+    }
+
+    /// The model pick travels as session/set_config_option {configId:"model"} —
+    /// AFTER session/new, BEFORE session/prompt. Fixture asserts the full order.
+    #[tokio::test]
+    async fn drive_session_forwards_model_via_set_config_option() {
+        let prompt = Prompt {
+            text: "hello".into(),
+            model: Some("sonnet".into()),
+            ..Default::default()
+        };
+        let h = run_agent_fixture(prompt, None, None, |mut lines, mut w, _wt| async move {
+            let req = next_request(&mut lines, "initialize").await;
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":false}}})).await;
+            let req = next_request(&mut lines, "session/new").await;
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"sessionId":"acp-abc","modes":{"currentModeId":"default",
+                    "availableModes":[{"id":"default"}]}}})).await;
+            // No permission_mode ⇒ target mode "default" is already current ⇒ no
+            // session/set_mode. The very next request must be the model pick.
+            let req = next_request(&mut lines, "session/set_config_option").await;
+            assert_eq!(req["params"]["sessionId"], "acp-abc");
+            assert_eq!(req["params"]["configId"], "model");
+            assert_eq!(req["params"]["value"], "sonnet");
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"configOptions":[]}})).await;
+            let req = next_request(&mut lines, "session/prompt").await;
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"stopReason":"end_turn"}})).await;
+        })
+        .await;
+        let events = h.events.lock().unwrap();
+        assert!(
+            events.iter().any(|e| matches!(e, AgentEvent::Done { .. })),
+            "turn must complete normally, got {events:?}"
+        );
+    }
+
+    /// Neither pinned agent restores a per-session model across a process
+    /// restart (ground truth 2026-07-02) — resume turns must re-assert the pick
+    /// after session/load.
+    #[tokio::test]
+    async fn drive_session_reasserts_model_after_session_load() {
+        let prompt = Prompt {
+            text: "again".into(),
+            model: Some("gpt-5-codex".into()),
+            ..Default::default()
+        };
+        let h = run_agent_fixture(
+            prompt,
+            Some("acp-prev".into()),
+            None,
+            |mut lines, mut w, _wt| async move {
+                let req = next_request(&mut lines, "initialize").await;
+                send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                    "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}})).await;
+                let req = next_request(&mut lines, "session/load").await;
+                assert_eq!(req["params"]["sessionId"], "acp-prev");
+                send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                    "result":{"modes":{"currentModeId":"default",
+                        "availableModes":[{"id":"default"}]}}})).await;
+                let req = next_request(&mut lines, "session/set_config_option").await;
+                assert_eq!(req["params"]["configId"], "model");
+                assert_eq!(req["params"]["value"], "gpt-5-codex");
+                send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                    "result":{"configOptions":[]}})).await;
+                let req = next_request(&mut lines, "session/prompt").await;
+                send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                    "result":{"stopReason":"end_turn"}})).await;
+            },
+        )
+        .await;
+        let events = h.events.lock().unwrap();
+        assert!(
+            events.iter().any(|e| matches!(e, AgentEvent::Done { .. })),
+            "resume turn must complete normally, got {events:?}"
+        );
+    }
+
+    /// set_config_option failing is best-effort — the turn proceeds on the
+    /// agent's default model instead of dying. Also pins the request ORDER when
+    /// a set_mode fires too: set_mode → set_config_option → prompt.
+    #[tokio::test]
+    async fn model_set_failure_does_not_kill_the_run() {
+        let prompt = Prompt {
+            text: "hello".into(),
+            model: Some("bogus-model".into()),
+            permission_mode: Some("acceptEdits".into()),
+            ..Default::default()
+        };
+        let h = run_agent_fixture(prompt, None, None, |mut lines, mut w, _wt| async move {
+            let req = next_request(&mut lines, "initialize").await;
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":false}}})).await;
+            let req = next_request(&mut lines, "session/new").await;
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"sessionId":"acp-abc","modes":{"currentModeId":"default",
+                    "availableModes":[{"id":"default"},{"id":"acceptEdits"}]}}})).await;
+            // acceptEdits doesn't match current "default" ⇒ set_mode first…
+            let req = next_request(&mut lines, "session/set_mode").await;
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],"result":{}})).await;
+            // …then the model pick — answered with an ERROR (codex-acp answers
+            // -32602 on an empty/boolean value; claude on an unresolvable one).
+            let req = next_request(&mut lines, "session/set_config_option").await;
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "error":{"code":-32602,"message":"unknown model"}})).await;
+            let req = next_request(&mut lines, "session/prompt").await;
+            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"stopReason":"end_turn"}})).await;
+        })
+        .await;
+        let events = h.events.lock().unwrap();
+        assert!(
+            events.iter().any(|e| matches!(e, AgentEvent::Done { .. })),
+            "a failed model set must not kill the turn, got {events:?}"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, AgentEvent::Error { .. })),
+            "no Error event for a best-effort model set failure, got {events:?}"
+        );
     }
 
     #[tokio::test]
