@@ -368,12 +368,12 @@ pub async fn drive_session(
     let can_load = match client::initialize(&peer).await {
         Ok(can_load) => can_load,
         Err(e) => {
-            return Err(setup_protocol_error(
+            return handle_setup_failure(
                 "ACP initialize failed",
                 &e,
                 profile,
                 sink.as_ref(),
-            ));
+            );
         }
     };
 
@@ -396,12 +396,12 @@ pub async fn drive_session(
                     let (id, modes) = match new_session(&peer, &cwd).await {
                         Ok(v) => v,
                         Err(e) => {
-                            return Err(setup_protocol_error(
+                            return handle_setup_failure(
                                 "session/new failed",
                                 &e,
                                 profile,
                                 sink.as_ref(),
-                            ));
+                            );
                         }
                     };
                     (id, modes, true)
@@ -413,12 +413,12 @@ pub async fn drive_session(
             let (id, modes) = match new_session(&peer, &cwd).await {
                 Ok(v) => v,
                 Err(e) => {
-                    return Err(setup_protocol_error(
+                    return handle_setup_failure(
                         "session/new failed",
                         &e,
                         profile,
                         sink.as_ref(),
-                    ));
+                    );
                 }
             };
             (id, modes, true)
@@ -427,12 +427,12 @@ pub async fn drive_session(
             let (id, modes) = match new_session(&peer, &cwd).await {
                 Ok(v) => v,
                 Err(e) => {
-                    return Err(setup_protocol_error(
+                    return handle_setup_failure(
                         "session/new failed",
                         &e,
                         profile,
                         sink.as_ref(),
-                    ));
+                    );
                 }
             };
             // resume_transcript is only populated for follow-up turns
@@ -635,19 +635,28 @@ fn describe_rpc_failure(e: &crate::acp::jsonrpc::RpcError, login_hint: &str) -> 
     }
 }
 
-fn setup_protocol_error(
+/// Turn an initialize/session-setup RPC failure into a `drive_session` return
+/// value. Auth-required (-32000) is a recoverable precondition, NOT a failure:
+/// emit the `AuthRequired` card (the user's login/recovery surface) and return
+/// `Ok(())` so the IPC command resolves cleanly. That keeps the destructive red
+/// Alert out of the transcript — the frontend only paints one on a *rejected*
+/// command — and lets the session get stamped "auth" instead of "error"
+/// (`run_persisting`'s status logic keys off `result.is_err()`). Every other
+/// failure is a genuine `Protocol` error.
+fn handle_setup_failure(
     prefix: &str,
     e: &crate::acp::jsonrpc::RpcError,
     profile: AcpProfile,
     sink: &dyn EventSink,
-) -> SessionError {
+) -> Result<(), SessionError> {
     if is_auth_required_rpc(e) {
         sink.emit(profile.auth_required_event());
+        return Ok(());
     }
-    SessionError::Protocol(format!(
+    Err(SessionError::Protocol(format!(
         "{prefix}: {}",
         describe_rpc_failure(e, profile.login_hint)
-    ))
+    )))
 }
 
 fn is_auth_required_rpc(e: &crate::acp::jsonrpc::RpcError) -> bool {
@@ -3118,8 +3127,9 @@ mod tests {
     }
 
     /// An unauthenticated agent answers session/new with auth_required (-32000).
-    /// The run must fail with a Protocol error carrying the login hint — an
-    /// actionable toast, not a bare "agent returned error -32000".
+    /// Auth is a recoverable precondition, not a failure: the run resolves
+    /// `Ok(())` (so the command doesn't reject and paint a red Alert) and emits
+    /// the actionable `AuthRequired` card carrying the login hint.
     #[tokio::test]
     async fn auth_required_on_session_new_surfaces_the_login_hint() {
         let (ours, theirs) = tokio::io::duplex(64 * 1024);
@@ -3148,7 +3158,7 @@ mod tests {
             )
             .await;
         });
-        let err = drive_session(
+        let result = drive_session(
             read,
             write,
             Prompt {
@@ -3164,11 +3174,11 @@ mod tests {
             CODEX_ACP,
             tokio::sync::watch::channel(false).1,
         )
-        .await
-        .unwrap_err();
+        .await;
         assert!(
-            matches!(&err, crate::adapter::SessionError::Protocol(m) if m.contains("codex login")),
-            "expected the login hint in the failure, got {err:?}"
+            result.is_ok(),
+            "auth is not a failure — the run must resolve Ok so the command \
+             doesn't reject into a red Alert, got {result:?}"
         );
         assert!(
             events.lock().unwrap().iter().any(|e| {
