@@ -57,6 +57,10 @@ export type AgentEvent =
         cacheCreationTokens: number;
         costUsd: number | null;
         model: string | null;
+        /** ACP usage_update: tokens currently in context (absent on pipe events). */
+        contextUsed?: number;
+        /** ACP usage_update: the agent-reported context window size. */
+        contextWindow?: number;
       };
     };
 

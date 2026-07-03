@@ -6,7 +6,6 @@ import {
   type UsageData,
   type UsageSummary,
 } from "@/lib/contextDerive";
-import { type Engine } from "@/lib/agent";
 import type { RuleFile, Capabilities } from "@/lib/inspect";
 import type { ModelInfo } from "@/lib/models";
 import { DEFAULT_PERMISSION_MODE, permissionModeLabel, type PermissionMode } from "@/lib/permissions";
@@ -26,10 +25,6 @@ export interface ContextPanelProps {
   model: ModelInfo | null;
   contextFootprint?: ContextFootprint | null;
   agent?: string;
-  /** The session's engine. ACP has no CLI-reported usage yet, so the
-   * "Reported by CLI" correction row is suppressed for it. Absent ⇒ "pipe"
-   * (external history, fixtures). */
-  engine?: Engine;
   source?: "kineloop" | "external";
   permissionMode?: PermissionMode | null;
   sandboxTerminal?: boolean;
@@ -107,7 +102,7 @@ function WindowUsage({
   conversationTurns = null,
   transcriptComplete = true,
 }: WindowUsageProps) {
-  const contextWindow = model?.contextWindow ?? null;
+  const contextWindow = usage?.contextWindow ?? model?.contextWindow ?? null;
   const latestContextLoad = usage ? contextLoadTokens(usage, agent) : 0;
   const progressValue =
     usage !== null && contextWindow !== null
@@ -115,6 +110,14 @@ function WindowUsage({
       : null;
   const totalGenerated = summary?.totals.outputTokens ?? 0;
   const totalCost = summary?.totals.costUsd ?? null;
+  // codex over ACP reports only occupancy — no input/output/cache split. Zero
+  // rows would read as measurements; hide the grid when no split was reported.
+  const hasBreakdown =
+    usage !== null &&
+    (usage.inputTokens > 0 ||
+      usage.outputTokens > 0 ||
+      usage.cacheReadTokens > 0 ||
+      usage.cacheCreationTokens > 0);
 
   return (
     <div className="flex flex-col gap-3">
@@ -155,18 +158,22 @@ function WindowUsage({
             </p>
           )}
 
-          <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-1 text-xs">
-            <span className="text-muted-foreground">Loaded input</span>
-            <span className="tabular-nums text-right">{formatTokens(latestContextLoad)}</span>
-            <span className="text-muted-foreground">Generated output</span>
-            <span className="tabular-nums text-right">{formatTokens(usage.outputTokens)}</span>
-            <span className="text-muted-foreground">Cache read</span>
-            <span className="tabular-nums text-right">{formatTokens(usage.cacheReadTokens)}</span>
-            <span className="text-muted-foreground">Cache written</span>
-            <span className="tabular-nums text-right">{formatTokens(usage.cacheCreationTokens)}</span>
-          </div>
+          {hasBreakdown && (
+            <>
+              <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-1 text-xs">
+                <span className="text-muted-foreground">Loaded input</span>
+                <span className="tabular-nums text-right">{formatTokens(latestContextLoad)}</span>
+                <span className="text-muted-foreground">Generated output</span>
+                <span className="tabular-nums text-right">{formatTokens(usage.outputTokens)}</span>
+                <span className="text-muted-foreground">Cache read</span>
+                <span className="tabular-nums text-right">{formatTokens(usage.cacheReadTokens)}</span>
+                <span className="text-muted-foreground">Cache written</span>
+                <span className="tabular-nums text-right">{formatTokens(usage.cacheCreationTokens)}</span>
+              </div>
 
-          <p className="text-xs text-muted-foreground">{cacheCopy(agent)}</p>
+              <p className="text-xs text-muted-foreground">{cacheCopy(agent)}</p>
+            </>
+          )}
         </>
       )}
 
@@ -187,7 +194,7 @@ function WindowUsage({
             <span className="text-right">Recent page</span>
           </>
         )}
-        {summary !== null && summary.eventCount > 0 && (
+        {summary !== null && summary.eventCount > 0 && totalGenerated > 0 && (
           <>
             <span className="text-muted-foreground">Session output</span>
             <span className="tabular-nums text-right">{formatTokens(totalGenerated)}</span>
@@ -331,7 +338,6 @@ export function ContextPanel({
   model,
   contextFootprint,
   agent,
-  engine = "pipe",
   source = "kineloop",
   permissionMode = DEFAULT_PERMISSION_MODE,
   sandboxTerminal = false,
@@ -352,6 +358,8 @@ export function ContextPanel({
       cacheCreationTokens: 0,
       costUsd: null,
       model: null,
+      contextUsed: null,
+      contextWindow: null,
     },
     eventCount: usage === null ? 0 : 1,
   };
@@ -439,8 +447,7 @@ export function ContextPanel({
                 {model?.label ?? usage?.model ?? "—"}
               </span>
             </div>
-            {engine !== "acp" &&
-              usage?.model &&
+            {usage?.model &&
               usage.model !== model?.value &&
               usage.model !== model?.label && (
               <p className="text-xs text-muted-foreground">

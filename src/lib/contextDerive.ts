@@ -16,6 +16,10 @@ export interface UsageData {
   cacheCreationTokens: number;
   costUsd: number | null;
   model: string | null;
+  /** ACP-reported context occupancy (tokens in window); null on pipe events. */
+  contextUsed: number | null;
+  /** ACP-reported context window size; null on pipe events. */
+  contextWindow: number | null;
 }
 
 export interface UsageSummary {
@@ -59,6 +63,8 @@ export interface ContextFootprintInput {
  * input_tokens, so adding it would double-count.
  */
 export function contextLoadTokens(usage: UsageData, agent: string): number {
+  // ACP agents report occupancy directly — authoritative over the split heuristic.
+  if (usage.contextUsed !== null) return usage.contextUsed;
   if (agent === "claude") {
     return usage.inputTokens + usage.cacheReadTokens + usage.cacheCreationTokens;
   }
@@ -154,6 +160,14 @@ function usageFromPayload(payloadJson: string): UsageData {
     cacheCreationTokens: asNumber(raw.cacheCreationTokens),
     costUsd: typeof raw.costUsd === "number" && Number.isFinite(raw.costUsd) ? raw.costUsd : null,
     model: typeof raw.model === "string" ? raw.model : null,
+    contextUsed:
+      typeof raw.contextUsed === "number" && Number.isFinite(raw.contextUsed)
+        ? raw.contextUsed
+        : null,
+    contextWindow:
+      typeof raw.contextWindow === "number" && Number.isFinite(raw.contextWindow)
+        ? raw.contextWindow
+        : null,
   };
 }
 
@@ -168,6 +182,7 @@ function isEmptyUsage(usage: UsageData): boolean {
     usage.outputTokens === 0 &&
     usage.cacheReadTokens === 0 &&
     usage.cacheCreationTokens === 0 &&
+    (usage.contextUsed === null || usage.contextUsed === 0) &&
     (usage.costUsd === null || usage.costUsd === 0)
   );
 }
@@ -181,6 +196,8 @@ export function usageSummaryFromEvents(events: StoredEvent[]): UsageSummary {
     cacheCreationTokens: 0,
     costUsd: null,
     model: null,
+    contextUsed: null,
+    contextWindow: null,
   };
   let eventCount = 0;
 

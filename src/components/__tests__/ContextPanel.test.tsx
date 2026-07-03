@@ -27,6 +27,8 @@ test("renders context usage with window pressure, output, cache, and cost", () =
         cacheCreationTokens: 0,
         costUsd: 0.12,
         model: "opus",
+        contextUsed: null,
+        contextWindow: null,
       }}
       usageSummary={{
         latest: {
@@ -36,6 +38,8 @@ test("renders context usage with window pressure, output, cache, and cost", () =
           cacheCreationTokens: 0,
           costUsd: 0.12,
           model: "opus",
+          contextUsed: null,
+          contextWindow: null,
         },
         totals: {
           inputTokens: 50000,
@@ -44,6 +48,8 @@ test("renders context usage with window pressure, output, cache, and cost", () =
           cacheCreationTokens: 0,
           costUsd: 0.12,
           model: "opus",
+          contextUsed: null,
+          contextWindow: null,
         },
         eventCount: 10,
       }}
@@ -108,7 +114,6 @@ test("ACP sessions show the picked model in Settings — the pick is forwarded",
     <ContextPanel
       {...base}
       agent="claude"
-      engine="acp"
       model={{
         value: "opus",
         label: "Claude Opus",
@@ -123,23 +128,54 @@ test("ACP sessions show the picked model in Settings — the pick is forwarded",
   expect(screen.queryByText("CLI default")).not.toBeInTheDocument();
 });
 
-test("ACP sessions suppress the Reported-by-CLI correction row", () => {
+test("context meter uses the reported window over the model's", () => {
   render(
     <ContextPanel
       {...base}
-      agent="claude"
-      engine="acp"
+      agent="codex"
+      model={{
+        value: "gpt-5.5",
+        label: "GPT-5.5",
+        agent: "codex",
+        description: null,
+        disabled: false,
+        contextWindow: 272000,
+      }}
       usage={{
-        inputTokens: 10,
-        outputTokens: 5,
+        inputTokens: 0,
+        outputTokens: 0,
         cacheReadTokens: 0,
         cacheCreationTokens: 0,
         costUsd: null,
-        model: "claude-sonnet-4-6",
+        model: null,
+        contextUsed: 9500,
+        contextWindow: 128000,
       }}
     />,
   );
-  expect(screen.queryByText(/reported by cli/i)).not.toBeInTheDocument();
+  // 9500 / 128000 (reported) = 7%, not 9500 / 272000 (model) = 3%
+  expect(screen.getByText("7% of window")).toBeInTheDocument();
+});
+
+test("token breakdown rows hide when the agent reports no split (context-only usage)", () => {
+  render(
+    <ContextPanel
+      {...base}
+      agent="codex"
+      usage={{
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        costUsd: null,
+        model: null,
+        contextUsed: 9500,
+        contextWindow: 272000,
+      }}
+    />,
+  );
+  expect(screen.queryByText("Generated output")).not.toBeInTheDocument();
+  expect(screen.queryByText("Cache read")).not.toBeInTheDocument();
 });
 
 test("renders estimated context source footprint", () => {

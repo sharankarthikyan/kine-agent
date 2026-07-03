@@ -179,6 +179,8 @@ describe("contextLoadTokens", () => {
     cacheCreationTokens: 8619,
     costUsd: 0.2,
     model: null,
+    contextUsed: null,
+    contextWindow: null,
   };
 
   it("counts cache read/write as loaded input for claude", () => {
@@ -187,5 +189,44 @@ describe("contextLoadTokens", () => {
 
   it("does not double-count codex cached tokens (subset of input)", () => {
     expect(contextLoadTokens(usage, "codex")).toBe(22_410);
+  });
+
+  it("prefers reported context occupancy over the split heuristic", () => {
+    const reported = {
+      inputTokens: 1200,
+      outputTokens: 340,
+      cacheReadTokens: 18000,
+      cacheCreationTokens: 500,
+      costUsd: null,
+      model: null,
+      contextUsed: 48213,
+      contextWindow: 200000,
+    };
+    expect(contextLoadTokens(reported, "claude")).toBe(48213);
+    const withoutContext = { ...reported, contextUsed: null, contextWindow: null };
+    expect(contextLoadTokens(withoutContext, "claude")).toBe(1200 + 18000 + 500);
+  });
+});
+
+describe("usage payload contextUsed/contextWindow", () => {
+  it("parse to numbers, absent to null", () => {
+    const events = [
+      ev(0, "usage", JSON.stringify({ inputTokens: 5, outputTokens: 2, contextUsed: 48213, contextWindow: 200000 })),
+    ];
+    const { latest } = usageSummaryFromEvents(events);
+    expect(latest?.contextUsed).toBe(48213);
+    expect(latest?.contextWindow).toBe(200000);
+
+    const legacy = [ev(0, "usage", JSON.stringify({ inputTokens: 5, outputTokens: 2 }))];
+    const { latest: old } = usageSummaryFromEvents(legacy);
+    expect(old?.contextUsed).toBeNull();
+    expect(old?.contextWindow).toBeNull();
+  });
+
+  it("a context-only usage sample (codex ACP shape) is not 'empty'", () => {
+    const events = [ev(0, "usage", JSON.stringify({ contextUsed: 9500, contextWindow: 272000 }))];
+    const summary = usageSummaryFromEvents(events);
+    expect(summary.latest).not.toBeNull();
+    expect(summary.eventCount).toBe(1);
   });
 });
