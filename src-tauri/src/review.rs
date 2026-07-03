@@ -294,7 +294,7 @@ fn read_with_storage_cap<R: Read>(reader: &mut R, cap: usize) -> std::io::Result
 }
 
 fn git_command(dir: &Path, args: &[&str]) -> Command {
-    let mut command = Command::new("git");
+    let mut command = crate::proc::std_command("git");
     command
         .arg("-C")
         .arg(dir)

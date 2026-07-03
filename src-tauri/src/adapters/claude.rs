@@ -6,7 +6,6 @@ use crate::events::AgentEvent;
 use serde_json::Value;
 use std::path::PathBuf;
 use tokio::io::{AsyncReadExt, BufReader};
-use tokio::process::Command;
 
 /// Concrete adapter that drives the `claude` CLI.
 pub struct ClaudeAdapter;
@@ -158,7 +157,7 @@ pub async fn spawn_and_stream(
     // args to `.cmd`/`.bat`), so a multi-line prompt is fed over stdin instead. `claude -p`
     // reads the prompt from stdin when no positional prompt is supplied.
     let prompt_via_stdin = is_batch_shim(&program);
-    let mut command = Command::new(&program);
+    let mut command = crate::proc::tokio_command(&program);
     command.arg("-p");
     if !prompt_via_stdin {
         command.arg(&prompt.text);

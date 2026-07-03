@@ -11,6 +11,7 @@ pub mod git;
 pub mod inspect;
 pub mod models;
 pub mod permission;
+pub mod proc;
 pub mod review;
 pub mod store;
 pub mod worktree;
@@ -19,6 +20,11 @@ use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // A Finder/desktop launch inherits launchd's minimal PATH (no Homebrew/npm/
+    // ~/.local/bin), making every agent CLI look "not installed" in the packaged app.
+    // Adopt the user's login-shell PATH before anything resolves or spawns a CLI.
+    agent_paths::adopt_login_shell_path();
+
     // Migrate the pre-rename data dir (~/.agent-editor → ~/.kineloop) before anything
     // touches the store, so existing sessions and worktrees carry over.
     agent_paths::migrate_legacy_data_dir();

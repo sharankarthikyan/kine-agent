@@ -7,7 +7,6 @@ use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, BufReader};
-use tokio::process::Command;
 
 /// Adapter that drives the `codex` CLI via `codex exec --json`.
 ///
@@ -207,7 +206,7 @@ pub async fn spawn_and_stream(
     // reads the prompt from stdin when the positional prompt is `-`; stdin MUST then be
     // closed (EOF) or `codex exec` hangs waiting for more input.
     let prompt_via_stdin = is_batch_shim(&program);
-    let mut command = Command::new(&program);
+    let mut command = crate::proc::tokio_command(&program);
     command.arg("exec");
     // The sandbox/bypass flag is an `exec`-level option and MUST precede the `resume`
     // subcommand (`codex exec -s <tier> resume <id>` is accepted; `codex exec resume -s`

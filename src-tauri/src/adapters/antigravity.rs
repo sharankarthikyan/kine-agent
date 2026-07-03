@@ -8,7 +8,6 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, BufReader};
-use tokio::process::Command;
 use tokio::time::{timeout, Duration};
 
 /// Adapter that drives the Antigravity CLI (`agy`).
@@ -76,7 +75,7 @@ pub async fn spawn_and_stream(
     // Windows smoke test. Because stdin is closed (EOF) after the write, the worst case if
     // agy ignores stdin is a clean "no prompt" exit, not a hang.
     let prompt_via_stdin = is_batch_shim(&program);
-    let mut command = Command::new(&program);
+    let mut command = crate::proc::tokio_command(&program);
     command.arg("--print");
     if !prompt_via_stdin {
         command.arg(&prompt.text);
@@ -253,7 +252,7 @@ enum AntigravityAuthProbe {
 }
 
 async fn antigravity_auth_probe(program: &OsStr) -> AntigravityAuthProbe {
-    let mut command = Command::new(program);
+    let mut command = crate::proc::tokio_command(program);
     command
         .arg("models")
         .stdin(std::process::Stdio::null())

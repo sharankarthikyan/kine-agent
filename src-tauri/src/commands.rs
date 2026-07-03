@@ -853,7 +853,7 @@ fn canonical_repo_path(repo: impl AsRef<Path>) -> Result<PathBuf, String> {
     if !path.is_dir() {
         return Err("repository path is not a directory".to_string());
     }
-    let output = std::process::Command::new("git")
+    let output = crate::proc::std_command("git")
         .arg("-C")
         .arg(&path)
         .args(["rev-parse", "--show-toplevel"])
@@ -1876,7 +1876,7 @@ pub async fn open_in_editor(session_id: String) -> Result<(), String> {
         let wt = worktree::worktree_for(&root, &session_id).map_err(|e| e.to_string())?;
         // Resolve `code` via PATHEXT so the Windows `code.cmd` shim is found, not just
         // `code.exe`.
-        std::process::Command::new(crate::agent_paths::resolve_program("code"))
+        crate::proc::std_command(crate::agent_paths::resolve_program("code"))
             .arg(&wt.path)
             .spawn()
             .map_err(|_| "VS Code (code) not found on PATH".to_string())?;
@@ -1903,7 +1903,7 @@ fn applescript_string(value: &str) -> String {
 fn open_terminal_at(dir: &Path) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("open")
+        crate::proc::user_facing_std_command("open")
             .arg("-a")
             .arg("Terminal")
             .arg(dir)
@@ -1914,7 +1914,7 @@ fn open_terminal_at(dir: &Path) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         // Prefer Windows Terminal when present.
-        if std::process::Command::new(crate::agent_paths::resolve_program("wt"))
+        if crate::proc::user_facing_std_command(crate::agent_paths::resolve_program("wt"))
             .arg("-d")
             .arg(dir)
             .spawn()
@@ -1924,7 +1924,7 @@ fn open_terminal_at(dir: &Path) -> Result<(), String> {
         }
         // Fall back to a classic console window opened in the directory. `start ""`
         // supplies an empty window title so the path isn't misread as the title.
-        std::process::Command::new("cmd")
+        crate::proc::user_facing_std_command("cmd")
             .args(["/C", "start", "", "cmd", "/K"])
             .arg(format!("cd /d \"{}\"", dir.display()))
             .spawn()
@@ -1943,7 +1943,7 @@ fn open_terminal_at(dir: &Path) -> Result<(), String> {
             "kitty",
             "xterm",
         ] {
-            if std::process::Command::new(term)
+            if crate::proc::user_facing_std_command(term)
                 .current_dir(dir)
                 .spawn()
                 .is_ok()
@@ -1961,7 +1961,7 @@ fn open_terminal_command_at(dir: &Path, command: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         let script = format!("cd {} && {}", shell_quote(&dir.to_string_lossy()), command);
-        std::process::Command::new("osascript")
+        crate::proc::user_facing_std_command("osascript")
             .args(["-e", "tell application \"Terminal\" to activate"])
             .arg("-e")
             .arg(format!(
@@ -1975,7 +1975,7 @@ fn open_terminal_command_at(dir: &Path, command: &str) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         let script = format!("cd /d \"{}\" && {}", dir.display(), command);
-        if std::process::Command::new(crate::agent_paths::resolve_program("wt"))
+        if crate::proc::user_facing_std_command(crate::agent_paths::resolve_program("wt"))
             .args(["-d"])
             .arg(dir)
             .args(["cmd", "/K", &script])
@@ -1984,7 +1984,7 @@ fn open_terminal_command_at(dir: &Path, command: &str) -> Result<(), String> {
         {
             return Ok(());
         }
-        std::process::Command::new("cmd")
+        crate::proc::user_facing_std_command("cmd")
             .args(["/C", "start", "", "cmd", "/K", &script])
             .spawn()
             .map_err(|e| format!("failed to open a terminal: {e}"))?;
@@ -2002,7 +2002,7 @@ fn open_terminal_command_at(dir: &Path, command: &str) -> Result<(), String> {
             ("xterm", vec!["-e", "sh", "-lc"]),
         ] {
             let script = format!("cd {} && {}", shell_quote(&dir.to_string_lossy()), command);
-            let mut cmd = std::process::Command::new(term);
+            let mut cmd = crate::proc::user_facing_std_command(term);
             cmd.args(args).arg(script);
             if cmd.spawn().is_ok() {
                 return Ok(());
