@@ -173,6 +173,8 @@ fn parse_usage(usage: Option<&Value>) -> Option<AgentEvent> {
         cache_creation_tokens: 0,
         cost_usd: None,
         model: None,
+        context_used: None,
+        context_window: None,
     })
 }
 
@@ -297,6 +299,8 @@ pub async fn spawn_and_stream(
                             cache_creation_tokens,
                             cost_usd,
                             model: None,
+                            context_used,
+                            context_window,
                         } => AgentEvent::Usage {
                             input_tokens,
                             output_tokens,
@@ -304,6 +308,8 @@ pub async fn spawn_and_stream(
                             cache_creation_tokens,
                             cost_usd,
                             model: selected_model.clone(),
+                            context_used,
+                            context_window,
                         },
                         other => other,
                     };

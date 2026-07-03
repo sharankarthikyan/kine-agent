@@ -98,6 +98,9 @@ pub enum AgentEvent {
         commands_json: String,
     },
     /// Token usage + cost for a completed run (normalized across agents).
+    /// `context_used`/`context_window` come from ACP `usage_update` (context
+    /// occupancy + window size); pipe adapters leave them None. Omitted from
+    /// JSON when absent so pre-change payloads remain byte-identical.
     #[serde(rename_all = "camelCase")]
     Usage {
         input_tokens: u64,
@@ -106,6 +109,10 @@ pub enum AgentEvent {
         cache_creation_tokens: u64,
         cost_usd: Option<f64>,
         model: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        context_used: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        context_window: Option<u64>,
     },
 }
 
@@ -207,6 +214,8 @@ mod tests {
             cache_creation_tokens: 25,
             cost_usd: Some(0.003),
             model: Some("claude-opus-4-5".into()),
+            context_used: None,
+            context_window: None,
         };
         let json = serde_json::to_string(&ev).unwrap();
         assert_eq!(
@@ -235,6 +244,8 @@ mod tests {
             cache_creation_tokens: 0,
             cost_usd: None,
             model: None,
+            context_used: None,
+            context_window: None,
         };
         let json = serde_json::to_string(&ev).unwrap();
         assert_eq!(
@@ -293,6 +304,38 @@ mod tests {
             json,
             r#"{"kind":"authRequired","data":{"agent":"codex","command":"codex login","message":"Sign in to Codex CLI."}}"#
         );
+    }
+
+    #[test]
+    fn usage_serializes_context_fields_only_when_present() {
+        let with_context = AgentEvent::Usage {
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            cost_usd: None,
+            model: None,
+            context_used: Some(48213),
+            context_window: Some(200000),
+        };
+        let json = serde_json::to_string(&with_context).unwrap();
+        assert!(json.contains("\"contextUsed\":48213"), "got {json}");
+        assert!(json.contains("\"contextWindow\":200000"), "got {json}");
+
+        let without = AgentEvent::Usage {
+            input_tokens: 1,
+            output_tokens: 2,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            cost_usd: None,
+            model: None,
+            context_used: None,
+            context_window: None,
+        };
+        let json = serde_json::to_string(&without).unwrap();
+        // Absent, not null: pipe events stay byte-identical to the pre-change shape.
+        assert!(!json.contains("contextUsed"), "got {json}");
+        assert!(!json.contains("contextWindow"), "got {json}");
     }
 
     #[test]

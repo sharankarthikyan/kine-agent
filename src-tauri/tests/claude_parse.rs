@@ -92,6 +92,8 @@ fn parses_real_recorded_stream() {
                 cache_creation_tokens: 5872,
                 cost_usd: Some(0.166508),
                 model: None,
+                context_used: None,
+                context_window: None,
             },
             AgentEvent::Done {
                 summary: "Hi.".into()

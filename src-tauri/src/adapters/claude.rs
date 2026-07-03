@@ -87,6 +87,8 @@ fn parse_usage(v: &Value) -> Option<AgentEvent> {
         cache_creation_tokens,
         cost_usd,
         model: v.get("model").and_then(|x| x.as_str()).map(String::from),
+        context_used: None,
+        context_window: None,
     })
 }
 
@@ -329,6 +331,7 @@ mod tests {
                 cache_creation_tokens,
                 cost_usd,
                 model,
+                ..
             } => {
                 assert_eq!(*input_tokens, 512);
                 assert_eq!(*output_tokens, 128);
