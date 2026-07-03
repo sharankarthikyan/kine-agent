@@ -1,5 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// An isolated git worktree for one session.
 #[derive(Debug, Clone, PartialEq)]
@@ -73,13 +72,13 @@ pub fn create(
     // git still has registered (but whose directory is gone) fails with "already
     // registered". Prune is safe — it only removes entries whose working tree is
     // missing — and best-effort, so its own failure never blocks the add.
-    let _ = Command::new("git")
+    let _ = crate::proc::std_command("git")
         .arg("-C")
         .arg(repo)
         .args(["worktree", "prune"])
         .output();
 
-    let output = Command::new("git")
+    let output = crate::proc::std_command("git")
         .arg("-C")
         .arg(repo)
         .args(["worktree", "add", "-b", &branch])
@@ -103,7 +102,7 @@ pub fn create(
 /// violation) is still surfaced so the caller can keep the session and retry.
 pub fn remove(repo: &Path, wt: &Worktree) -> Result<(), WorktreeError> {
     if wt.path.exists() {
-        let rm = Command::new("git")
+        let rm = crate::proc::std_command("git")
             .arg("-C")
             .arg(repo)
             .args(["worktree", "remove", "--force"])
@@ -118,7 +117,7 @@ pub fn remove(repo: &Path, wt: &Worktree) -> Result<(), WorktreeError> {
     } else {
         // Directory already gone — reconcile the leftover `.git/worktrees/<id>` admin
         // entry so the slot is reusable. Best-effort: a prune failure isn't fatal here.
-        let _ = Command::new("git")
+        let _ = crate::proc::std_command("git")
             .arg("-C")
             .arg(repo)
             .args(["worktree", "prune"])
@@ -126,7 +125,7 @@ pub fn remove(repo: &Path, wt: &Worktree) -> Result<(), WorktreeError> {
     }
     // Best-effort branch delete — ignore ALL failures (spawn error or non-zero exit):
     // the branch may be checked out elsewhere, and the worktree is already gone.
-    let _ = Command::new("git")
+    let _ = crate::proc::std_command("git")
         .arg("-C")
         .arg(repo)
         .args(["branch", "-D", &wt.branch])

@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::mpsc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -258,7 +258,7 @@ fn parse_codex_catalog(json: &str) -> Vec<CodexCachedModel> {
 /// (CLI missing, non-zero exit, non-UTF8 output).
 fn fetch_codex_catalog() -> Option<String> {
     let program = crate::agent_paths::resolve_program("codex");
-    let output = Command::new(program)
+    let output = crate::proc::std_command(program)
         .args(["debug", "models"])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
@@ -274,7 +274,7 @@ fn fetch_codex_catalog() -> Option<String> {
 /// cache-invalidation key. Empty string on failure.
 fn codex_cli_version() -> String {
     let program = crate::agent_paths::resolve_program("codex");
-    Command::new(program)
+    crate::proc::std_command(program)
         .arg("--version")
         .output()
         .ok()
@@ -411,7 +411,7 @@ fn antigravity_cache_to_models(cache: &AntigravityModelCache) -> Vec<ModelInfo> 
 
 fn fetch_antigravity_models() -> Option<String> {
     let program = crate::agent_paths::resolve_program("agy");
-    let output = Command::new(program)
+    let output = crate::proc::std_command(program)
         .arg("models")
         .stdin(Stdio::null())
         .stderr(Stdio::null())
@@ -490,7 +490,7 @@ fn capitalize(s: &str) -> String {
 /// `None` on any failure (CLI missing, auth error, timeout, no init event).
 fn probe_alias(alias: &str) -> Option<String> {
     let program = crate::agent_paths::resolve_program("claude");
-    let mut child = Command::new(program)
+    let mut child = crate::proc::std_command(program)
         .args([
             "-p",
             "--output-format",
@@ -544,7 +544,7 @@ fn probe_alias(alias: &str) -> Option<String> {
 /// a cache-invalidation key. Empty string on failure.
 fn claude_cli_version() -> String {
     let program = crate::agent_paths::resolve_program("claude");
-    Command::new(program)
+    crate::proc::std_command(program)
         .arg("--version")
         .output()
         .ok()

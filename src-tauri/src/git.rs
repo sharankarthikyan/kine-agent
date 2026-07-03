@@ -1,7 +1,6 @@
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::process::Command;
 
 const TREE_CAP: usize = 2000;
 
@@ -300,7 +299,7 @@ fn parse_porcelain(porcelain: &str) -> BTreeMap<String, String> {
 /// error (non-zero exit or spawn failure). Used for best-effort reads where partial or
 /// missing output is acceptable.
 fn git_stdout(dir: &Path, args: &[&str]) -> String {
-    Command::new("git")
+    crate::proc::std_command("git")
         .arg("-C")
         .arg(dir)
         .arg("-c")
@@ -322,7 +321,7 @@ fn git_stdout(dir: &Path, args: &[&str]) -> String {
 /// Run a git command that must succeed. Returns `Err(message)` on non-zero exit or
 /// spawn failure, incorporating git's stderr in the message.
 fn run_git(dir: &Path, args: &[&str], op: &str) -> Result<(), String> {
-    let output = Command::new("git")
+    let output = crate::proc::std_command("git")
         .arg("-C")
         .arg(dir)
         .arg("-c")

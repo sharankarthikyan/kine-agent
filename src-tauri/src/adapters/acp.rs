@@ -18,7 +18,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, BufReader};
-use tokio::process::Command;
 
 /// Per-agent ACP launch profile. Packages are VERSION-PINNED: unpinned npx
 /// drifts to @latest, and a silent protocol bump must be a deliberate, tested
@@ -448,7 +447,7 @@ async fn spawn_and_drive(
         ));
     }
     let npx = crate::agent_paths::resolve_program("npx");
-    let mut cmd = Command::new(&npx);
+    let mut cmd = crate::proc::tokio_command(&npx);
     cmd.arg("--yes")
         .arg(profile.package)
         .current_dir(&cwd)
