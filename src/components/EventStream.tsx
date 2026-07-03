@@ -68,6 +68,8 @@ export function EventStream({ events, onOpenFile, onApprovalRespond }: EventStre
   const visible = events.filter(
     (e, i) =>
       e.kind !== "toolStatus" &&
+      e.kind !== "terminalOutput" &&
+      e.kind !== "terminalExit" &&
       e.kind !== "approvalResolved" &&
       (e.kind !== "plan" || i === lastPlanIndex),
   );
@@ -453,6 +455,12 @@ function renderEvent(
       // Filtered out of `visible` before grouping — this event never renders
       // its own row, it only decorates the matching toolCall chip. Case kept
       // purely for the `never` exhaustiveness check below.
+      return null;
+
+    case "terminalOutput":
+    case "terminalExit":
+      // Filtered out of `visible`; they decorate the matching toolCall chip
+      // (renderer lands with the TerminalView task). Kept for exhaustiveness.
       return null;
 
     case "plan": {

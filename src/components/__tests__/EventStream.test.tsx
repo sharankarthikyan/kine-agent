@@ -350,6 +350,21 @@ test("renders a notice event as a muted inline note", () => {
   expect(screen.getByText("Native resume unavailable — context replayed.")).toBeInTheDocument();
 });
 
+test("terminal events never render their own rows", () => {
+  render(
+    <EventStream
+      events={[
+        { kind: "toolCall", data: { name: "Bash", input: "{\"command\":\"ls\"}", toolCallId: "t1" } },
+        { kind: "terminalOutput", data: { toolCallId: "t1", data: "<img src=x onerror=alert(1)>\n" } },
+        { kind: "terminalExit", data: { toolCallId: "t1", exitCode: 0, signal: null } },
+      ]}
+    />,
+  );
+  // Chip renders; the raw terminal events do not appear as standalone rows.
+  expect(screen.getByText("Bash")).toBeInTheDocument();
+  expect(document.querySelector("img")).toBeNull();
+});
+
 test("coalesces consecutive thought chunks into one collapsed Thinking block", () => {
   const events = [
     { kind: "thought", data: { text: "step one " } },

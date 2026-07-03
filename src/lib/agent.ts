@@ -27,6 +27,8 @@ export type AgentEvent =
   | { kind: "status"; data: { text: string } }
   | { kind: "toolCall"; data: { name: string; input: string; toolCallId?: string } }
   | { kind: "toolStatus"; data: { toolCallId: string; status: string; detail: string } }
+  | { kind: "terminalOutput"; data: { toolCallId: string; data: string } }
+  | { kind: "terminalExit"; data: { toolCallId: string; exitCode: number | null; signal: string | null; droppedBytes?: number } }
   | { kind: "plan"; data: { entriesJson: string } }
   | { kind: "commands"; data: { commandsJson: string } }
   | { kind: "fileWrite"; data: { path: string } }
