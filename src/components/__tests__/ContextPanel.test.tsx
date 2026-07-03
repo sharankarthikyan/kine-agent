@@ -99,12 +99,11 @@ test("renders real session settings", () => {
   expect(screen.getByText("On")).toBeInTheDocument();
 });
 
-// ── Honest model display for ACP sessions ──────────────────────────────────────
-// ACP sends no longer seed a model pick, so `modelForSession` falls through to the
-// agent's FIRST list model — without engine awareness the Settings row would
-// confidently fabricate it. ACP runs the CLI default; say so.
+// ── Model picker ───────────────────────────────────────────────────────────────
+// The ACP adapter forwards the pick via session/set_config_option, so the
+// Settings row shows the picked model — no more "CLI default" pinning.
 
-test("ACP sessions show 'CLI default' in Settings — not a fabricated first model", () => {
+test("ACP sessions show the picked model in Settings — the pick is forwarded", () => {
   render(
     <ContextPanel
       {...base}
@@ -120,8 +119,8 @@ test("ACP sessions show 'CLI default' in Settings — not a fabricated first mod
       }}
     />,
   );
-  expect(screen.getByText("CLI default")).toBeInTheDocument();
-  expect(screen.queryByText("Claude Opus")).not.toBeInTheDocument();
+  expect(screen.getByText("Claude Opus")).toBeInTheDocument();
+  expect(screen.queryByText("CLI default")).not.toBeInTheDocument();
 });
 
 test("ACP sessions suppress the Reported-by-CLI correction row", () => {
@@ -140,7 +139,6 @@ test("ACP sessions suppress the Reported-by-CLI correction row", () => {
       }}
     />,
   );
-  expect(screen.getByText("CLI default")).toBeInTheDocument();
   expect(screen.queryByText(/reported by cli/i)).not.toBeInTheDocument();
 });
 

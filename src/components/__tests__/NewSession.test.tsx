@@ -55,7 +55,6 @@ function setup(overrides: Partial<React.ComponentProps<typeof NewSession>> = {})
       model={opus}
       permissionMode="default"
       sandboxTerminal={false}
-      engine="pipe"
       running={false}
       onPickRepo={onPickRepo}
       onPickRecent={onPickRecent}
@@ -245,23 +244,17 @@ test("renders no ACP streaming control for codex either", () => {
   expect(screen.queryByText(/acp streaming/i)).not.toBeInTheDocument();
 });
 
-// ── Honest model display for ACP drafts ────────────────────────────────────────
-// The ACP adapter runs the agent CLI's default model — it does not forward a
-// model pick yet — so ACP drafts must not offer a phantom model choice.
+// ── Model picker ───────────────────────────────────────────────────────────────
+// The ACP adapter forwards the pick via session/set_config_option, so drafts on
+// EVERY engine get the interactive picker (no more "CLI default" pinning).
 
-test("ACP drafts pin the model to 'CLI default' — non-interactive, no phantom choice", () => {
-  setup({ agent: claudeAgent, engine: "acp" });
-  const trigger = screen.getByRole("button", { name: "Model: CLI default" });
-  expect(trigger).toBeDisabled();
-  expect(screen.getByText("CLI default")).toBeInTheDocument();
-  // The picked-model label must not appear anywhere — nothing pretends a pick is honored.
-  expect(screen.queryByText(opus.label)).not.toBeInTheDocument();
-});
-
-test("pipe drafts keep the interactive model picker", () => {
-  setup({ agent: claudeAgent, engine: "pipe" });
-  expect(screen.getByRole("button", { name: `Model: ${opus.label}` })).toBeEnabled();
+test("drafts keep the interactive model picker (ACP forwards the pick)", async () => {
+  setup({ agent: claudeAgent });
+  const trigger = screen.getByRole("button", { name: `Model: ${opus.label}` });
+  expect(trigger).toBeEnabled();
   expect(screen.queryByText("CLI default")).not.toBeInTheDocument();
+  await userEvent.click(trigger);
+  expect(screen.getByRole("menuitem", { name: new RegExp(sonnet.label) })).toBeInTheDocument();
 });
 
 test("Antigravity offers only Ask before edits + Full access (no Auto-edit or advanced)", async () => {

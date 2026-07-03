@@ -21,7 +21,6 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { modelDisplayForEngine, type Engine } from "@/lib/agent";
 import { type ModelInfo } from "@/lib/models";
 import { AgentLogo } from "./AgentLogo";
 import { AutocompletePopover } from "./AutocompletePopover";
@@ -38,10 +37,6 @@ interface PromptBarProps {
   onModelChange: (m: ModelInfo) => void;
   /** The session's agent, so the permission dropdown offers the right modes. */
   agent: string;
-  /** The session's engine — display-only. ACP pins the model display to
-   * "CLI default" (the ACP adapter doesn't forward a model pick yet), so no
-   * user-picked model is shown. Absent ⇒ "pipe" (external history, previews). */
-  engine?: Engine;
   /** Active session id — enables `@file` / `/command` autocomplete and file inlining. */
   sessionId?: string;
   /** ACP-advertised slash commands for this session; overrides `/` autocomplete. */
@@ -82,7 +77,6 @@ export function PromptBar({
   model,
   onModelChange,
   agent,
-  engine = "pipe",
   sessionId,
   acpCommands,
   permissionMode,
@@ -202,30 +196,16 @@ export function PromptBar({
         <div className="flex flex-wrap items-center gap-2">
           {/* LEFT: model + permission selectors, side by side */}
           <div className="flex min-w-0 flex-wrap items-center gap-1">
-          {/* ACP runs the agent CLI's default model (the adapter doesn't forward a
-              model pick yet) — show an honest non-choice instead of a phantom picker. */}
-          {engine === "acp" ? (
-            <Button
-              variant="ghost"
-              size="sm"
-              disabled
-              className="gap-1.5 px-2 text-muted-foreground"
-              aria-label="Model: CLI default"
-            >
-              <AgentLogo agent={agent} className="size-4" />
-              <span className="text-sm">{modelDisplayForEngine(engine, null)}</span>
-            </Button>
-          ) : (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button
                 variant="ghost"
                 size="sm"
                 className="gap-1.5 px-2 text-muted-foreground hover:text-foreground"
-                aria-label={`Model: ${modelDisplayForEngine(engine, model?.label ?? null)}`}
+                aria-label={`Model: ${model?.label ?? "No models"}`}
               >
                 <AgentLogo agent={model?.agent ?? "claude"} className="size-4" />
-                <span className="text-sm">{modelDisplayForEngine(engine, model?.label ?? null)}</span>
+                <span className="text-sm">{model?.label ?? "No models"}</span>
                 <ChevronDown data-icon="inline-end" className="opacity-50" />
               </Button>
             </DropdownMenuTrigger>
@@ -269,7 +249,6 @@ export function PromptBar({
               )}
             </DropdownMenuContent>
           </DropdownMenu>
-          )}
 
             <PermissionModeSelect
               agent={agent}

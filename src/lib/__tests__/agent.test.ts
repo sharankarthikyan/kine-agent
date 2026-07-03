@@ -6,7 +6,6 @@ import {
   defaultEngineFor,
   engineForSession,
   listTrustedRepos,
-  modelDisplayForEngine,
   pickRepository,
   sendMessage,
   type AgentEvent,
@@ -26,21 +25,6 @@ describe("defaultEngineFor", () => {
   it("is always pipe for agents without ACP support", () => {
     expect(defaultEngineFor("antigravity", true)).toBe("pipe");
     expect(defaultEngineFor("gemini", true)).toBe("pipe");
-  });
-});
-
-describe("modelDisplayForEngine", () => {
-  it("returns 'CLI default' for acp — the ACP adapter runs the CLI's default model", () => {
-    expect(modelDisplayForEngine("acp", "Claude Opus 4.8")).toBe("CLI default");
-    expect(modelDisplayForEngine("acp", null)).toBe("CLI default");
-  });
-
-  it("returns the picked label for pipe sessions", () => {
-    expect(modelDisplayForEngine("pipe", "Claude Opus 4.8")).toBe("Claude Opus 4.8");
-  });
-
-  it("falls back to 'No models' for pipe with nothing picked", () => {
-    expect(modelDisplayForEngine("pipe", null)).toBe("No models");
   });
 });
 

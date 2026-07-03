@@ -6,7 +6,7 @@ import {
   type UsageData,
   type UsageSummary,
 } from "@/lib/contextDerive";
-import { modelDisplayForEngine, type Engine } from "@/lib/agent";
+import { type Engine } from "@/lib/agent";
 import type { RuleFile, Capabilities } from "@/lib/inspect";
 import type { ModelInfo } from "@/lib/models";
 import { DEFAULT_PERMISSION_MODE, permissionModeLabel, type PermissionMode } from "@/lib/permissions";
@@ -26,9 +26,9 @@ export interface ContextPanelProps {
   model: ModelInfo | null;
   contextFootprint?: ContextFootprint | null;
   agent?: string;
-  /** The session's engine — display-only. ACP pins the Settings Model row to
-   * "CLI default" (the ACP adapter doesn't forward a model pick yet), so no
-   * fabricated model is shown. Absent ⇒ "pipe" (external history, fixtures). */
+  /** The session's engine. ACP has no CLI-reported usage yet, so the
+   * "Reported by CLI" correction row is suppressed for it. Absent ⇒ "pipe"
+   * (external history, fixtures). */
   engine?: Engine;
   source?: "kineloop" | "external";
   permissionMode?: PermissionMode | null;
@@ -436,11 +436,7 @@ export function ContextPanel({
             <div className="flex min-w-0 items-center gap-2">
               <span className="text-muted-foreground">Model</span>
               <span className="min-w-0 truncate font-medium">
-                {/* ACP runs the CLI-default model (no model pick is forwarded), so the
-                    row must not fabricate one from the agent's model list. */}
-                {engine === "acp"
-                  ? modelDisplayForEngine(engine, null)
-                  : (model?.label ?? usage?.model ?? "—")}
+                {model?.label ?? usage?.model ?? "—"}
               </span>
             </div>
             {engine !== "acp" &&
