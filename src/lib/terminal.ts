@@ -16,6 +16,7 @@ const CONTROL_CHARS = /[\0-\x08\x0b\x0c\x0e-\x1f\x7f]/g;
  *  after the last carriage return (progress bars, spinners). */
 function collapseCarriageReturns(text: string): string {
   return text
+    .replace(/\r\n/g, "\n") // CRLF is a line ending, not an overwrite — normalize first
     .split("\n")
     .map((line) => line.split("\r").pop() ?? "")
     .join("\n");

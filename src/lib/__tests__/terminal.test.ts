@@ -22,6 +22,12 @@ describe("sanitizeTerminalText", () => {
   test("leaves plain multiline output untouched", () => {
     expect(sanitizeTerminalText("a\nb\nc")).toBe("a\nb\nc");
   });
+
+  test("treats CRLF as a line ending, not an overwrite", () => {
+    expect(sanitizeTerminalText("line\r\n")).toBe("line\n");
+    expect(sanitizeTerminalText("a\r\nb\r\nc")).toBe("a\nb\nc");
+    expect(sanitizeTerminalText("progress 10%\rprogress 99%\rdone\r\nnext")).toBe("done\nnext");
+  });
 });
 
 describe("clampTail", () => {
