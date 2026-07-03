@@ -1122,11 +1122,22 @@ mod tests {
             "hello rules"
         );
 
-        // A file outside the worktree entirely — must be forbidden.
+        // A file outside the worktree entirely — must be forbidden. Uses a file we
+        // create ourselves rather than a unix path like `/etc/hosts`: on Windows that
+        // path has no drive prefix, so it isn't absolute and `canonicalize` resolves it
+        // relative to the current drive instead of exercising the outside-worktree
+        // branch. A generated absolute path exercises the containment check the same
+        // way on every platform.
+        let outside_dir =
+            std::env::temp_dir().join(format!("ae-insp2-outside-{}", std::process::id()));
+        std::fs::create_dir_all(&outside_dir).unwrap();
+        let outside_file = outside_dir.join("outside.txt");
+        std::fs::write(&outside_file, "outside content").unwrap();
         assert!(matches!(
-            read_text_file("/etc/hosts", &dir),
+            read_text_file(&outside_file.display().to_string(), &dir),
             Err(InspectError::Forbidden(_))
         ));
+        let _ = std::fs::remove_dir_all(&outside_dir);
 
         // A non-candidate file inside the worktree — must also be forbidden,
         // proving the allow-list is per-file, not per-directory.
@@ -1286,6 +1297,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Normalize a path string for cross-platform assertions on a trailing `/`-separated
+    /// suffix: `Path::display()` renders native separators, so on Windows a path ends in
+    /// `\.claude\agents\foo.md`, not `/.claude/agents/foo.md`. Mirrors the frontend's
+    /// `displayPath` normalization (e.g. `src/components/DiffReviewDialog.tsx`).
+    fn to_slash(path: &str) -> String {
+        path.replace('\\', "/")
+    }
+
     #[test]
     fn subagent_display_name_comes_from_frontmatter_not_filename() {
         // SSOT: the file is `dummy.md` but declares `name: real-reviewer`. Claude Code
@@ -1316,7 +1335,7 @@ mod tests {
             .iter()
             .find(|c| c.name == "real-reviewer")
             .unwrap();
-        assert!(cap.path.ends_with("/dummy.md"));
+        assert!(to_slash(&cap.path).ends_with("/dummy.md"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1448,7 +1467,7 @@ mod tests {
             .find(|c| c.name == "foo")
             .expect("subagent 'foo' not found");
         assert!(
-            foo.path.ends_with("/.claude/agents/foo.md"),
+            to_slash(&foo.path).ends_with("/.claude/agents/foo.md"),
             "expected path ending with /.claude/agents/foo.md, got {:?}",
             foo.path
         );
@@ -1695,14 +1714,17 @@ mod tests {
         std::fs::create_dir_all(&claude).unwrap();
 
         let agent = create_capability(&claude, CapabilityKind::Agent, "reviewer").unwrap();
-        assert!(agent.ends_with("/.claude/agents/reviewer.md"), "{agent}");
+        assert!(
+            to_slash(&agent).ends_with("/.claude/agents/reviewer.md"),
+            "{agent}"
+        );
         assert!(std::fs::read_to_string(&agent)
             .unwrap()
             .contains("name: reviewer"));
 
         let skill = create_capability(&claude, CapabilityKind::Skill, "deploy").unwrap();
         assert!(
-            skill.ends_with("/.claude/skills/deploy/SKILL.md"),
+            to_slash(&skill).ends_with("/.claude/skills/deploy/SKILL.md"),
             "{skill}"
         );
         assert!(std::fs::read_to_string(&skill)
@@ -1710,7 +1732,10 @@ mod tests {
             .contains("description:"));
 
         let cmd = create_capability(&claude, CapabilityKind::Command, "ship").unwrap();
-        assert!(cmd.ends_with("/.claude/commands/ship.md"), "{cmd}");
+        assert!(
+            to_slash(&cmd).ends_with("/.claude/commands/ship.md"),
+            "{cmd}"
+        );
 
         // Freshly created capabilities are discoverable by list_capabilities.
         let caps = list_capabilities("claude", &dir);
