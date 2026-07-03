@@ -43,6 +43,10 @@ export type AgentEvent =
   | { kind: "approvalResolved"; data: { requestId: string; selectedOptionId: string } }
   | { kind: "done"; data: { summary: string } }
   | { kind: "error"; data: { message: string } }
+  | {
+      kind: "authRequired";
+      data: { agent: string; command: string; message: string };
+    }
   | { kind: "notice"; data: { message: string } }
   | {
       kind: "usage";

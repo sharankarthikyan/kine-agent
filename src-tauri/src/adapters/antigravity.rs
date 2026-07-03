@@ -1,8 +1,8 @@
 use crate::adapter::{AgentAdapter, EventSink, Prompt, SessionError};
-use crate::events::AgentEvent;
 use crate::adapters::{
     feed_prompt_via_stdin, is_batch_shim, read_capped_line, CappedLine, MAX_LINE_BYTES,
 };
+use crate::events::AgentEvent;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -175,7 +175,11 @@ pub async fn spawn_and_stream(
         } else {
             format!("agy exited with {status}: {}", stderr_tail.trim())
         };
-        sink.emit(AgentEvent::Error { message });
+        if let Some(event) = auth_required_from_stderr(&message) {
+            sink.emit(event);
+        } else {
+            sink.emit(AgentEvent::Error { message });
+        }
         return Ok(());
     } else if !stderr_tail.trim().is_empty() {
         eprintln!("agy exited 0 with stderr: {}", stderr_tail.trim());
@@ -194,6 +198,27 @@ pub async fn spawn_and_stream(
         summary: String::new(),
     });
     Ok(())
+}
+
+fn auth_required_from_stderr(message: &str) -> Option<AgentEvent> {
+    let lower = message.to_lowercase();
+    let authish = lower.contains("not authenticated")
+        || lower.contains("unauthenticated")
+        || lower.contains("authentication required")
+        || lower.contains("auth required")
+        || lower.contains("not logged in")
+        || lower.contains("login required")
+        || lower.contains("sign in")
+        || lower.contains("sign-in")
+        || (lower.contains("credential") && lower.contains("login"));
+    if !authish {
+        return None;
+    }
+    Some(AgentEvent::AuthRequired {
+        agent: "antigravity".to_string(),
+        command: "agy --prompt-interactive".to_string(),
+        message: "Sign in to Antigravity CLI in a terminal, then retry this message.".to_string(),
+    })
 }
 
 /// The newest Antigravity conversation id whose recorded `workspace` matches `cwd`,
@@ -299,5 +324,25 @@ mod tests {
         assert_eq!(none, None);
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn auth_required_from_stderr_classifies_login_failures() {
+        let event = super::auth_required_from_stderr(
+            "agy exited with exit status: 1: authentication required",
+        )
+        .expect("auth event");
+        assert!(matches!(
+            event,
+            crate::events::AgentEvent::AuthRequired { agent, command, .. }
+                if agent == "antigravity" && command == "agy --prompt-interactive"
+        ));
+    }
+
+    #[test]
+    fn auth_required_from_stderr_ignores_regular_failures() {
+        assert!(
+            super::auth_required_from_stderr("agy exited with exit status: 1: no prompt").is_none()
+        );
     }
 }

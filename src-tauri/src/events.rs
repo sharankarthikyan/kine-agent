@@ -68,6 +68,15 @@ pub enum AgentEvent {
     Error {
         message: String,
     },
+    /// The selected local CLI is installed but not authenticated. This is a
+    /// first-class event instead of a generic stderr blob so the UI can show a
+    /// calm, actionable sign-in state and keep the failed prompt in the transcript.
+    #[serde(rename_all = "camelCase")]
+    AuthRequired {
+        agent: String,
+        command: String,
+        message: String,
+    },
     /// A user-facing, non-error notice from an adapter (e.g. "native resume
     /// unsupported — transcript context replayed"). Rendered as a muted
     /// transcript row and toasted once per session; never flips run status.
@@ -150,7 +159,10 @@ mod tests {
             tool_call_id: None,
         };
         let json = serde_json::to_string(&ev).unwrap();
-        assert_eq!(json, r#"{"kind":"toolCall","data":{"name":"Write","input":"{}"}}"#);
+        assert_eq!(
+            json,
+            r#"{"kind":"toolCall","data":{"name":"Write","input":"{}"}}"#
+        );
     }
 
     #[test]
@@ -177,7 +189,9 @@ mod tests {
 
     #[test]
     fn serializes_plan_with_entries_json() {
-        let ev = AgentEvent::Plan { entries_json: "[]".into() };
+        let ev = AgentEvent::Plan {
+            entries_json: "[]".into(),
+        };
         assert_eq!(
             serde_json::to_string(&ev).unwrap(),
             r#"{"kind":"plan","data":{"entriesJson":"[]"}}"#
@@ -203,7 +217,9 @@ mod tests {
 
     #[test]
     fn serializes_commands_with_commands_json() {
-        let ev = AgentEvent::Commands { commands_json: "[]".into() };
+        let ev = AgentEvent::Commands {
+            commands_json: "[]".into(),
+        };
         assert_eq!(
             serde_json::to_string(&ev).unwrap(),
             r#"{"kind":"commands","data":{"commandsJson":"[]"}}"#
@@ -258,9 +274,25 @@ mod tests {
 
     #[test]
     fn serializes_notice_as_tagged_camelcase() {
-        let ev = AgentEvent::Notice { message: "heads up".into() };
+        let ev = AgentEvent::Notice {
+            message: "heads up".into(),
+        };
         let json = serde_json::to_string(&ev).unwrap();
         assert_eq!(json, r#"{"kind":"notice","data":{"message":"heads up"}}"#);
+    }
+
+    #[test]
+    fn serializes_auth_required_as_tagged_camelcase() {
+        let ev = AgentEvent::AuthRequired {
+            agent: "codex".into(),
+            command: "codex login".into(),
+            message: "Sign in to Codex CLI.".into(),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert_eq!(
+            json,
+            r#"{"kind":"authRequired","data":{"agent":"codex","command":"codex login","message":"Sign in to Codex CLI."}}"#
+        );
     }
 
     #[test]

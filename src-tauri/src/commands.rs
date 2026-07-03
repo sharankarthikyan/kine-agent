@@ -110,7 +110,10 @@ struct StoreSink {
 
 impl EventSink for StoreSink {
     fn emit(&self, event: AgentEvent) {
-        if matches!(event, AgentEvent::Error { .. }) {
+        if matches!(
+            event,
+            AgentEvent::Error { .. } | AgentEvent::AuthRequired { .. }
+        ) {
             self.saw_error.store(true, Ordering::Release);
         }
         let _ = self.channel.send(event.clone());
@@ -185,7 +188,13 @@ async fn run_persisting(
     mut cancel_rx: watch::Receiver<bool>,
     on_event: Channel<AgentEvent>,
 ) -> Result<(), String> {
-    let RunSpec { session_id, agent, engine, resume, external_thread_id } = spec;
+    let RunSpec {
+        session_id,
+        agent,
+        engine,
+        resume,
+        external_thread_id,
+    } = spec;
     // Persist the permission mode + sandbox flag actually used for this run so the UI can
     // seed each session's control from its last choice (single place, covering both new
     // sessions and follow-up turns). Best-effort: a persistence hiccup must not abort a run.
@@ -254,8 +263,7 @@ async fn run_persisting(
     let captured: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     // Codex, Antigravity, and claude-over-ACP resume by the CLI-minted conversation
     // id captured on a previous run; only pipe Claude uses the Kineloop session id.
-    let (adapter_id, do_resume) =
-        resume_target(&session_id, resume, external_thread_id.as_deref());
+    let (adapter_id, do_resume) = resume_target(&session_id, resume, external_thread_id.as_deref());
     // Cloned before `run_future` is built so the async block below captures its own owned
     // receiver by value; otherwise it would capture `cancel_rx` by reference (for `.clone()`)
     // and hold that borrow alive for the block's lifetime, conflicting with the `cancel_rx`
@@ -322,9 +330,14 @@ async fn run_persisting(
     // on cancel (the adapter saw the same watch signal and is sending session/cancel)
     // before falling back to the same drop-based kill.
     let acp_grace = (engine == store::ENGINE_ACP).then_some(ACP_CANCEL_GRACE);
-    let (result, cancelled) =
-        await_run_with_cancel(run_future, &mut cancel_rx, serve_fut, acp_grace, &session_id)
-            .await;
+    let (result, cancelled) = await_run_with_cancel(
+        run_future,
+        &mut cancel_rx,
+        serve_fut,
+        acp_grace,
+        &session_id,
+    )
+    .await;
     let _ = drain.await; // flush all persisted events before stamping status
 
     // Persist a freshly captured external conversation id so later turns can resume it.
@@ -1616,10 +1629,7 @@ pub async fn create_customization(
 /// allowlist as reads/writes; a skill's whole directory is removed. `session_id`
 /// `None`/empty operates on the user's global `~/.claude` scope.
 #[tauri::command]
-pub async fn delete_customization(
-    session_id: Option<String>,
-    path: String,
-) -> Result<(), String> {
+pub async fn delete_customization(session_id: Option<String>, path: String) -> Result<(), String> {
     let root = worktree_root_for_opt(session_id.as_deref());
     tokio::task::spawn_blocking(move || {
         let scope = inspect_scope(&root, session_id)?;
@@ -2041,7 +2051,10 @@ mod tests {
             !t.contains("Assistant: Sure\n"),
             "token chunks must be skipped: {t}"
         );
-        assert!(!t.contains("internal"), "thoughts never leak into a replay prompt");
+        assert!(
+            !t.contains("internal"),
+            "thoughts never leak into a replay prompt"
+        );
     }
 
     #[test]
@@ -2170,10 +2183,7 @@ mod tests {
             validate_engine(Some("acp".into()), "claude").unwrap(),
             "acp"
         );
-        assert_eq!(
-            validate_engine(Some("acp".into()), "codex").unwrap(),
-            "acp"
-        ); // M6: codex-acp
+        assert_eq!(validate_engine(Some("acp".into()), "codex").unwrap(), "acp"); // M6: codex-acp
         assert!(validate_engine(Some("acp".into()), "antigravity").is_err()); // never
         assert!(validate_engine(Some("acp".into()), "gemini").is_err()); // M7
         assert!(validate_engine(Some("warp".into()), "claude").is_err());
@@ -2279,9 +2289,15 @@ mod tests {
             .await
             .expect("create should succeed");
         let expected = tmp.join("skills/verifyskill/SKILL.md");
-        assert_eq!(std::path::Path::new(&path), expected, "created in wrong scope");
+        assert_eq!(
+            std::path::Path::new(&path),
+            expected,
+            "created in wrong scope"
+        );
         assert!(expected.is_file(), "skill file missing at {expected:?}");
-        assert!(std::fs::read_to_string(&expected).unwrap().contains("name: verifyskill"));
+        assert!(std::fs::read_to_string(&expected)
+            .unwrap()
+            .contains("name: verifyskill"));
 
         // edit (global) → write_text_file must be allowed for a ~/.claude file
         super::write_text_file(None, path.clone(), "edited body".into())
@@ -2293,7 +2309,10 @@ mod tests {
         super::delete_customization(None, path)
             .await
             .expect("delete should succeed");
-        assert!(!expected.parent().unwrap().exists(), "skill dir should be gone");
+        assert!(
+            !expected.parent().unwrap().exists(),
+            "skill dir should be gone"
+        );
 
         std::env::remove_var("CLAUDE_CONFIG_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
@@ -2369,7 +2388,10 @@ mod tests {
 
         assert!(result.is_ok());
         assert!(cancelled);
-        assert!(started.elapsed() >= grace, "the ACP grace window must be waited out");
+        assert!(
+            started.elapsed() >= grace,
+            "the ACP grace window must be waited out"
+        );
         assert!(
             dropped.load(std::sync::atomic::Ordering::Acquire),
             "grace expiry must drop the abandoned run future (pgid-guard kill)"

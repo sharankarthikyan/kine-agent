@@ -22,8 +22,11 @@ use tokio::process::Command;
 /// failures so the toast tells the user exactly what to run.
 #[derive(Clone, Copy)]
 pub struct AcpProfile {
+    pub agent: &'static str,
     pub package: &'static str,
     pub login_hint: &'static str,
+    pub login_command: &'static str,
+    pub auth_message: &'static str,
     /// Under acceptEdits-grade session modes, permission requests that still
     /// arrive are by definition ESCALATIONS beyond the mode's grant (codex
     /// mode "auto": network / outside-workspace / sandbox-off) — surface them
@@ -33,16 +36,32 @@ pub struct AcpProfile {
 }
 
 pub const CLAUDE_ACP: AcpProfile = AcpProfile {
+    agent: "claude",
     package: "@agentclientprotocol/claude-agent-acp@0.54.1",
     login_hint: "log in with the Claude CLI first (`claude`, then /login)",
+    login_command: "claude",
+    auth_message: "Sign in to Claude Code in a terminal, then retry this message.",
     interactive_escalations: false,
 };
 
 pub const CODEX_ACP: AcpProfile = AcpProfile {
+    agent: "codex",
     package: "@zed-industries/codex-acp@0.16.0",
     login_hint: "run `codex login` in a terminal, then retry",
+    login_command: "codex login",
+    auth_message: "Sign in to Codex CLI in a terminal, then retry this message.",
     interactive_escalations: true,
 };
+
+impl AcpProfile {
+    fn auth_required_event(self) -> AgentEvent {
+        AgentEvent::AuthRequired {
+            agent: self.agent.to_string(),
+            command: self.login_command.to_string(),
+            message: self.auth_message.to_string(),
+        }
+    }
+}
 
 /// SIGKILLs the child's process group when dropped. `spawn_and_drive` arms one
 /// right after spawn so that EVERY exit path — normal return, the cancel-grace
@@ -109,7 +128,13 @@ impl AcpAdapter {
         profile: AcpProfile,
         cancel: tokio::sync::watch::Receiver<bool>,
     ) -> Self {
-        Self { captured_session, approvals, app_session_id, profile, cancel }
+        Self {
+            captured_session,
+            approvals,
+            app_session_id,
+            profile,
+            cancel,
+        }
     }
 }
 
@@ -279,12 +304,17 @@ pub async fn drive_session(
     // with -32603, never served unguarded.
     let fs_root = std::fs::canonicalize(&cwd).ok();
 
-    let can_load = client::initialize(&peer).await.map_err(|e| {
-        SessionError::Protocol(format!(
-            "ACP initialize failed: {}",
-            describe_rpc_failure(&e, profile.login_hint)
-        ))
-    })?;
+    let can_load = match client::initialize(&peer).await {
+        Ok(can_load) => can_load,
+        Err(e) => {
+            return Err(setup_protocol_error(
+                "ACP initialize failed",
+                &e,
+                profile,
+                sink.as_ref(),
+            ));
+        }
+    };
 
     // Resume when the agent supports it; a failed/unsupported load degrades to a
     // fresh session. fallback=true ⇒ this turn was supposed to resume but
@@ -293,8 +323,7 @@ pub async fn drive_session(
     // silently lost).
     let (acp_session_id, modes, fallback) = match resume_session {
         Some(id) if can_load => {
-            match load_discarding_replay(&peer, &mut inbound, &id, &cwd, fs_root.as_deref()).await
-            {
+            match load_discarding_replay(&peer, &mut inbound, &id, &cwd, fs_root.as_deref()).await {
                 Ok((modes, replay_events)) => {
                     for event in replay_events {
                         sink.emit(event); // sync emit — the load await already resolved
@@ -303,18 +332,48 @@ pub async fn drive_session(
                 }
                 Err(e) => {
                     eprintln!("acp: session/load failed ({e}); falling back to a fresh session");
-                    let (id, modes) = new_session(&peer, &cwd, profile.login_hint).await?;
+                    let (id, modes) = match new_session(&peer, &cwd).await {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return Err(setup_protocol_error(
+                                "session/new failed",
+                                &e,
+                                profile,
+                                sink.as_ref(),
+                            ));
+                        }
+                    };
                     (id, modes, true)
                 }
             }
         }
         Some(_) => {
             // Resume requested but the agent can't load sessions at all.
-            let (id, modes) = new_session(&peer, &cwd, profile.login_hint).await?;
+            let (id, modes) = match new_session(&peer, &cwd).await {
+                Ok(v) => v,
+                Err(e) => {
+                    return Err(setup_protocol_error(
+                        "session/new failed",
+                        &e,
+                        profile,
+                        sink.as_ref(),
+                    ));
+                }
+            };
             (id, modes, true)
         }
         None => {
-            let (id, modes) = new_session(&peer, &cwd, profile.login_hint).await?;
+            let (id, modes) = match new_session(&peer, &cwd).await {
+                Ok(v) => v,
+                Err(e) => {
+                    return Err(setup_protocol_error(
+                        "session/new failed",
+                        &e,
+                        profile,
+                        sink.as_ref(),
+                    ));
+                }
+            };
             // resume_transcript is only populated for follow-up turns
             // (send_message on an ACP session). Carrying one into a fresh
             // session means the prior thread id was never captured — without
@@ -491,14 +550,8 @@ pub async fn drive_session(
 async fn new_session(
     peer: &RpcPeer,
     cwd: &str,
-    login_hint: &str,
-) -> Result<(String, client::SessionModes), SessionError> {
-    client::session_new(peer, cwd).await.map_err(|e| {
-        SessionError::Protocol(format!(
-            "session/new failed: {}",
-            describe_rpc_failure(&e, login_hint)
-        ))
-    })
+) -> Result<(String, client::SessionModes), crate::acp::jsonrpc::RpcError> {
+    client::session_new(peer, cwd).await
 }
 
 /// Human-facing description of an initialize/session-setup RPC failure. ACP
@@ -511,6 +564,28 @@ fn describe_rpc_failure(e: &crate::acp::jsonrpc::RpcError, login_hint: &str) -> 
         }
         _ => e.to_string(),
     }
+}
+
+fn setup_protocol_error(
+    prefix: &str,
+    e: &crate::acp::jsonrpc::RpcError,
+    profile: AcpProfile,
+    sink: &dyn EventSink,
+) -> SessionError {
+    if is_auth_required_rpc(e) {
+        sink.emit(profile.auth_required_event());
+    }
+    SessionError::Protocol(format!(
+        "{prefix}: {}",
+        describe_rpc_failure(e, profile.login_hint)
+    ))
+}
+
+fn is_auth_required_rpc(e: &crate::acp::jsonrpc::RpcError) -> bool {
+    matches!(
+        e,
+        crate::acp::jsonrpc::RpcError::Remote { code: -32000, .. }
+    )
 }
 
 /// Await session/load while DISCARDING the replayed history. The ACP spec
@@ -611,15 +686,27 @@ fn handle_notification(
         Some(SessionUpdate::Thought { text }) => {
             sink.emit(AgentEvent::Thought { text });
         }
-        Some(SessionUpdate::ToolCall { title, raw_input, tool_call_id }) => {
+        Some(SessionUpdate::ToolCall {
+            title,
+            raw_input,
+            tool_call_id,
+        }) => {
             sink.emit(AgentEvent::ToolCall {
                 name: title,
                 input: raw_input,
                 tool_call_id,
             });
         }
-        Some(SessionUpdate::ToolCallUpdate { tool_call_id, status, detail }) => {
-            sink.emit(AgentEvent::ToolStatus { tool_call_id, status, detail });
+        Some(SessionUpdate::ToolCallUpdate {
+            tool_call_id,
+            status,
+            detail,
+        }) => {
+            sink.emit(AgentEvent::ToolStatus {
+                tool_call_id,
+                status,
+                detail,
+            });
         }
         Some(SessionUpdate::Plan { entries_json }) => {
             sink.emit(AgentEvent::Plan { entries_json });
@@ -658,7 +745,11 @@ enum InboundAnswer {
         offered: Vec<String>,
     },
     /// fs/read_text_file, validated + resolved inside the session worktree.
-    FsRead { path: PathBuf, line: Option<u64>, limit: Option<u64> },
+    FsRead {
+        path: PathBuf,
+        line: Option<u64>,
+        limit: Option<u64>,
+    },
     /// fs/write_text_file, validated + resolved inside the session worktree.
     FsWrite { path: PathBuf, content: String },
     /// Malformed params, an unresolved worktree, or a fs_guard rejection —
@@ -700,7 +791,10 @@ fn prepare_answer(
                 _ => false,
             };
             if autonomous || options.is_empty() {
-                return InboundAnswer::Immediate(client::auto_select_option(&options, permission_mode));
+                return InboundAnswer::Immediate(client::auto_select_option(
+                    &options,
+                    permission_mode,
+                ));
             }
             // Interactive: surface ApprovalNeeded now; the RPC is answered later (from a
             // spawned task) so a deliberating user can't head-of-line-block
@@ -750,8 +844,15 @@ fn prepare_fs_answer(
         match client::parse_fs_read(params) {
             Some((path, line, limit)) => {
                 match crate::acp::fs_guard::resolve_within_root(root, &path) {
-                    Ok(resolved) => InboundAnswer::FsRead { path: resolved, line, limit },
-                    Err(e) => InboundAnswer::FsRejected { code: -32602, message: e },
+                    Ok(resolved) => InboundAnswer::FsRead {
+                        path: resolved,
+                        line,
+                        limit,
+                    },
+                    Err(e) => InboundAnswer::FsRejected {
+                        code: -32602,
+                        message: e,
+                    },
                 }
             }
             None => InboundAnswer::FsRejected {
@@ -761,12 +862,16 @@ fn prepare_fs_answer(
         }
     } else {
         match client::parse_fs_write(params) {
-            Some((path, content)) => {
-                match crate::acp::fs_guard::resolve_within_root(root, &path) {
-                    Ok(resolved) => InboundAnswer::FsWrite { path: resolved, content },
-                    Err(e) => InboundAnswer::FsRejected { code: -32602, message: e },
-                }
-            }
+            Some((path, content)) => match crate::acp::fs_guard::resolve_within_root(root, &path) {
+                Ok(resolved) => InboundAnswer::FsWrite {
+                    path: resolved,
+                    content,
+                },
+                Err(e) => InboundAnswer::FsRejected {
+                    code: -32602,
+                    message: e,
+                },
+            },
             None => InboundAnswer::FsRejected {
                 code: -32602,
                 message: "malformed fs/write_text_file params".to_string(),
@@ -959,10 +1064,7 @@ mod tests {
     fn unique_worktree() -> PathBuf {
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "kl-acp-fixture-{}-{n}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("kl-acp-fixture-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::canonicalize(&dir).unwrap()
@@ -1034,7 +1136,8 @@ mod tests {
             }
         });
 
-        let resolver_task = resolver.map(|make| make(Arc::clone(&events), approvals.clone(), cancel_tx.clone()));
+        let resolver_task =
+            resolver.map(|make| make(Arc::clone(&events), approvals.clone(), cancel_tx.clone()));
 
         drive_session(
             read,
@@ -1055,7 +1158,13 @@ mod tests {
             handle.await.unwrap();
         }
         agent_task.await.unwrap();
-        Harness { events, captured, approvals, worktree, cancel_tx }
+        Harness {
+            events,
+            captured,
+            approvals,
+            worktree,
+            cancel_tx,
+        }
     }
 
     /// Concurrently: wait until an ApprovalNeeded lands in `events` — and, when
@@ -1143,34 +1252,42 @@ mod tests {
         F: FnOnce(AgentReader, AgentWriter, serde_json::Value, PathBuf) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = ()> + Send,
     {
-        run_agent_fixture(prompt, None, resolver, |mut lines, mut w, worktree| async move {
-            let req = next_request(&mut lines, "initialize").await;
-            send_line(
-                &mut w,
-                serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+        run_agent_fixture(
+            prompt,
+            None,
+            resolver,
+            |mut lines, mut w, worktree| async move {
+                let req = next_request(&mut lines, "initialize").await;
+                send_line(
+                    &mut w,
+                    serde_json::json!({"jsonrpc":"2.0","id":req["id"],
                     "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":false}}}),
-            )
-            .await;
-            let req = next_request(&mut lines, "session/new").await;
-            assert_eq!(req["params"]["cwd"], worktree.to_string_lossy().as_ref());
-            send_line(
-                &mut w,
-                serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                )
+                .await;
+                let req = next_request(&mut lines, "session/new").await;
+                assert_eq!(req["params"]["cwd"], worktree.to_string_lossy().as_ref());
+                send_line(
+                    &mut w,
+                    serde_json::json!({"jsonrpc":"2.0","id":req["id"],
                     "result":{"sessionId":"acp-abc","modes":{"currentModeId":"default",
                         "availableModes":[{"id":"default"},{"id":"acceptEdits"}]}}}),
-            )
-            .await;
-            let next = next_line_value(&mut lines).await;
-            let req = if next["method"] == "session/set_mode" {
-                send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":next["id"],"result":{}}))
+                )
+                .await;
+                let next = next_line_value(&mut lines).await;
+                let req = if next["method"] == "session/set_mode" {
+                    send_line(
+                        &mut w,
+                        serde_json::json!({"jsonrpc":"2.0","id":next["id"],"result":{}}),
+                    )
                     .await;
-                next_request(&mut lines, "session/prompt").await
-            } else {
-                assert_eq!(next["method"], "session/prompt");
-                next
-            };
-            script(lines, w, req["id"].clone(), worktree).await;
-        })
+                    next_request(&mut lines, "session/prompt").await
+                } else {
+                    assert_eq!(next["method"], "session/prompt");
+                    next
+                };
+                script(lines, w, req["id"].clone(), worktree).await;
+            },
+        )
         .await
     }
 
@@ -1214,7 +1331,9 @@ mod tests {
         assert!(matches!(events.last().unwrap(), AgentEvent::Done { summary } if summary == "Hi "));
         assert_eq!(h.captured.lock().unwrap().as_deref(), Some("acp-abc"));
         assert!(
-            !events.iter().any(|e| matches!(e, AgentEvent::ApprovalNeeded { .. })),
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ApprovalNeeded { .. })),
             "autonomous modes answer without surfacing an approval card"
         );
     }
@@ -1365,23 +1484,39 @@ mod tests {
         };
         let h = run_agent_fixture(prompt, None, None, |mut lines, mut w, _wt| async move {
             let req = next_request(&mut lines, "initialize").await;
-            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
-                "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":false}}})).await;
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":false}}}),
+            )
+            .await;
             let req = next_request(&mut lines, "session/new").await;
-            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":req["id"],
                 "result":{"sessionId":"acp-abc","modes":{"currentModeId":"default",
-                    "availableModes":[{"id":"default"}]}}})).await;
+                    "availableModes":[{"id":"default"}]}}}),
+            )
+            .await;
             // No permission_mode ⇒ target mode "default" is already current ⇒ no
             // session/set_mode. The very next request must be the model pick.
             let req = next_request(&mut lines, "session/set_config_option").await;
             assert_eq!(req["params"]["sessionId"], "acp-abc");
             assert_eq!(req["params"]["configId"], "model");
             assert_eq!(req["params"]["value"], "sonnet");
-            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
-                "result":{"configOptions":[]}})).await;
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"configOptions":[]}}),
+            )
+            .await;
             let req = next_request(&mut lines, "session/prompt").await;
-            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
-                "result":{"stopReason":"end_turn"}})).await;
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"stopReason":"end_turn"}}),
+            )
+            .await;
         })
         .await;
         let events = h.events.lock().unwrap();
@@ -1407,21 +1542,37 @@ mod tests {
             None,
             |mut lines, mut w, _wt| async move {
                 let req = next_request(&mut lines, "initialize").await;
-                send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
-                    "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}})).await;
+                send_line(
+                    &mut w,
+                    serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                    "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}),
+                )
+                .await;
                 let req = next_request(&mut lines, "session/load").await;
                 assert_eq!(req["params"]["sessionId"], "acp-prev");
-                send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                send_line(
+                    &mut w,
+                    serde_json::json!({"jsonrpc":"2.0","id":req["id"],
                     "result":{"modes":{"currentModeId":"default",
-                        "availableModes":[{"id":"default"}]}}})).await;
+                        "availableModes":[{"id":"default"}]}}}),
+                )
+                .await;
                 let req = next_request(&mut lines, "session/set_config_option").await;
                 assert_eq!(req["params"]["configId"], "model");
                 assert_eq!(req["params"]["value"], "gpt-5-codex");
-                send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
-                    "result":{"configOptions":[]}})).await;
+                send_line(
+                    &mut w,
+                    serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                    "result":{"configOptions":[]}}),
+                )
+                .await;
                 let req = next_request(&mut lines, "session/prompt").await;
-                send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
-                    "result":{"stopReason":"end_turn"}})).await;
+                send_line(
+                    &mut w,
+                    serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                    "result":{"stopReason":"end_turn"}}),
+                )
+                .await;
             },
         )
         .await;
@@ -1445,23 +1596,43 @@ mod tests {
         };
         let h = run_agent_fixture(prompt, None, None, |mut lines, mut w, _wt| async move {
             let req = next_request(&mut lines, "initialize").await;
-            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
-                "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":false}}})).await;
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":false}}}),
+            )
+            .await;
             let req = next_request(&mut lines, "session/new").await;
-            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":req["id"],
                 "result":{"sessionId":"acp-abc","modes":{"currentModeId":"default",
-                    "availableModes":[{"id":"default"},{"id":"acceptEdits"}]}}})).await;
+                    "availableModes":[{"id":"default"},{"id":"acceptEdits"}]}}}),
+            )
+            .await;
             // acceptEdits doesn't match current "default" ⇒ set_mode first…
             let req = next_request(&mut lines, "session/set_mode").await;
-            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],"result":{}})).await;
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":req["id"],"result":{}}),
+            )
+            .await;
             // …then the model pick — answered with an ERROR (codex-acp answers
             // -32602 on an empty/boolean value; claude on an unresolvable one).
             let req = next_request(&mut lines, "session/set_config_option").await;
-            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
-                "error":{"code":-32602,"message":"unknown model"}})).await;
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "error":{"code":-32602,"message":"unknown model"}}),
+            )
+            .await;
             let req = next_request(&mut lines, "session/prompt").await;
-            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
-                "result":{"stopReason":"end_turn"}})).await;
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"stopReason":"end_turn"}}),
+            )
+            .await;
         })
         .await;
         let events = h.events.lock().unwrap();
@@ -1477,7 +1648,10 @@ mod tests {
 
     #[tokio::test]
     async fn tool_call_update_emits_tool_status_event() {
-        let prompt = Prompt { text: "hello".into(), ..Default::default() };
+        let prompt = Prompt {
+            text: "hello".into(),
+            ..Default::default()
+        };
         let h = run_fixture(prompt, None, |_lines, mut w, prompt_id, _wt| async move {
             for msg in [
                 serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{
@@ -1489,8 +1663,12 @@ mod tests {
             ] {
                 send_line(&mut w, msg).await;
             }
-            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":prompt_id,
-                "result":{"stopReason":"completed"}})).await;
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":prompt_id,
+                "result":{"stopReason":"completed"}}),
+            )
+            .await;
         })
         .await;
         let events = h.events.lock().unwrap();
@@ -1503,13 +1681,24 @@ mod tests {
 
     #[tokio::test]
     async fn plan_updates_emit_plan_events() {
-        let prompt = Prompt { text: "hello".into(), ..Default::default() };
+        let prompt = Prompt {
+            text: "hello".into(),
+            ..Default::default()
+        };
         let h = run_fixture(prompt, None, |_lines, mut w, prompt_id, _wt| async move {
-            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{
                 "sessionId":"acp-abc","update":{"sessionUpdate":"plan","entries":[
-                    {"content":"Step A","status":"pending","priority":"medium"}]}}})).await;
-            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":prompt_id,
-                "result":{"stopReason":"completed"}})).await;
+                    {"content":"Step A","status":"pending","priority":"medium"}]}}}),
+            )
+            .await;
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":prompt_id,
+                "result":{"stopReason":"completed"}}),
+            )
+            .await;
         })
         .await;
         let events = h.events.lock().unwrap();
@@ -1519,13 +1708,24 @@ mod tests {
 
     #[tokio::test]
     async fn available_commands_update_emits_commands_event() {
-        let prompt = Prompt { text: "hello".into(), ..Default::default() };
+        let prompt = Prompt {
+            text: "hello".into(),
+            ..Default::default()
+        };
         let h = run_fixture(prompt, None, |_lines, mut w, prompt_id, _wt| async move {
-            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{
                 "sessionId":"acp-abc","update":{"sessionUpdate":"available_commands_update",
-                "availableCommands":[{"name":"web","description":"Search the web"}]}}})).await;
-            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":prompt_id,
-                "result":{"stopReason":"completed"}})).await;
+                "availableCommands":[{"name":"web","description":"Search the web"}]}}}),
+            )
+            .await;
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":prompt_id,
+                "result":{"stopReason":"completed"}}),
+            )
+            .await;
         })
         .await;
         let events = h.events.lock().unwrap();
@@ -1535,7 +1735,10 @@ mod tests {
 
     #[tokio::test]
     async fn thought_chunks_emit_thought_events_not_summary_text() {
-        let prompt = Prompt { text: "hello".into(), ..Default::default() };
+        let prompt = Prompt {
+            text: "hello".into(),
+            ..Default::default()
+        };
         let h = run_fixture(prompt, None, |_lines, mut w, prompt_id, _wt| async move {
             for msg in [
                 serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{
@@ -1547,8 +1750,12 @@ mod tests {
             ] {
                 send_line(&mut w, msg).await;
             }
-            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":prompt_id,
-                "result":{"stopReason":"completed"}})).await;
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":prompt_id,
+                "result":{"stopReason":"completed"}}),
+            )
+            .await;
         })
         .await;
         let events = h.events.lock().unwrap();
@@ -1603,9 +1810,12 @@ mod tests {
         .await;
         let events = h.events.lock().unwrap();
         let approval = events.iter().find_map(|e| match e {
-            AgentEvent::ApprovalNeeded { request_id, tool, options, .. } => {
-                Some((request_id.clone(), tool.clone(), options.clone()))
-            }
+            AgentEvent::ApprovalNeeded {
+                request_id,
+                tool,
+                options,
+                ..
+            } => Some((request_id.clone(), tool.clone(), options.clone())),
             _ => None,
         });
         let (_, tool, options) = approval.expect("ApprovalNeeded surfaced");
@@ -1614,7 +1824,9 @@ mod tests {
         assert_eq!(options[0].id, "ok-once");
         assert_eq!(options[0].label, "Allow once");
         assert!(
-            events.iter().any(|e| matches!(e, AgentEvent::Token { text } if text == "still streaming")),
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Token { text } if text == "still streaming")),
             "streaming continued while the approval was pending"
         );
         assert!(matches!(events.last().unwrap(), AgentEvent::Done { .. }));
@@ -1637,14 +1849,22 @@ mod tests {
             let (r, mut w) = tokio::io::split(theirs);
             let mut lines = tokio::io::BufReader::new(r).lines();
             let req = next_request(&mut lines, "initialize").await;
-            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
-                "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}})).await;
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}),
+            )
+            .await;
             // Codex-shaped mode list; currentModeId already "auto" (what
             // acceptEdits maps to) so no session/set_mode fires.
             let req = next_request(&mut lines, "session/new").await;
-            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":req["id"],
                 "result":{"sessionId":"acp-abc","modes":{"currentModeId":"auto",
-                    "availableModes":[{"id":"read-only"},{"id":"auto"},{"id":"full-access"}]}}})).await;
+                    "availableModes":[{"id":"read-only"},{"id":"auto"},{"id":"full-access"}]}}}),
+            )
+            .await;
             let prompt_req = next_request(&mut lines, "session/prompt").await;
             // The escalation request, then MORE streaming — no head-of-line block.
             for msg in [
@@ -1664,8 +1884,12 @@ mod tests {
             assert_eq!(ans["id"], 41);
             assert_eq!(ans["result"]["outcome"]["outcome"], "selected");
             assert_eq!(ans["result"]["outcome"]["optionId"], "ok-once");
-            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":prompt_req["id"],
-                "result":{"stopReason":"completed"}})).await;
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":prompt_req["id"],
+                "result":{"stopReason":"completed"}}),
+            )
+            .await;
         });
         let resolver = spawn_resolver(
             Arc::clone(&events),
@@ -1696,12 +1920,16 @@ mod tests {
         agent.await.unwrap();
         let events = events.lock().unwrap();
         assert!(
-            events.iter().any(|e| matches!(e, AgentEvent::ApprovalNeeded { tool, .. }
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ApprovalNeeded { tool, .. }
                 if tool == "Run curl (requires network)")),
             "escalation must surface an approval card under codex Auto-edit, got {events:?}"
         );
         assert!(
-            events.iter().any(|e| matches!(e, AgentEvent::Token { text } if text == "still streaming")),
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Token { text } if text == "still streaming")),
             "streaming continued while the escalation was pending"
         );
         assert!(matches!(events.last().unwrap(), AgentEvent::Done { .. }));
@@ -1750,9 +1978,12 @@ mod tests {
         .await;
         let events = h.events.lock().unwrap();
         let approval = events.iter().find_map(|e| match e {
-            AgentEvent::ApprovalNeeded { request_id, tool, options, .. } => {
-                Some((request_id.clone(), tool.clone(), options.clone()))
-            }
+            AgentEvent::ApprovalNeeded {
+                request_id,
+                tool,
+                options,
+                ..
+            } => Some((request_id.clone(), tool.clone(), options.clone())),
             _ => None,
         });
         let (_, tool, options) = approval.expect("ApprovalNeeded surfaced");
@@ -1761,7 +1992,9 @@ mod tests {
         assert_eq!(options[0].id, "ok-once");
         assert_eq!(options[0].label, "Allow once");
         assert!(
-            events.iter().any(|e| matches!(e, AgentEvent::Token { text } if text == "still streaming")),
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Token { text } if text == "still streaming")),
             "streaming continued while the approval was pending"
         );
         assert!(matches!(events.last().unwrap(), AgentEvent::Done { .. }));
@@ -1807,20 +2040,24 @@ mod tests {
             text: "hello".into(),
             ..Default::default()
         };
-        let h = run_fixture(prompt, None, |mut lines, mut w, prompt_id, _wt| async move {
-            // A real ACP method Kineloop doesn't implement (fs/* IS handled now
-            // that M4 wires the proxy — see the fs_* fixtures below).
-            let msg = serde_json::json!({"jsonrpc":"2.0","id":7,"method":"terminal/create",
+        let h = run_fixture(
+            prompt,
+            None,
+            |mut lines, mut w, prompt_id, _wt| async move {
+                // A real ACP method Kineloop doesn't implement (fs/* IS handled now
+                // that M4 wires the proxy — see the fs_* fixtures below).
+                let msg = serde_json::json!({"jsonrpc":"2.0","id":7,"method":"terminal/create",
                 "params":{"sessionId":"acp-abc"}});
-            w.write_all(format!("{msg}\n").as_bytes()).await.unwrap();
-            let ans: serde_json::Value =
-                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
-            assert_eq!(ans["id"], 7);
-            assert_eq!(ans["error"]["code"], -32601);
-            let resp = serde_json::json!({"jsonrpc":"2.0","id":prompt_id,
+                w.write_all(format!("{msg}\n").as_bytes()).await.unwrap();
+                let ans: serde_json::Value =
+                    serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+                assert_eq!(ans["id"], 7);
+                assert_eq!(ans["error"]["code"], -32601);
+                let resp = serde_json::json!({"jsonrpc":"2.0","id":prompt_id,
                 "result":{"stopReason":"completed"}});
-            w.write_all(format!("{resp}\n").as_bytes()).await.unwrap();
-        })
+                w.write_all(format!("{resp}\n").as_bytes()).await.unwrap();
+            },
+        )
         .await;
         assert!(matches!(
             h.events.lock().unwrap().last().unwrap(),
@@ -1842,7 +2079,10 @@ mod tests {
 
     #[tokio::test]
     async fn fs_read_returns_file_content_with_line_slicing() {
-        let prompt = Prompt { text: "hello".into(), ..Default::default() };
+        let prompt = Prompt {
+            text: "hello".into(),
+            ..Default::default()
+        };
         let h = run_fixture(prompt, None, |mut lines, mut w, prompt_id, wt| async move {
             std::fs::write(wt.join("notes.txt"), "l1\nl2\nl3\nl4\n").unwrap();
             let msg = serde_json::json!({"jsonrpc":"2.0","id":7,"method":"fs/read_text_file",
@@ -1854,8 +2094,11 @@ mod tests {
                 serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
             assert_eq!(ans["id"], 7);
             assert_eq!(ans["result"]["content"], "l2\nl3");
-            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":prompt_id,
-                "result":{"stopReason":"completed"}}))
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":prompt_id,
+                "result":{"stopReason":"completed"}}),
+            )
             .await;
         })
         .await;
@@ -1867,7 +2110,10 @@ mod tests {
 
     #[tokio::test]
     async fn fs_write_creates_file_emits_file_write_and_answers_empty_object() {
-        let prompt = Prompt { text: "hello".into(), ..Default::default() };
+        let prompt = Prompt {
+            text: "hello".into(),
+            ..Default::default()
+        };
         let h = run_fixture(prompt, None, |mut lines, mut w, prompt_id, wt| async move {
             // sub/ does not exist yet — parent dirs must be created by the write.
             let target = wt.join("sub").join("new.txt");
@@ -1880,8 +2126,11 @@ mod tests {
             assert_eq!(ans["id"], 7);
             assert_eq!(ans["result"], serde_json::json!({}));
             assert!(ans.get("error").is_none());
-            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":prompt_id,
-                "result":{"stopReason":"completed"}}))
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":prompt_id,
+                "result":{"stopReason":"completed"}}),
+            )
             .await;
         })
         .await;
@@ -1891,10 +2140,10 @@ mod tests {
         );
         let events = h.events.lock().unwrap();
         assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, AgentEvent::FileWrite { path } if path.ends_with("sub/new.txt")
-                    || path.ends_with("sub\\new.txt"))),
+            events.iter().any(
+                |e| matches!(e, AgentEvent::FileWrite { path } if path.ends_with("sub/new.txt")
+                    || path.ends_with("sub\\new.txt"))
+            ),
             "expected a FileWrite event for sub/new.txt, got {events:?}"
         );
         assert!(matches!(events.last().unwrap(), AgentEvent::Done { .. }));
@@ -1902,24 +2151,37 @@ mod tests {
 
     #[tokio::test]
     async fn fs_escape_attempt_is_rejected_and_run_survives() {
-        let prompt = Prompt { text: "hello".into(), ..Default::default() };
-        let h = run_fixture(prompt, None, |mut lines, mut w, prompt_id, _wt| async move {
-            let msg = serde_json::json!({"jsonrpc":"2.0","id":7,"method":"fs/write_text_file",
+        let prompt = Prompt {
+            text: "hello".into(),
+            ..Default::default()
+        };
+        let h = run_fixture(
+            prompt,
+            None,
+            |mut lines, mut w, prompt_id, _wt| async move {
+                let msg = serde_json::json!({"jsonrpc":"2.0","id":7,"method":"fs/write_text_file",
                 "params":{"sessionId":"acp-abc","path":"../outside.txt","content":"x"}});
-            send_line(&mut w, msg).await;
-            let ans: serde_json::Value =
-                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
-            assert_eq!(ans["id"], 7);
-            assert_eq!(ans["error"]["code"], -32602);
-            // The escape rejection must not kill the run: streaming continues.
-            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{
+                send_line(&mut w, msg).await;
+                let ans: serde_json::Value =
+                    serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+                assert_eq!(ans["id"], 7);
+                assert_eq!(ans["error"]["code"], -32602);
+                // The escape rejection must not kill the run: streaming continues.
+                send_line(
+                    &mut w,
+                    serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{
                 "sessionId":"acp-abc","update":{"sessionUpdate":"agent_message_chunk",
-                "content":{"type":"text","text":"still ok"}}}}))
-            .await;
-            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":prompt_id,
-                "result":{"stopReason":"completed"}}))
-            .await;
-        })
+                "content":{"type":"text","text":"still ok"}}}}),
+                )
+                .await;
+                send_line(
+                    &mut w,
+                    serde_json::json!({"jsonrpc":"2.0","id":prompt_id,
+                "result":{"stopReason":"completed"}}),
+                )
+                .await;
+            },
+        )
         .await;
         let outside = h.worktree.parent().unwrap().join("outside.txt");
         assert!(!outside.exists(), "escape write must never land on disk");
@@ -1929,7 +2191,9 @@ mod tests {
             .any(|e| matches!(e, AgentEvent::Token { text } if text == "still ok")));
         assert!(matches!(events.last().unwrap(), AgentEvent::Done { .. }));
         assert!(
-            !events.iter().any(|e| matches!(e, AgentEvent::FileWrite { .. })),
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::FileWrite { .. })),
             "a rejected write must never emit FileWrite"
         );
     }
@@ -2015,42 +2279,47 @@ mod tests {
             text: "continue".into(),
             ..Default::default()
         };
-        let h = run_agent_fixture(prompt, Some("acp-gone".into()), None, |mut lines, mut w, _wt| async move {
-            let req = next_request(&mut lines, "initialize").await;
-            send_line(
-                &mut w,
-                serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+        let h = run_agent_fixture(
+            prompt,
+            Some("acp-gone".into()),
+            None,
+            |mut lines, mut w, _wt| async move {
+                let req = next_request(&mut lines, "initialize").await;
+                send_line(
+                    &mut w,
+                    serde_json::json!({"jsonrpc":"2.0","id":req["id"],
                     "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}),
-            )
-            .await;
-            // The agent no longer knows the session — a load error must degrade
-            // to a fresh session instead of failing the run.
-            let req = next_request(&mut lines, "session/load").await;
-            send_line(
-                &mut w,
-                serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                )
+                .await;
+                // The agent no longer knows the session — a load error must degrade
+                // to a fresh session instead of failing the run.
+                let req = next_request(&mut lines, "session/load").await;
+                send_line(
+                    &mut w,
+                    serde_json::json!({"jsonrpc":"2.0","id":req["id"],
                     "error":{"code":-32603,"message":"session not found"}}),
-            )
-            .await;
-            let req = next_request(&mut lines, "session/new").await;
-            send_line(
-                &mut w,
-                serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                )
+                .await;
+                let req = next_request(&mut lines, "session/new").await;
+                send_line(
+                    &mut w,
+                    serde_json::json!({"jsonrpc":"2.0","id":req["id"],
                     "result":{"sessionId":"acp-fresh","modes":{"currentModeId":"default",
                         "availableModes":[{"id":"default"}]}}}),
-            )
-            .await;
-            // Prompt permission_mode is None ("default") and matches — no
-            // session/set_mode should fire.
-            let req = next_request(&mut lines, "session/prompt").await;
-            assert_eq!(req["params"]["sessionId"], "acp-fresh");
-            send_line(
-                &mut w,
-                serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                )
+                .await;
+                // Prompt permission_mode is None ("default") and matches — no
+                // session/set_mode should fire.
+                let req = next_request(&mut lines, "session/prompt").await;
+                assert_eq!(req["params"]["sessionId"], "acp-fresh");
+                send_line(
+                    &mut w,
+                    serde_json::json!({"jsonrpc":"2.0","id":req["id"],
                     "result":{"stopReason":"completed"}}),
-            )
-            .await;
-        })
+                )
+                .await;
+            },
+        )
         .await;
         assert_eq!(h.captured.lock().unwrap().as_deref(), Some("acp-fresh"));
         let events = h.events.lock().unwrap();
@@ -2072,26 +2341,52 @@ mod tests {
             resume_transcript: Some("User: add a helper\n\nAssistant: added helper()".into()),
             ..Default::default()
         };
-        let h = run_agent_fixture(prompt, Some("acp-old".into()), None, |mut lines, mut w, _wt| async move {
-            let req = next_request(&mut lines, "initialize").await;
-            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
-                "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":false}}})).await;
-            // No session/load may be attempted — the next request is session/new.
-            let req = next_request(&mut lines, "session/new").await;
-            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+        let h = run_agent_fixture(
+            prompt,
+            Some("acp-old".into()),
+            None,
+            |mut lines, mut w, _wt| async move {
+                let req = next_request(&mut lines, "initialize").await;
+                send_line(
+                    &mut w,
+                    serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":false}}}),
+                )
+                .await;
+                // No session/load may be attempted — the next request is session/new.
+                let req = next_request(&mut lines, "session/new").await;
+                send_line(
+                    &mut w,
+                    serde_json::json!({"jsonrpc":"2.0","id":req["id"],
                 "result":{"sessionId":"acp-fresh","modes":{"currentModeId":"default",
-                    "availableModes":[{"id":"default"}]}}})).await;
-            let req = next_request(&mut lines, "session/prompt").await;
-            let text = req["params"]["prompt"][0]["text"].as_str().unwrap().to_string();
-            assert!(text.contains("Assistant: added helper()"), "transcript replayed: {text}");
-            assert!(text.contains("and now add tests"), "user request present: {text}");
-            assert!(
-                text.contains("Native session resume is unavailable"),
-                "framing present: {text}"
-            );
-            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
-                "result":{"stopReason":"completed"}})).await;
-        })
+                    "availableModes":[{"id":"default"}]}}}),
+                )
+                .await;
+                let req = next_request(&mut lines, "session/prompt").await;
+                let text = req["params"]["prompt"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .to_string();
+                assert!(
+                    text.contains("Assistant: added helper()"),
+                    "transcript replayed: {text}"
+                );
+                assert!(
+                    text.contains("and now add tests"),
+                    "user request present: {text}"
+                );
+                assert!(
+                    text.contains("Native session resume is unavailable"),
+                    "framing present: {text}"
+                );
+                send_line(
+                    &mut w,
+                    serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"stopReason":"completed"}}),
+                )
+                .await;
+            },
+        )
         .await;
         assert_eq!(h.captured.lock().unwrap().as_deref(), Some("acp-fresh"));
         let events = h.events.lock().unwrap();
@@ -2109,49 +2404,103 @@ mod tests {
             resume_transcript: Some("User: earlier work".into()),
             ..Default::default()
         };
-        let h = run_agent_fixture(prompt, Some("acp-gone".into()), None, |mut lines, mut w, _wt| async move {
-            let req = next_request(&mut lines, "initialize").await;
-            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
-                "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}})).await;
-            let req = next_request(&mut lines, "session/load").await;
-            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
-                "error":{"code":-32603,"message":"session not found"}})).await;
-            let req = next_request(&mut lines, "session/new").await;
-            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+        let h = run_agent_fixture(
+            prompt,
+            Some("acp-gone".into()),
+            None,
+            |mut lines, mut w, _wt| async move {
+                let req = next_request(&mut lines, "initialize").await;
+                send_line(
+                    &mut w,
+                    serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}),
+                )
+                .await;
+                let req = next_request(&mut lines, "session/load").await;
+                send_line(
+                    &mut w,
+                    serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "error":{"code":-32603,"message":"session not found"}}),
+                )
+                .await;
+                let req = next_request(&mut lines, "session/new").await;
+                send_line(
+                    &mut w,
+                    serde_json::json!({"jsonrpc":"2.0","id":req["id"],
                 "result":{"sessionId":"acp-fresh","modes":{"currentModeId":"default",
-                    "availableModes":[{"id":"default"}]}}})).await;
-            let req = next_request(&mut lines, "session/prompt").await;
-            let text = req["params"]["prompt"][0]["text"].as_str().unwrap().to_string();
-            assert!(text.contains("User: earlier work"), "transcript replayed: {text}");
-            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
-                "result":{"stopReason":"completed"}})).await;
-        })
+                    "availableModes":[{"id":"default"}]}}}),
+                )
+                .await;
+                let req = next_request(&mut lines, "session/prompt").await;
+                let text = req["params"]["prompt"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .to_string();
+                assert!(
+                    text.contains("User: earlier work"),
+                    "transcript replayed: {text}"
+                );
+                send_line(
+                    &mut w,
+                    serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"stopReason":"completed"}}),
+                )
+                .await;
+            },
+        )
         .await;
         let events = h.events.lock().unwrap();
-        assert!(events.iter().any(|e| matches!(e, AgentEvent::Notice { message } if message == RESUME_NOTICE_WITH_CONTEXT)));
+        assert!(events.iter().any(
+            |e| matches!(e, AgentEvent::Notice { message } if message == RESUME_NOTICE_WITH_CONTEXT)
+        ));
         assert!(matches!(events.last().unwrap(), AgentEvent::Done { .. }));
     }
 
     /// Fallback without a transcript still surfaces the (no-context) notice.
     #[tokio::test]
     async fn fallback_without_transcript_notices_no_context() {
-        let prompt = Prompt { text: "continue".into(), ..Default::default() };
-        let h = run_agent_fixture(prompt, Some("acp-old".into()), None, |mut lines, mut w, _wt| async move {
-            let req = next_request(&mut lines, "initialize").await;
-            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
-                "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":false}}})).await;
-            let req = next_request(&mut lines, "session/new").await;
-            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+        let prompt = Prompt {
+            text: "continue".into(),
+            ..Default::default()
+        };
+        let h = run_agent_fixture(
+            prompt,
+            Some("acp-old".into()),
+            None,
+            |mut lines, mut w, _wt| async move {
+                let req = next_request(&mut lines, "initialize").await;
+                send_line(
+                    &mut w,
+                    serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":false}}}),
+                )
+                .await;
+                let req = next_request(&mut lines, "session/new").await;
+                send_line(
+                    &mut w,
+                    serde_json::json!({"jsonrpc":"2.0","id":req["id"],
                 "result":{"sessionId":"acp-fresh","modes":{"currentModeId":"default",
-                    "availableModes":[{"id":"default"}]}}})).await;
-            let req = next_request(&mut lines, "session/prompt").await;
-            assert_eq!(req["params"]["prompt"][0]["text"], "continue", "no replay block");
-            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
-                "result":{"stopReason":"completed"}})).await;
-        })
+                    "availableModes":[{"id":"default"}]}}}),
+                )
+                .await;
+                let req = next_request(&mut lines, "session/prompt").await;
+                assert_eq!(
+                    req["params"]["prompt"][0]["text"], "continue",
+                    "no replay block"
+                );
+                send_line(
+                    &mut w,
+                    serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"stopReason":"completed"}}),
+                )
+                .await;
+            },
+        )
         .await;
         let events = h.events.lock().unwrap();
-        assert!(events.iter().any(|e| matches!(e, AgentEvent::Notice { message } if message == RESUME_NOTICE_NO_CONTEXT)));
+        assert!(events.iter().any(
+            |e| matches!(e, AgentEvent::Notice { message } if message == RESUME_NOTICE_NO_CONTEXT)
+        ));
     }
 
     /// Native load succeeding must NOT engage the fallback: prompt text stays
@@ -2178,7 +2527,9 @@ mod tests {
         .await;
         let events = h.events.lock().unwrap();
         assert!(
-            !events.iter().any(|e| matches!(e, AgentEvent::Notice { .. })),
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Notice { .. })),
             "native resume must be silent, got {events:?}"
         );
     }
@@ -2196,23 +2547,41 @@ mod tests {
         };
         let h = run_agent_fixture(prompt, None, None, |mut lines, mut w, _wt| async move {
             let req = next_request(&mut lines, "initialize").await;
-            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
-                "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":false}}})).await;
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":false}}}),
+            )
+            .await;
             // No thread id ⇒ no session/load may be attempted — straight to session/new.
             let req = next_request(&mut lines, "session/new").await;
-            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":req["id"],
                 "result":{"sessionId":"acp-fresh","modes":{"currentModeId":"default",
-                    "availableModes":[{"id":"default"}]}}})).await;
+                    "availableModes":[{"id":"default"}]}}}),
+            )
+            .await;
             let req = next_request(&mut lines, "session/prompt").await;
-            let text = req["params"]["prompt"][0]["text"].as_str().unwrap().to_string();
-            assert!(text.contains("User: earlier work"), "transcript replayed: {text}");
+            let text = req["params"]["prompt"][0]["text"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            assert!(
+                text.contains("User: earlier work"),
+                "transcript replayed: {text}"
+            );
             assert!(
                 text.contains("Native session resume is unavailable"),
                 "framing present: {text}"
             );
             assert!(text.contains("continue"), "user request present: {text}");
-            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
-                "result":{"stopReason":"completed"}})).await;
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"stopReason":"completed"}}),
+            )
+            .await;
         })
         .await;
         assert_eq!(h.captured.lock().unwrap().as_deref(), Some("acp-fresh"));
@@ -2227,24 +2596,44 @@ mod tests {
     /// text verbatim, no Notice.
     #[tokio::test]
     async fn true_first_turn_stays_silent() {
-        let prompt = Prompt { text: "hello".into(), ..Default::default() };
+        let prompt = Prompt {
+            text: "hello".into(),
+            ..Default::default()
+        };
         let h = run_agent_fixture(prompt, None, None, |mut lines, mut w, _wt| async move {
             let req = next_request(&mut lines, "initialize").await;
-            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
-                "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":false}}})).await;
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":false}}}),
+            )
+            .await;
             let req = next_request(&mut lines, "session/new").await;
-            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":req["id"],
                 "result":{"sessionId":"acp-fresh","modes":{"currentModeId":"default",
-                    "availableModes":[{"id":"default"}]}}})).await;
+                    "availableModes":[{"id":"default"}]}}}),
+            )
+            .await;
             let req = next_request(&mut lines, "session/prompt").await;
-            assert_eq!(req["params"]["prompt"][0]["text"], "hello", "verbatim prompt");
-            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
-                "result":{"stopReason":"completed"}})).await;
+            assert_eq!(
+                req["params"]["prompt"][0]["text"], "hello",
+                "verbatim prompt"
+            );
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"stopReason":"completed"}}),
+            )
+            .await;
         })
         .await;
         let events = h.events.lock().unwrap();
         assert!(
-            !events.iter().any(|e| matches!(e, AgentEvent::Notice { .. })),
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Notice { .. })),
             "a genuine first turn must be silent, got {events:?}"
         );
     }
@@ -2255,16 +2644,20 @@ mod tests {
     /// text — a user stop is not an error.
     #[tokio::test]
     async fn user_cancel_sends_session_cancel_and_ends_done_with_partial_text() {
-        let prompt = Prompt { text: "hello".into(), ..Default::default() };
+        let prompt = Prompt {
+            text: "hello".into(),
+            ..Default::default()
+        };
         let h = run_fixture(
             prompt,
             // Flip the cancel switch once the first token has landed.
             Some(Box::new(|events, _approvals, cancel_tx| {
                 tokio::spawn(async move {
                     loop {
-                        let seen = events.lock().unwrap().iter().any(
-                            |e| matches!(e, AgentEvent::Token { text } if text == "partial "),
-                        );
+                        let seen =
+                            events.lock().unwrap().iter().any(
+                                |e| matches!(e, AgentEvent::Token { text } if text == "partial "),
+                            );
                         if seen {
                             let _ = cancel_tx.send(true);
                             return;
@@ -2274,9 +2667,13 @@ mod tests {
                 })
             })),
             |mut lines, mut w, prompt_id, _wt| async move {
-                send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{
+                send_line(
+                    &mut w,
+                    serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{
                     "sessionId":"acp-abc","update":{"sessionUpdate":"agent_message_chunk",
-                    "content":{"type":"text","text":"partial "}}}})).await;
+                    "content":{"type":"text","text":"partial "}}}}),
+                )
+                .await;
                 // The user's stop must arrive as a session/cancel NOTIFICATION.
                 let msg: serde_json::Value =
                     serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
@@ -2284,17 +2681,27 @@ mod tests {
                 assert_eq!(msg["params"]["sessionId"], "acp-abc");
                 assert!(msg.get("id").is_none());
                 // Final update AFTER the cancel — must still be accepted.
-                send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{
+                send_line(
+                    &mut w,
+                    serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{
                     "sessionId":"acp-abc","update":{"sessionUpdate":"agent_message_chunk",
-                    "content":{"type":"text","text":"wrap-up"}}}})).await;
-                send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":prompt_id,
-                    "result":{"stopReason":"cancelled"}})).await;
+                    "content":{"type":"text","text":"wrap-up"}}}}),
+                )
+                .await;
+                send_line(
+                    &mut w,
+                    serde_json::json!({"jsonrpc":"2.0","id":prompt_id,
+                    "result":{"stopReason":"cancelled"}}),
+                )
+                .await;
             },
         )
         .await;
         let events = h.events.lock().unwrap();
         assert!(
-            events.iter().any(|e| matches!(e, AgentEvent::Token { text } if text == "wrap-up")),
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Token { text } if text == "wrap-up")),
             "post-cancel updates must still be accepted: {events:?}"
         );
         assert!(
@@ -2315,7 +2722,11 @@ mod tests {
     /// agent until the grace window degrades the graceful cancel to a kill.
     #[tokio::test]
     async fn permission_request_after_cancel_answers_cancelled_without_new_card() {
-        let prompt = Prompt { text: "hello".into(), permission_mode: None, ..Default::default() };
+        let prompt = Prompt {
+            text: "hello".into(),
+            permission_mode: None,
+            ..Default::default()
+        };
         let h = run_fixture(
             prompt,
             // Flip the cancel switch once the first token has landed.
@@ -2357,7 +2768,9 @@ mod tests {
         .await;
         let events = h.events.lock().unwrap();
         assert!(
-            !events.iter().any(|e| matches!(e, AgentEvent::ApprovalNeeded { .. })),
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ApprovalNeeded { .. })),
             "no approval card may re-open after the user pressed Stop: {events:?}"
         );
         assert!(matches!(events.last().unwrap(), AgentEvent::Done { .. }));
@@ -2368,7 +2781,11 @@ mod tests {
     /// `cancelled` outcome (ACP REQUIRES this) and the agent can finish.
     #[tokio::test]
     async fn user_cancel_resolves_pending_approvals_with_cancelled_outcome() {
-        let prompt = Prompt { text: "hello".into(), permission_mode: None, ..Default::default() };
+        let prompt = Prompt {
+            text: "hello".into(),
+            permission_mode: None,
+            ..Default::default()
+        };
         let h = run_fixture(
             prompt,
             // Stop once the approval card has surfaced.
@@ -2471,18 +2888,29 @@ mod tests {
             let req: serde_json::Value =
                 serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
             assert_eq!(req["method"], "initialize");
-            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
-                "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}})).await;
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}),
+            )
+            .await;
             let req: serde_json::Value =
                 serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
             assert_eq!(req["method"], "session/new");
-            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
-                "error":{"code":-32000,"message":"Authentication required"}})).await;
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "error":{"code":-32000,"message":"Authentication required"}}),
+            )
+            .await;
         });
         let err = drive_session(
             read,
             write,
-            Prompt { text: "hi".into(), ..Default::default() },
+            Prompt {
+                text: "hi".into(),
+                ..Default::default()
+            },
             "/wt".into(),
             None,
             sink,
@@ -2497,6 +2925,17 @@ mod tests {
         assert!(
             matches!(&err, crate::adapter::SessionError::Protocol(m) if m.contains("codex login")),
             "expected the login hint in the failure, got {err:?}"
+        );
+        assert!(
+            events.lock().unwrap().iter().any(|e| {
+                matches!(
+                    e,
+                    AgentEvent::AuthRequired { agent, command, .. }
+                        if agent == "codex" && command == "codex login"
+                )
+            }),
+            "expected authRequired event, got {:?}",
+            events.lock().unwrap()
         );
         agent.await.unwrap();
     }
@@ -2520,7 +2959,10 @@ mod tests {
         let err = drive_session(
             read,
             write,
-            Prompt { text: "hi".into(), ..Default::default() },
+            Prompt {
+                text: "hi".into(),
+                ..Default::default()
+            },
             "/wt".into(),
             None,
             sink,
@@ -2545,7 +2987,10 @@ mod tests {
     /// as -32601, which contradicts the advertisement.)
     #[tokio::test]
     async fn fs_read_is_served_during_load_replay() {
-        let prompt = Prompt { text: "continue".into(), ..Default::default() };
+        let prompt = Prompt {
+            text: "continue".into(),
+            ..Default::default()
+        };
         let h = run_agent_fixture(prompt, Some("acp-abc".into()), None, |mut lines, mut w, worktree| async move {
             std::fs::write(worktree.join("notes.txt"), "l1\nl2\n").unwrap();
             let req = next_request(&mut lines, "initialize").await;
@@ -2574,14 +3019,20 @@ mod tests {
                 "result":{"stopReason":"completed"}})).await;
         })
         .await;
-        assert!(matches!(h.events.lock().unwrap().last().unwrap(), AgentEvent::Done { .. }));
+        assert!(matches!(
+            h.events.lock().unwrap().last().unwrap(),
+            AgentEvent::Done { .. }
+        ));
     }
 
     /// A write mid-replay is a real write — it lands on disk and its FileWrite
     /// chip is emitted (after the load resolves, never across the await).
     #[tokio::test]
     async fn fs_write_during_load_replay_lands_and_emits_file_write() {
-        let prompt = Prompt { text: "continue".into(), ..Default::default() };
+        let prompt = Prompt {
+            text: "continue".into(),
+            ..Default::default()
+        };
         let h = run_agent_fixture(prompt, Some("acp-abc".into()), None, |mut lines, mut w, worktree| async move {
             let req = next_request(&mut lines, "initialize").await;
             send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
@@ -2608,7 +3059,9 @@ mod tests {
         );
         let events = h.events.lock().unwrap();
         assert!(
-            events.iter().any(|e| matches!(e, AgentEvent::FileWrite { path } if path.ends_with("replayed.txt"))),
+            events.iter().any(
+                |e| matches!(e, AgentEvent::FileWrite { path } if path.ends_with("replayed.txt"))
+            ),
             "replay-time write must still surface a FileWrite chip, got {events:?}"
         );
     }
@@ -2617,7 +3070,10 @@ mod tests {
     /// method — -32601 would be a lie — but there is no user context to ask in).
     #[tokio::test]
     async fn permission_request_during_load_replay_is_cancelled() {
-        let prompt = Prompt { text: "continue".into(), ..Default::default() };
+        let prompt = Prompt {
+            text: "continue".into(),
+            ..Default::default()
+        };
         let h = run_agent_fixture(prompt, Some("acp-abc".into()), None, |mut lines, mut w, _wt| async move {
             let req = next_request(&mut lines, "initialize").await;
             send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
@@ -2639,7 +3095,9 @@ mod tests {
         .await;
         let events = h.events.lock().unwrap();
         assert!(
-            !events.iter().any(|e| matches!(e, AgentEvent::ApprovalNeeded { .. })),
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ApprovalNeeded { .. })),
             "no approval card may surface for a replay-time permission request"
         );
         assert!(matches!(events.last().unwrap(), AgentEvent::Done { .. }));
@@ -2660,30 +3118,52 @@ mod tests {
             let req: serde_json::Value =
                 serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
             assert_eq!(req["method"], "initialize");
-            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
-                "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":false}}})).await;
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":false}}}),
+            )
+            .await;
             let req: serde_json::Value =
                 serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
             assert_eq!(req["method"], "session/new");
-            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":req["id"],
                 "result":{"sessionId":"acp-abc","modes":{"currentModeId":"default",
-                    "availableModes":[{"id":"default"}]}}})).await;
+                    "availableModes":[{"id":"default"}]}}}),
+            )
+            .await;
             let prompt_req: serde_json::Value =
                 serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
             assert_eq!(prompt_req["method"], "session/prompt");
-            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":7,"method":"fs/read_text_file",
-                "params":{"sessionId":"acp-abc","path":"x.txt"}})).await;
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":7,"method":"fs/read_text_file",
+                "params":{"sessionId":"acp-abc","path":"x.txt"}}),
+            )
+            .await;
             let ans: serde_json::Value =
                 serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
             assert_eq!(ans["id"], 7);
-            assert_eq!(ans["error"]["code"], -32603, "our failure, not the agent's params");
-            send_line(&mut w, serde_json::json!({"jsonrpc":"2.0","id":prompt_req["id"],
-                "result":{"stopReason":"completed"}})).await;
+            assert_eq!(
+                ans["error"]["code"], -32603,
+                "our failure, not the agent's params"
+            );
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":prompt_req["id"],
+                "result":{"stopReason":"completed"}}),
+            )
+            .await;
         });
         drive_session(
             read,
             write,
-            Prompt { text: "hi".into(), ..Default::default() },
+            Prompt {
+                text: "hi".into(),
+                ..Default::default()
+            },
             "/kineloop-does-not-exist-m5".into(), // canonicalize fails ⇒ fs_root None
             None,
             sink,
@@ -2742,9 +3222,7 @@ mod tests {
         let mut gone = false;
         for _ in 0..100 {
             let alive = unsafe { libc::kill(sleep_pid, 0) } == 0;
-            if !alive
-                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
-            {
+            if !alive && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
                 gone = true;
                 break;
             }
@@ -2772,14 +3250,20 @@ mod tests {
         let mut out = String::new();
         while out.lines().count() < 2 {
             let mut buf = [0u8; 256];
-            let n = tokio::io::AsyncReadExt::read(&mut stdout, &mut buf).await.unwrap();
+            let n = tokio::io::AsyncReadExt::read(&mut stdout, &mut buf)
+                .await
+                .unwrap();
             assert!(n > 0, "sh exited before printing both pids");
             out.push_str(&String::from_utf8_lossy(&buf[..n]));
         }
         let mut lines = out.lines();
         let _shell_pid: i32 = lines.next().unwrap().trim().parse().unwrap();
         let sleep_pid: i32 = lines.next().unwrap().trim().parse().unwrap();
-        assert_eq!(unsafe { libc::kill(sleep_pid, 0) }, 0, "grandchild must be alive pre-drop");
+        assert_eq!(
+            unsafe { libc::kill(sleep_pid, 0) },
+            0,
+            "grandchild must be alive pre-drop"
+        );
 
         drop(guard); // <- the mechanism under test
 

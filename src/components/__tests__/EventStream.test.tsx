@@ -215,6 +215,23 @@ test("renders an error event with alert role", () => {
   expect(screen.getByRole("alert")).toHaveTextContent("boom");
 });
 
+test("renders authRequired as a compact sign-in action", () => {
+  const events: AgentEvent[] = [
+    {
+      kind: "authRequired",
+      data: {
+        agent: "codex",
+        command: "codex login",
+        message: "Sign in to Codex CLI in a terminal, then retry this message.",
+      },
+    },
+  ];
+  render(<EventStream events={events} />);
+  expect(screen.getByText("Sign in required")).toBeInTheDocument();
+  expect(screen.getByText("codex login")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Copy codex sign-in command" })).toBeInTheDocument();
+});
+
 test("renders a done event with its summary", () => {
   const events: AgentEvent[] = [{ kind: "done", data: { summary: "all set" } }];
   render(<EventStream events={events} />);

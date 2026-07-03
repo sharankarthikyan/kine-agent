@@ -1466,6 +1466,11 @@ export default function App() {
       if (event.kind === "notice" && shouldToastSessionNotice(sessionId)) {
         toast.info(event.data.message);
       }
+      if (event.kind === "authRequired") {
+        toast.info("Sign in required", {
+          description: `${event.data.agent}: ${event.data.command}`,
+        });
+      }
       appendToLastTurn(sessionId, event);
     };
     // Forward the selected model verbatim (alias for Claude, concrete id for

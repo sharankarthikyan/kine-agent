@@ -14,6 +14,8 @@ import {
   Circle,
   ChevronDown,
   ShieldQuestion,
+  Terminal,
+  Copy,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { DiffLineKind } from "@/lib/parsePatch";
@@ -398,6 +400,38 @@ function renderEvent(
         <Alert variant="destructive" className="w-full">
           <AlertDescription>{event.data.message}</AlertDescription>
         </Alert>
+      );
+
+    case "authRequired":
+      return (
+        <div className="w-full max-w-2xl rounded-lg border border-border/70 bg-muted/20 px-3 py-2.5 text-sm">
+          <div className="flex items-start gap-2">
+            <Terminal aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+            <div className="min-w-0 flex-1">
+              <div className="font-medium">Sign in required</div>
+              <div className="mt-0.5 break-words text-muted-foreground">
+                {event.data.message}
+              </div>
+              <div className="mt-2 flex min-w-0 items-center gap-1.5">
+                <code className="min-w-0 truncate rounded-md bg-muted px-2 py-1 font-mono text-xs text-foreground">
+                  {event.data.command}
+                </code>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="size-7 shrink-0"
+                  aria-label={`Copy ${event.data.agent} sign-in command`}
+                  onClick={() => {
+                    void navigator.clipboard?.writeText(event.data.command);
+                  }}
+                >
+                  <Copy aria-hidden="true" className="size-3.5" />
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
       );
 
     case "notice":
