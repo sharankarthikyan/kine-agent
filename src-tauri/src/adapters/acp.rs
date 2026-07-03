@@ -2742,6 +2742,28 @@ mod tests {
         ));
     }
 
+    // Case-insensitive filesystems only: on case-sensitive Linux, `.GIT` is a
+    // genuinely distinct, legitimately writable path, not a variant of `.git`.
+    #[cfg(any(target_os = "macos", windows))]
+    #[test]
+    fn fs_write_to_case_variant_git_path_is_rejected() {
+        // Pin, not TDD: this already passes off the Task-1 wiring — it locks
+        // in the `resolve_within_root` ancestor-canonicalization behavior
+        // `reject_git_control_write`'s doc comment relies on (an existing
+        // `.git` absorbs a case-variant request before the exact-match check
+        // ever sees the requested casing).
+        let root = unique_worktree();
+        std::fs::write(root.join(".git"), "gitdir: /main/.git/worktrees/wt\n").unwrap();
+
+        let write = serde_json::json!({"sessionId":"s","path":".GIT/config","content":"x"});
+        let answer = prepare_fs_answer("fs/write_text_file", &write, Some(&root));
+        assert!(matches!(
+            answer,
+            Some(InboundAnswer::FsRejected { code: -32602, ref message })
+                if message == "writes to the worktree's own .git path are not allowed: .GIT/config"
+        ));
+    }
+
     #[tokio::test]
     async fn drive_session_resumes_via_session_load_when_supported() {
         let prompt = Prompt {

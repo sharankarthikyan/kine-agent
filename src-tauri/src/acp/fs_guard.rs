@@ -80,7 +80,14 @@ pub fn resolve_within_root(canonical_root: &Path, requested: &str) -> Result<Pat
 /// and non-root `.git` dirs (vendored repos) stay writable. Case: `resolved`
 /// comes from `resolve_within_root`, whose ancestor canonicalization already
 /// normalizes an existing `.GIT` to the on-disk `.git` on case-insensitive
-/// filesystems — exact comparison suffices.
+/// filesystems — exact comparison suffices. Residual: that normalization only
+/// fires once `.git` already exists — if the root has none yet, a case
+/// variant (`.GIT/x`) resolves through the non-existing suffix un-normalized
+/// and slips past the exact match. Unreachable in product: worktree creation
+/// always writes the `.git` pointer before any fs/* traffic starts, this
+/// proxy has no delete op, and an agent able to remove `.git` out-of-band
+/// could already rewrite it out-of-band too — so the guard's real property,
+/// that an EXISTING diff basis can't be corrupted via fs/write, still holds.
 pub fn reject_git_control_write(
     canonical_root: &Path,
     resolved: &Path,
