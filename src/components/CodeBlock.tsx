@@ -69,17 +69,17 @@ function detectLanguage(path?: string, explicit?: string): string {
 function tokenClass(kind: TokenKind): string {
   switch (kind) {
     case "comment":
-      return "text-muted-foreground";
+      return "text-[var(--syntax-comment)]";
     case "string":
-      return "text-[color-mix(in_oklch,var(--status-success)_82%,var(--foreground))]";
+      return "text-[var(--syntax-string)]";
     case "keyword":
-      return "text-[color-mix(in_oklch,var(--status-running)_86%,var(--foreground))]";
+      return "text-[var(--syntax-keyword)]";
     case "number":
-      return "text-[color-mix(in_oklch,var(--status-waiting)_82%,var(--foreground))]";
+      return "text-[var(--syntax-number)]";
     case "literal":
-      return "text-[color-mix(in_oklch,var(--status-error)_76%,var(--foreground))]";
+      return "text-[var(--syntax-literal)]";
     case "property":
-      return "text-[color-mix(in_oklch,var(--primary)_72%,var(--foreground))]";
+      return "text-[var(--syntax-property)]";
   }
 }
 
