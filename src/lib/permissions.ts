@@ -47,7 +47,7 @@ export const PERMISSION_MODE_META: Record<PermissionMode, PermissionModeMeta> = 
     value: "full",
     label: "Full access",
     description:
-      "Auto-approves everything, including shell commands. Runs only inside this session's isolated worktree.",
+      "Auto-approves everything (edits, shell, network). Edits land in the session worktree for review; the agent process itself is not sandboxed.",
     danger: true,
   },
   dontAsk: {

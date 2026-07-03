@@ -3,6 +3,7 @@ import {
   coercePermissionMode,
   DEFAULT_PERMISSION_MODE,
   isPermissionModeSupported,
+  PERMISSION_MODE_META,
   permissionModeLabel,
   permissionModesForAgent,
   permissionQualifier,
@@ -76,6 +77,13 @@ describe("copy helpers", () => {
   test("labels are human-readable", () => {
     expect(permissionModeLabel("default")).toBe("Ask before edits");
     expect(permissionModeLabel("full")).toBe("Full access");
+  });
+
+  test("full-access description never claims worktree containment and discloses no sandboxing", () => {
+    // This string surfaces as a tooltip on the dropdown trigger/item — it must be as honest
+    // as the confirm dialog: the agent process itself is not sandboxed to the worktree.
+    expect(PERMISSION_MODE_META.full.description).not.toMatch(/only inside|isolated worktree/i);
+    expect(PERMISSION_MODE_META.full.description).toMatch(/not sandboxed/i);
   });
 
   test("qualifier explains the same label's different blast radius per agent", () => {
