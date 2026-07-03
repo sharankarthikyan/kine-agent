@@ -3521,4 +3521,92 @@ mod tests {
         assert!(dead, "grandchild (sleep) survived the guard drop");
         let _ = child.kill().await;
     }
+
+    /// Spawn a powershell child that launches a DETACHED grandchild sleeper
+    /// (Start-Process ⇒ separate process, exactly the npx→node shape) and
+    /// prints the grandchild PID on stdout. Returns (child, grandchild_pid).
+    #[cfg(windows)]
+    async fn spawn_windows_tree() -> (tokio::process::Child, u32) {
+        use tokio::io::AsyncBufReadExt;
+        let mut child = tokio::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                // Grandchild: hidden powershell sleeping 300s. -PassThru gives
+                // us its PID to poll. The parent then sleeps too, so the tree
+                // stays alive until a kill arrives.
+                "$p = Start-Process -FilePath powershell -ArgumentList '-NoProfile','-Command','Start-Sleep 300' -WindowStyle Hidden -PassThru; Write-Output $p.Id; Start-Sleep 300",
+            ])
+            .stdout(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn powershell tree");
+        let stdout = child.stdout.take().expect("stdout piped");
+        let mut lines = tokio::io::BufReader::new(stdout).lines();
+        let pid_line = tokio::time::timeout(std::time::Duration::from_secs(30), lines.next_line())
+            .await
+            .expect("grandchild pid within 30s")
+            .expect("read pid line")
+            .expect("pid line present");
+        let grandchild: u32 = pid_line.trim().parse().expect("numeric pid");
+        (child, grandchild)
+    }
+
+    /// True while `tasklist` still reports the PID. Filter output contains the
+    /// PID column on a hit; "INFO: No tasks are running" (or nothing) on a miss.
+    #[cfg(windows)]
+    fn windows_pid_alive(pid: u32) -> bool {
+        let out = std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+            .output()
+            .expect("tasklist runs");
+        String::from_utf8_lossy(&out.stdout).contains(&pid.to_string())
+    }
+
+    /// Bounded poll for process death — mirrors the unix ESRCH poll loops.
+    #[cfg(windows)]
+    async fn assert_windows_pid_dies(pid: u32, context: &str) {
+        for _ in 0..150 {
+            if !windows_pid_alive(pid) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("{context}: pid {pid} still alive after 3s");
+    }
+
+    /// The PERMANENT LEAK PROOF (the windows twin of the unix "direct kill
+    /// cannot reach grandchildren" test): child.kill() reaches only the direct
+    /// child — the detached grandchild survives. If this test ever FAILS,
+    /// Windows semantics changed and the Job Object may be removable.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn direct_kill_leaves_the_detached_grandchild_alive_on_windows() {
+        let (mut child, grandchild) = spawn_windows_tree().await;
+        assert!(windows_pid_alive(grandchild), "grandchild must start alive");
+        child.kill().await.expect("direct kill");
+        // Give the OS a moment; the grandchild must STILL be there.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert!(
+            windows_pid_alive(grandchild),
+            "direct kill unexpectedly reached the grandchild — Job Object may be unnecessary now"
+        );
+        // Clean up the survivor so the runner isn't left with a 300s sleeper.
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &grandchild.to_string(), "/T", "/F"])
+            .output();
+    }
+
+    /// The FIX PROOF: dropping KillTreeOnDrop (job-handle close, kill-on-close)
+    /// kills the detached grandchild the direct kill cannot reach.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn dropping_the_job_guard_kills_the_detached_grandchild() {
+        let (child, grandchild) = spawn_windows_tree().await;
+        let guard = KillTreeOnDrop::new(&child);
+        assert!(windows_pid_alive(grandchild), "grandchild must start alive");
+        drop(guard);
+        assert_windows_pid_dies(grandchild, "job-guard drop").await;
+        drop(child); // kill_on_drop reaps the (already dead) wrapper — harmless
+    }
 }
