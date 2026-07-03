@@ -389,3 +389,49 @@ test("coalesces consecutive thought chunks into one collapsed Thinking block", (
   expect(screen.getByText(/step one step two/)).toBeInTheDocument(); // present in DOM (native details)
   expect(screen.getByText("answer")).toBeInTheDocument();
 });
+
+test("running terminal chip shows a live tail beneath the chip row", () => {
+  render(
+    <EventStream
+      events={[
+        { kind: "toolCall", data: { name: "Bash", input: '{"command":"make build"}', toolCallId: "t1" } },
+        { kind: "toolStatus", data: { toolCallId: "t1", status: "in_progress", detail: "" } },
+        { kind: "terminalOutput", data: { toolCallId: "t1", data: "compiling...\n" } },
+      ]}
+    />,
+  );
+  expect(screen.getByText(/compiling/)).toBeInTheDocument();
+});
+
+test("completed terminal chip hides the live tail; ToolDetails shows full output on click", async () => {
+  render(
+    <EventStream
+      events={[
+        { kind: "toolCall", data: { name: "Bash", input: '{"command":"ls"}', toolCallId: "t1" } },
+        { kind: "terminalOutput", data: { toolCallId: "t1", data: "file-a\nfile-b\n" } },
+        { kind: "terminalExit", data: { toolCallId: "t1", exitCode: 0, signal: null } },
+        { kind: "toolStatus", data: { toolCallId: "t1", status: "completed", detail: "" } },
+      ]}
+    />,
+  );
+  expect(screen.queryByText(/file-a/)).toBeNull();
+  await userEvent.click(screen.getByText("Bash"));
+  expect(screen.getByText(/file-a/)).toBeInTheDocument();
+  expect(screen.getByText(/exit 0/)).toBeInTheDocument();
+});
+
+test("terminal chunks concatenate in arrival order", async () => {
+  render(
+    <EventStream
+      events={[
+        { kind: "toolCall", data: { name: "Bash", input: '{"command":"seq"}', toolCallId: "t1" } },
+        { kind: "terminalOutput", data: { toolCallId: "t1", data: "one " } },
+        { kind: "terminalOutput", data: { toolCallId: "t1", data: "two" } },
+        { kind: "terminalExit", data: { toolCallId: "t1", exitCode: 0, signal: null } },
+        { kind: "toolStatus", data: { toolCallId: "t1", status: "completed", detail: "" } },
+      ]}
+    />,
+  );
+  await userEvent.click(screen.getByText("Bash"));
+  expect(screen.getByText(/one two/)).toBeInTheDocument();
+});
