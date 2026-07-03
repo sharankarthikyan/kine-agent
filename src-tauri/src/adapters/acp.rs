@@ -65,36 +65,99 @@ impl AcpProfile {
     }
 }
 
-/// SIGKILLs the child's process group when dropped. `spawn_and_drive` arms one
-/// right after spawn so that EVERY exit path — normal return, the cancel-grace
-/// expiry in run_persisting, a stop-button drop of the whole future, panic
-/// unwind — tears down the full tree. tokio's `kill_on_drop` only reaches the
-/// direct child (the npx wrapper); the descendants (node shim, codex-acp's
-/// native binary) survive it and don't exit on stdin EOF (M6 smoke finding).
-/// Double-kill against the inline killpg at normal teardown is harmless
-/// (ESRCH on a dead group).
-struct KillPgOnDrop(#[cfg(unix)] Option<i32>);
+/// Kills the child's WHOLE process tree when dropped. unix: SIGKILL to the
+/// process group (`process_group(0)` at spawn made pgid == pid). windows: the
+/// guard owns the only handle to a Job Object created with
+/// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` and assigned the child right after
+/// spawn — descendants auto-join the job, and dropping the guard closes the
+/// handle, which makes the kernel terminate every process in it.
+/// `spawn_and_drive` arms one right after spawn so that EVERY exit path —
+/// normal return, the cancel-grace expiry in run_persisting, a stop-button
+/// drop of the whole future, panic unwind — tears down the full tree. tokio's
+/// `kill_on_drop` only reaches the direct child (the npx wrapper); the
+/// descendants (node shim, codex-acp's native binary) survive it and don't
+/// exit on stdin EOF (M6 smoke finding). Double-kill against the explicit
+/// `drop(kill_guard)` at normal teardown is harmless (ESRCH on a dead group /
+/// terminating an already-dead job).
+struct KillTreeOnDrop {
+    #[cfg(unix)]
+    pgid: Option<i32>,
+    #[cfg(windows)]
+    job: Option<win32job::Job>,
+}
 
-impl KillPgOnDrop {
-    fn new(child_id: Option<u32>) -> Self {
+impl KillTreeOnDrop {
+    fn new(child: &tokio::process::Child) -> Self {
         #[cfg(unix)]
-        return Self(child_id.map(|pid| pid as i32));
-        #[cfg(not(unix))]
         {
-            let _ = child_id;
-            Self()
+            Self { pgid: child.id().map(|pid| pid as i32) }
+        }
+        #[cfg(windows)]
+        {
+            Self { job: windows_job_for(child) }
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = child;
+            Self {}
         }
     }
 }
 
-impl Drop for KillPgOnDrop {
+impl Drop for KillTreeOnDrop {
     fn drop(&mut self) {
         #[cfg(unix)]
-        if let Some(pgid) = self.0 {
+        if let Some(pgid) = self.pgid {
             // process_group(0) at spawn made the child's pgid == its pid.
             unsafe { libc::killpg(pgid, libc::SIGKILL) };
         }
+        // windows: closing the LAST job handle fires KILL_ON_JOB_CLOSE and the
+        // kernel terminates every process in the job. take()+drop makes the
+        // teardown explicit (and keeps the otherwise-unread field from
+        // tripping dead_code under CI's -D warnings).
+        #[cfg(windows)]
+        drop(self.job.take());
     }
+}
+
+/// Build the kill-on-close Job Object for a freshly spawned child (windows).
+/// Assignment right after spawn captures the whole future tree: descendants
+/// auto-join the job, and the create→assign race window (microseconds) is
+/// negligible against npx's tens-of-ms shim→node startup. BEST-EFFORT: any
+/// failure logs and returns None — teardown then degrades to the direct
+/// `child.kill()` (today's behavior), never failing the spawn. Nested jobs are
+/// fine on the supported Windows versions (Win8+), so running Kineloop itself
+/// under a job (some shells/CI) does not break assignment.
+#[cfg(windows)]
+fn windows_job_for(child: &tokio::process::Child) -> Option<win32job::Job> {
+    let job = match win32job::Job::create() {
+        Ok(job) => job,
+        Err(e) => {
+            eprintln!("acp: Job Object create failed: {e} — teardown degrades to direct kill");
+            return None;
+        }
+    };
+    let mut info = match job.query_extended_limit_info() {
+        Ok(info) => info,
+        Err(e) => {
+            eprintln!("acp: Job Object limit query failed: {e} — teardown degrades to direct kill");
+            return None;
+        }
+    };
+    info.limit_kill_on_job_close();
+    if let Err(e) = job.set_extended_limit_info(&mut info) {
+        eprintln!("acp: Job Object limit set failed: {e} — teardown degrades to direct kill");
+        return None;
+    }
+    let Some(handle) = child.raw_handle() else {
+        eprintln!("acp: child handle unavailable — teardown degrades to direct kill");
+        return None;
+    };
+    if let Err(e) = job.assign_process(handle as isize) {
+        eprintln!("acp: Job Object assign failed: {e} — teardown degrades to direct kill");
+        return None;
+    }
+    Some(job)
 }
 
 /// Emitted when a resume request degrades to a fresh session WITH replayed context.
@@ -218,8 +281,8 @@ async fn spawn_and_drive(
         .take()
         .ok_or_else(|| SessionError::Spawn("no stderr".into()))?;
     // Armed before the first await: from here on, dropping this future kills
-    // the whole process group (see KillPgOnDrop).
-    let _pg_guard = KillPgOnDrop::new(child.id());
+    // the whole process tree (see KillTreeOnDrop).
+    let kill_guard = KillTreeOnDrop::new(&child);
 
     // Drain stderr concurrently so a full pipe buffer can't deadlock stdout —
     // same tail-keeping pattern as the codex adapter.
@@ -254,16 +317,12 @@ async fn spawn_and_drive(
     // and the tail task only resolves at stderr EOF (child exit). Awaiting first
     // would hang whenever the agent ignores stdin EOF after the turn completes.
     // The await stays bounded regardless: any process that escapes the kill
-    // (non-unix, or a descendant that left the group) keeps the stderr pipe
-    // open — its lifetime must never wedge the session.
+    // keeps the stderr pipe open — its lifetime must never wedge the session.
     //
-    // Kill the entire process group first (unix): the direct kill below only
-    // reaches the npx wrapper. On non-unix this degrades to the direct kill.
-    #[cfg(unix)]
-    if let Some(pid) = child.id() {
-        // process_group(0) above made the child's pgid == its pid.
-        unsafe { libc::killpg(pid as i32, libc::SIGKILL) };
-    }
+    // Dropping the guard kills the whole tree on both platforms (unix: killpg
+    // on the group; windows: job-handle close → KILL_ON_JOB_CLOSE). The direct
+    // kill below then reaps the npx wrapper itself.
+    drop(kill_guard);
     let _ = child.kill().await;
     let stderr_tail =
         match tokio::time::timeout(std::time::Duration::from_secs(2), stderr_task).await {
@@ -3430,7 +3489,7 @@ mod tests {
             .kill_on_drop(true);
         cmd.process_group(0);
         let mut child = cmd.spawn().unwrap();
-        let guard = KillPgOnDrop::new(child.id());
+        let guard = KillTreeOnDrop::new(&child);
         let mut stdout = child.stdout.take().unwrap();
         let mut out = String::new();
         while out.lines().count() < 2 {
@@ -3464,5 +3523,109 @@ mod tests {
         }
         assert!(dead, "grandchild (sleep) survived the guard drop");
         let _ = child.kill().await;
+    }
+
+    /// Spawn the powershell parent that will launch a detached grandchild
+    /// sleeper and print its PID. Callers that need the Job Object must arm
+    /// KillTreeOnDrop IMMEDIATELY after this returns — BEFORE
+    /// read_grandchild_pid — because job membership only propagates to
+    /// processes created after assignment (production arms the guard right
+    /// after spawn too).
+    #[cfg(windows)]
+    fn spawn_windows_tree() -> tokio::process::Child {
+        tokio::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                // Grandchild: hidden powershell sleeping 300s. -PassThru gives
+                // us its PID to poll. The parent then sleeps too, so the tree
+                // stays alive until a kill arrives.
+                "$p = Start-Process -FilePath powershell -ArgumentList '-NoProfile','-Command','Start-Sleep 300' -WindowStyle Hidden -PassThru; Write-Output $p.Id; Start-Sleep 300",
+            ])
+            .stdout(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn powershell tree")
+    }
+
+    /// Read the grandchild PID the parent prints — the synchronization point
+    /// proving the detached grandchild exists.
+    #[cfg(windows)]
+    async fn read_grandchild_pid(child: &mut tokio::process::Child) -> u32 {
+        let stdout = child.stdout.take().expect("stdout piped");
+        let mut lines = tokio::io::BufReader::new(stdout).lines();
+        let pid_line = tokio::time::timeout(std::time::Duration::from_secs(30), lines.next_line())
+            .await
+            .expect("grandchild pid within 30s")
+            .expect("read pid line")
+            .expect("pid line present");
+        pid_line.trim().parse().expect("numeric pid")
+    }
+
+    /// True while `tasklist` still reports the PID. Filter output contains the
+    /// PID column on a hit; "INFO: No tasks are running" (or nothing) on a miss.
+    #[cfg(windows)]
+    fn windows_pid_alive(pid: u32) -> bool {
+        let out = std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+            .output()
+            .expect("tasklist runs");
+        String::from_utf8_lossy(&out.stdout).contains(&pid.to_string())
+    }
+
+    /// Bounded poll for process death — mirrors the unix ESRCH poll loops.
+    #[cfg(windows)]
+    async fn assert_windows_pid_dies(pid: u32, context: &str) {
+        for _ in 0..150 {
+            if !windows_pid_alive(pid) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        // Best-effort cleanup so a regression never strands a 300s sleeper on
+        // the runner — then fail loudly with the same message.
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .output();
+        panic!("{context}: pid {pid} still alive after 3s");
+    }
+
+    /// The PERMANENT LEAK PROOF (the windows twin of the unix "direct kill
+    /// cannot reach grandchildren" test): child.kill() reaches only the direct
+    /// child — the detached grandchild survives. If this test ever FAILS,
+    /// Windows semantics changed and the Job Object may be removable.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn direct_kill_leaves_the_detached_grandchild_alive_on_windows() {
+        let mut child = spawn_windows_tree();
+        let grandchild = read_grandchild_pid(&mut child).await;
+        assert!(windows_pid_alive(grandchild), "grandchild must start alive");
+        child.kill().await.expect("direct kill");
+        // Give the OS a moment; the grandchild must STILL be there.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert!(
+            windows_pid_alive(grandchild),
+            "direct kill unexpectedly reached the grandchild — Job Object may be unnecessary now"
+        );
+        // Clean up the survivor so the runner isn't left with a 300s sleeper.
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &grandchild.to_string(), "/T", "/F"])
+            .output();
+    }
+
+    /// The FIX PROOF: dropping KillTreeOnDrop (job-handle close, kill-on-close)
+    /// kills the detached grandchild the direct kill cannot reach.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn dropping_the_job_guard_kills_the_detached_grandchild() {
+        let mut child = spawn_windows_tree();
+        // Armed BEFORE the grandchild spawns — the production ordering, and
+        // the reason descendants join the job at all.
+        let guard = KillTreeOnDrop::new(&child);
+        let grandchild = read_grandchild_pid(&mut child).await;
+        assert!(windows_pid_alive(grandchild), "grandchild must start alive");
+        drop(guard);
+        assert_windows_pid_dies(grandchild, "job-guard drop").await;
+        drop(child); // kill_on_drop reaps the (already dead) wrapper — harmless
     }
 }

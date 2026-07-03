@@ -306,13 +306,21 @@ mod tests {
         let ws_str = ws.to_string_lossy();
         let other_str = other.to_string_lossy();
 
+        // Built via serde_json rather than hand-formatted strings: on Windows the
+        // workspace path contains `\`, and splicing it into a JSON string literal
+        // unescaped produces invalid escapes (`\U`, `\A`, …) that fail to parse —
+        // silently dropping the line and losing the match this test expects.
         let history = cli.join("history.jsonl");
         let line_old =
-            format!(r#"{{"timestamp":1,"workspace":"{ws_str}","conversationId":"old"}}"#);
-        let line_other =
-            format!(r#"{{"timestamp":5,"workspace":"{other_str}","conversationId":"unrelated"}}"#);
+            serde_json::json!({"timestamp": 1, "workspace": ws_str, "conversationId": "old"})
+                .to_string();
+        let line_other = serde_json::json!({
+            "timestamp": 5, "workspace": other_str, "conversationId": "unrelated"
+        })
+        .to_string();
         let line_new =
-            format!(r#"{{"timestamp":9,"workspace":"{ws_str}","conversationId":"new"}}"#);
+            serde_json::json!({"timestamp": 9, "workspace": ws_str, "conversationId": "new"})
+                .to_string();
         fs::write(&history, format!("{line_old}\n{line_other}\n{line_new}\n")).unwrap();
 
         // Newest matching workspace wins; entries for other workspaces are ignored.

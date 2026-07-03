@@ -31,3 +31,8 @@ dirs = "6"
 # Unix-only: group-kill of agent process trees (adapters/acp.rs teardown).
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# Windows-only: Job Object kill-on-close teardown of agent process trees
+# (adapters/acp.rs KillTreeOnDrop) — the process-group analog for Windows.
+[target.'cfg(windows)'.dependencies]
+win32job = "2"

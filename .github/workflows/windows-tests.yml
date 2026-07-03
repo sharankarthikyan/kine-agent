@@ -1,0 +1,28 @@
+# First CI in the repo — exists to give cfg(windows) code real coverage
+# (the Windows Job-Object teardown cannot be executed on the unix dev machine).
+name: windows-tests
+
+on:
+  push:
+    branches: [main, "feat/**"]
+  workflow_dispatch:
+
+jobs:
+  rust-tests:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      # tauri-build's build script requires frontendDist (../dist) to exist.
+      - run: npm ci
+      - run: npm run build
+      - run: cargo test --manifest-path src-tauri/Cargo.toml
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
