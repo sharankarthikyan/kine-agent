@@ -706,7 +706,9 @@ function ToolDetails({
             <ToolEditDiff details={editDetails} />
           ) : (
             details &&
-            details !== summary && (
+            details !== summary &&
+            // An empty "{}" input under a terminal is noise — the terminal IS the output.
+            !(terminalText !== undefined && details === "{}") && (
               <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-md border border-border/70 bg-muted/60 p-2 font-mono text-[11px] leading-relaxed text-foreground shadow-inner dark:bg-background/70">
                 {details}
               </pre>

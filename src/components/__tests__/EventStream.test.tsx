@@ -462,6 +462,23 @@ test("completed terminal chip hides the live tail; ToolDetails shows full output
   expect(screen.getByText(/exit 0/)).toBeInTheDocument();
 });
 
+test("empty rawInput block is suppressed when the details panel shows a terminal", async () => {
+  render(
+    <EventStream
+      events={[
+        { kind: "toolCall", data: { name: "Bash", input: "{}", toolCallId: "t1" } },
+        { kind: "terminalOutput", data: { toolCallId: "t1", data: "hello\n" } },
+        { kind: "terminalExit", data: { toolCallId: "t1", exitCode: 0, signal: null } },
+        { kind: "toolStatus", data: { toolCallId: "t1", status: "completed", detail: "" } },
+      ]}
+    />,
+  );
+  await userEvent.click(screen.getByText("Bash"));
+  expect(screen.getByText(/hello/)).toBeInTheDocument();
+  // The terminal IS the tool's output — an empty "{}" input block under it is noise.
+  expect(screen.queryByText("{}")).toBeNull();
+});
+
 test("terminal chunks concatenate in arrival order", async () => {
   render(
     <EventStream

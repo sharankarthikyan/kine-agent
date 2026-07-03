@@ -17,3 +17,8 @@ test("still renders ordinary prose", () => {
   render(<Markdown>{`Hello **world**`}</Markdown>);
   expect(screen.getByText("world").tagName).toBe("STRONG");
 });
+
+test("strips ANSI escapes from agent prose (codex echoes raw \\x1b bytes)", () => {
+  render(<Markdown>{"tick \x1b[31mred\x1b[0m done"}</Markdown>);
+  expect(screen.getByText("tick red done")).toBeInTheDocument();
+});
