@@ -2,7 +2,9 @@
 //! over ndjson JSON-RPC stdio. See docs/superpowers/specs/2026-07-01-acp-adapter-design.md.
 //!
 //! M1 scope: text + tool-call streaming, permissions auto-answered from the
-//! session's permission mode, no usage event (ACP does not standardize usage),
+//! session's permission mode, one merged Usage event per turn (from
+//! `usage_update` notifications and the session/prompt response's token
+//! split — ACP does not standardize a single usage shape across agents),
 //! immediate-kill cancel via `kill_on_drop`. The user's model pick is forwarded per turn via session/set_config_option (configId "model"). M4 adds the fs proxy: reads/writes
 //! the agent routes through fs/read_text_file / fs/write_text_file are served
 //! here, contained to the session worktree (`acp::fs_guard`).
@@ -436,6 +438,7 @@ pub async fn drive_session(
     }
 
     let mut final_text = String::new();
+    let mut usage_snapshot: Option<UsageSnapshot> = None;
     let prompt_fut = client::session_prompt(&peer, &acp_session_id, &prompt_text);
     tokio::pin!(prompt_fut);
     let mut cancel = cancel; // owned mutable receiver
@@ -464,7 +467,7 @@ pub async fn drive_session(
                 while let Ok(msg) = inbound.try_recv() {
                     match msg {
                         Inbound::Notification { method, params } => {
-                            handle_notification(&method, &params, sink.as_ref(), &mut final_text);
+                            handle_notification(&method, &params, sink.as_ref(), &mut final_text, &mut usage_snapshot);
                         }
                         Inbound::Request { id, method, params } => {
                             // After session/cancel, ANY permission request answers
@@ -480,6 +483,13 @@ pub async fn drive_session(
                             }
                         }
                     }
+                }
+                let turn_usage = match &stop {
+                    Ok((_, usage)) => usage.clone(),
+                    Err(_) => None,
+                };
+                if let Some(event) = build_usage_event(turn_usage.as_ref(), usage_snapshot) {
+                    sink.emit(event); // sync emit — before the terminal event, pipe parity
                 }
                 match stop {
                     Ok((reason, _turn_usage)) if reason == "cancelled" => {
@@ -526,7 +536,7 @@ pub async fn drive_session(
                     // lives across an await, so this future stays `Send` without
                     // requiring `EventSink: Sync`.
                     Some(Inbound::Notification { method, params }) => {
-                        handle_notification(&method, &params, sink.as_ref(), &mut final_text);
+                        handle_notification(&method, &params, sink.as_ref(), &mut final_text, &mut usage_snapshot);
                     }
                     Some(Inbound::Request { id, method, params }) => {
                         // After session/cancel, ANY permission request answers
@@ -674,6 +684,7 @@ fn handle_notification(
     params: &serde_json::Value,
     sink: &dyn EventSink,
     final_text: &mut String,
+    usage_snapshot: &mut Option<UsageSnapshot>,
 ) {
     if method != "session/update" {
         return;
@@ -714,8 +725,13 @@ fn handle_notification(
         Some(SessionUpdate::AvailableCommands { commands_json }) => {
             sink.emit(AgentEvent::Commands { commands_json });
         }
-        Some(SessionUpdate::UsageUpdate { .. }) => {
-            // Task 3 will consume this value; for now, ignore it.
+        Some(SessionUpdate::UsageUpdate { used, size, cost_usd }) => {
+            let previous_cost = usage_snapshot.and_then(|s| s.cost_usd);
+            *usage_snapshot = Some(UsageSnapshot {
+                used,
+                size,
+                cost_usd: cost_usd.or(previous_cost),
+            });
         }
         None => {} // unknown/future update kinds — ignored by design
     }
@@ -882,6 +898,53 @@ fn prepare_fs_answer(
         }
     };
     Some(answer)
+}
+
+/// Latest usage_update seen this turn. `cost_usd` sticks: mid-stream and
+/// rate-limit updates omit cost, and a later costless update must not erase
+/// the turn-final cost (or vice versa — updates can arrive in any order
+/// relative to the drain).
+#[derive(Debug, Clone, Copy, Default)]
+struct UsageSnapshot {
+    used: u64,
+    size: u64,
+    cost_usd: Option<f64>,
+}
+
+/// One Usage event per turn, merged from the prompt-response token split
+/// (claude-agent-acp) and the latest usage_update snapshot (both agents).
+/// None when the turn carried no usage data at all, or only zeros — an
+/// all-zero sample is a no-API-call turn, not a measurement (pipe parity).
+fn build_usage_event(
+    turn_usage: Option<&client::TurnUsage>,
+    snapshot: Option<UsageSnapshot>,
+) -> Option<AgentEvent> {
+    if turn_usage.is_none() && snapshot.is_none() {
+        return None;
+    }
+    let t = turn_usage.cloned().unwrap_or_default();
+    let s = snapshot.unwrap_or_default();
+    let all_zero = t.input_tokens == 0
+        && t.output_tokens == 0
+        && t.cache_read_tokens == 0
+        && t.cache_write_tokens == 0
+        && s.used == 0
+        && s.cost_usd.unwrap_or(0.0) == 0.0;
+    if all_zero {
+        return None;
+    }
+    Some(AgentEvent::Usage {
+        input_tokens: t.input_tokens,
+        output_tokens: t.output_tokens,
+        cache_read_tokens: t.cache_read_tokens,
+        cache_creation_tokens: t.cache_write_tokens,
+        // Cumulative for the acp process == per-turn today (one process per
+        // turn). Revisit if the process ever outlives a turn.
+        cost_usd: s.cost_usd,
+        model: None,
+        context_used: snapshot.map(|s| s.used),
+        context_window: snapshot.map(|s| s.size).filter(|size| *size > 0),
+    })
 }
 
 /// The prompt sent when native resume is unavailable: the persisted transcript
@@ -1338,6 +1401,125 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, AgentEvent::ApprovalNeeded { .. })),
             "autonomous modes answer without surfacing an approval card"
+        );
+    }
+
+    /// claude-shaped turn: mid-stream usage_updates (no cost) + a turn-final one
+    /// WITH cost, plus a prompt-response token split ⇒ exactly ONE Usage event,
+    /// merged from both sources, emitted before Done.
+    #[tokio::test]
+    async fn drive_session_emits_one_merged_usage_event_per_turn() {
+        let prompt = Prompt { text: "hello".into(), ..Default::default() };
+        let h = run_fixture(prompt, None, |_lines, mut w, prompt_id, _wt| async move {
+            for msg in [
+                serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{
+                    "sessionId":"acp-abc",
+                    "update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hi"}}}}),
+                // mid-stream: no cost — a later update must not lose an earlier-seen cost either
+                serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{
+                    "sessionId":"acp-abc",
+                    "update":{"sessionUpdate":"usage_update","used":31000,"size":200000}}}),
+                // turn-final: cost rides only here
+                serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{
+                    "sessionId":"acp-abc",
+                    "update":{"sessionUpdate":"usage_update","used":48213,"size":200000,
+                              "cost":{"amount":0.0731,"currency":"USD"}}}}),
+                serde_json::json!({"jsonrpc":"2.0","id":prompt_id,"result":{
+                    "stopReason":"end_turn",
+                    "usage":{"inputTokens":1200,"outputTokens":340,
+                             "cachedReadTokens":18000,"cachedWriteTokens":500,"totalTokens":20040}}}),
+            ] {
+                send_line(&mut w, msg).await;
+            }
+        })
+        .await;
+        let events = h.events.lock().unwrap();
+        let usages: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::Usage { .. }))
+            .collect();
+        assert_eq!(usages.len(), 1, "exactly one Usage per turn, got {events:?}");
+        match usages[0] {
+            AgentEvent::Usage {
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_creation_tokens,
+                cost_usd,
+                model,
+                context_used,
+                context_window,
+            } => {
+                assert_eq!(*input_tokens, 1200);
+                assert_eq!(*output_tokens, 340);
+                assert_eq!(*cache_read_tokens, 18000);
+                assert_eq!(*cache_creation_tokens, 500);
+                assert_eq!(*cost_usd, Some(0.0731));
+                assert_eq!(*model, None);
+                assert_eq!(*context_used, Some(48213), "latest snapshot wins");
+                assert_eq!(*context_window, Some(200000));
+            }
+            _ => unreachable!(),
+        }
+        // Usage must precede the terminal Done (pipe parity).
+        let usage_pos = events.iter().position(|e| matches!(e, AgentEvent::Usage { .. })).unwrap();
+        let done_pos = events.iter().position(|e| matches!(e, AgentEvent::Done { .. })).unwrap();
+        assert!(usage_pos < done_pos, "Usage must come before Done, got {events:?}");
+    }
+
+    /// codex-shaped turn: usage_update {used,size} only — no cost, no
+    /// prompt-response usage ⇒ one Usage event with the context fields set and
+    /// the token split zeroed.
+    #[tokio::test]
+    async fn drive_session_emits_context_only_usage_for_codex_shape() {
+        let prompt = Prompt { text: "hello".into(), ..Default::default() };
+        let h = run_fixture(prompt, None, |_lines, mut w, prompt_id, _wt| async move {
+            for msg in [
+                serde_json::json!({"jsonrpc":"2.0","method":"session/update","params":{
+                    "sessionId":"acp-abc",
+                    "update":{"sessionUpdate":"usage_update","used":9500,"size":272000}}}),
+                serde_json::json!({"jsonrpc":"2.0","id":prompt_id,"result":{"stopReason":"end_turn"}}),
+            ] {
+                send_line(&mut w, msg).await;
+            }
+        })
+        .await;
+        let events = h.events.lock().unwrap();
+        let usage = events
+            .iter()
+            .find(|e| matches!(e, AgentEvent::Usage { .. }))
+            .unwrap_or_else(|| panic!("expected a Usage event, got {events:?}"));
+        match usage {
+            AgentEvent::Usage {
+                input_tokens, output_tokens, cost_usd, context_used, context_window, ..
+            } => {
+                assert_eq!(*input_tokens, 0);
+                assert_eq!(*output_tokens, 0);
+                assert_eq!(*cost_usd, None);
+                assert_eq!(*context_used, Some(9500));
+                assert_eq!(*context_window, Some(272000));
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// No usage_update and no prompt-response usage (today's antigravity-style
+    /// silence) ⇒ NO Usage event at all — never an all-zero fabricated sample.
+    #[tokio::test]
+    async fn drive_session_emits_no_usage_event_when_agent_reports_none() {
+        let prompt = Prompt { text: "hello".into(), ..Default::default() };
+        let h = run_fixture(prompt, None, |_lines, mut w, prompt_id, _wt| async move {
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":prompt_id,"result":{"stopReason":"end_turn"}}),
+            )
+            .await;
+        })
+        .await;
+        let events = h.events.lock().unwrap();
+        assert!(
+            !events.iter().any(|e| matches!(e, AgentEvent::Usage { .. })),
+            "no fabricated usage, got {events:?}"
         );
     }
 
