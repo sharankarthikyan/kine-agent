@@ -748,51 +748,54 @@ fn handle_notification(
     if method != "session/update" {
         return;
     }
-    match client::parse_session_update(params) {
-        Some(SessionUpdate::AgentMessageChunk { text }) => {
-            final_text.push_str(&text);
-            sink.emit(AgentEvent::Token { text });
-        }
-        Some(SessionUpdate::Thought { text }) => {
-            sink.emit(AgentEvent::Thought { text });
-        }
-        Some(SessionUpdate::ToolCall {
-            title,
-            raw_input,
-            tool_call_id,
-        }) => {
-            sink.emit(AgentEvent::ToolCall {
-                name: title,
-                input: raw_input,
+    for update in client::parse_session_updates(params) {
+        match update {
+            SessionUpdate::AgentMessageChunk { text } => {
+                final_text.push_str(&text);
+                sink.emit(AgentEvent::Token { text });
+            }
+            SessionUpdate::Thought { text } => {
+                sink.emit(AgentEvent::Thought { text });
+            }
+            SessionUpdate::ToolCall {
+                title,
+                raw_input,
                 tool_call_id,
-            });
-        }
-        Some(SessionUpdate::ToolCallUpdate {
-            tool_call_id,
-            status,
-            detail,
-        }) => {
-            sink.emit(AgentEvent::ToolStatus {
+            } => {
+                sink.emit(AgentEvent::ToolCall {
+                    name: title,
+                    input: raw_input,
+                    tool_call_id,
+                });
+            }
+            SessionUpdate::ToolCallUpdate {
                 tool_call_id,
                 status,
                 detail,
-            });
+            } => {
+                sink.emit(AgentEvent::ToolStatus {
+                    tool_call_id,
+                    status,
+                    detail,
+                });
+            }
+            SessionUpdate::Plan { entries_json } => {
+                sink.emit(AgentEvent::Plan { entries_json });
+            }
+            SessionUpdate::AvailableCommands { commands_json } => {
+                sink.emit(AgentEvent::Commands { commands_json });
+            }
+            SessionUpdate::UsageUpdate { used, size, cost_usd } => {
+                let previous_cost = usage_snapshot.and_then(|s| s.cost_usd);
+                *usage_snapshot = Some(UsageSnapshot {
+                    used,
+                    size,
+                    cost_usd: cost_usd.or(previous_cost),
+                });
+            }
+            // Wired to AgentEvents in the adapter-coalescer task.
+            SessionUpdate::TerminalOutput { .. } | SessionUpdate::TerminalExit { .. } => {}
         }
-        Some(SessionUpdate::Plan { entries_json }) => {
-            sink.emit(AgentEvent::Plan { entries_json });
-        }
-        Some(SessionUpdate::AvailableCommands { commands_json }) => {
-            sink.emit(AgentEvent::Commands { commands_json });
-        }
-        Some(SessionUpdate::UsageUpdate { used, size, cost_usd }) => {
-            let previous_cost = usage_snapshot.and_then(|s| s.cost_usd);
-            *usage_snapshot = Some(UsageSnapshot {
-                used,
-                size,
-                cost_usd: cost_usd.or(previous_cost),
-            });
-        }
-        None => {} // unknown/future update kinds — ignored by design
     }
 }
 
