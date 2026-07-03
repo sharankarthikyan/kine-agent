@@ -27,6 +27,12 @@ thiserror = "2"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
 which = "6"
 dirs = "6"
+tauri-plugin-process = "2"
+
+# Desktop-only: in-app self-updater (checks a signed latest.json, downloads +
+# verifies the update, then relaunches). Not available on mobile targets.
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-updater = "2"
 
 # Unix-only: group-kill of agent process trees (adapters/acp.rs teardown).
 [target.'cfg(unix)'.dependencies]

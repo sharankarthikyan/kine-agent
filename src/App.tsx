@@ -36,6 +36,7 @@ import {
 } from "@/components/ui/sheet";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Toaster } from "@/components/ui/sonner";
+import { UpdaterHost } from "./components/UpdaterHost";
 import {
   cleanupSession,
   continueExternalSession,
@@ -2316,6 +2317,7 @@ export default function App() {
       </Suspense>
 
       <Toaster />
+      <UpdaterHost />
     </div>
   );
 }

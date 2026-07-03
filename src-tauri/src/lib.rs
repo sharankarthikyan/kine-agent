@@ -16,7 +16,40 @@ pub mod review;
 pub mod store;
 pub mod worktree;
 
-use tauri::Manager;
+use tauri::menu::{Menu, MenuItem, MenuItemKind};
+use tauri::{Emitter, Manager};
+
+/// Event id fired at the webview when the native "Check for Updates…" menu item is
+/// clicked. `UpdaterHost.tsx` listens for it and runs the JS updater flow.
+const MENU_CHECK_UPDATES_EVENT: &str = "menu://check-for-updates";
+const MENU_CHECK_UPDATES_ID: &str = "check-for-updates";
+
+/// Add a "Check for Updates…" item to the native menu. On macOS it goes into the
+/// app menu (the "Kineloop" submenu, right under About, per platform convention);
+/// on Windows/Linux it's appended to the last submenu (Help). Clicking it emits
+/// `MENU_CHECK_UPDATES_EVENT` to the frontend — see the builder's on_menu_event.
+fn install_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
+    let menu = Menu::default(app)?;
+    let check = MenuItem::with_id(
+        app,
+        MENU_CHECK_UPDATES_ID,
+        "Check for Updates…",
+        true,
+        None::<&str>,
+    )?;
+    let items = menu.items()?;
+    #[cfg(target_os = "macos")]
+    if let Some(MenuItemKind::Submenu(app_menu)) = items.first() {
+        // Index 1 = just below "About Kineloop".
+        app_menu.insert(&check, 1)?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    if let Some(MenuItemKind::Submenu(help_menu)) = items.last() {
+        help_menu.append(&check)?;
+    }
+    app.set_menu(menu)?;
+    Ok(())
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -43,12 +76,29 @@ pub fn run() {
         store
     });
 
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_process::init());
+
+    // The self-updater is desktop-only (no mobile artifacts to update).
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    }
+
+    builder
+        .on_menu_event(|app, event| {
+            if event.id().as_ref() == MENU_CHECK_UPDATES_ID {
+                let _ = app.emit(MENU_CHECK_UPDATES_EVENT, ());
+            }
+        })
         .manage(store)
         .manage(commands::RunRegistry::default())
         .manage(approval::ApprovalRegistry::default())
         .setup(|app| {
+            if let Err(e) = install_menu(app.handle()) {
+                eprintln!("failed to install native menu: {e}");
+            }
             if let Some(win) = app.get_webview_window("main") {
                 // Paint the native window (including the transparent Overlay titlebar region on
                 // macOS) opaque dark so the desktop never bleeds through the top edge.

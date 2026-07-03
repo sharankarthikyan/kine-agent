@@ -10,6 +10,10 @@ permissions:
   contents: write
 
 jobs:
+  # Build + code-sign + updater-sign each platform. tauri-action aggregates all
+  # matrix runs into ONE draft release (with a single latest.json manifest) on
+  # THIS (private) repo. The mirror job below copies that release to the public
+  # kineloop-releases repo, which is what the app's updater endpoint points at.
   build:
     strategy:
       fail-fast: false
@@ -50,13 +54,58 @@ jobs:
       - name: Install frontend deps
         run: npm ci
 
-      - name: Build + bundle + attach to release
+      - name: Build + sign + attach to draft release
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Updater signing — MUST match the pubkey compiled into tauri.conf.json.
+          # Generate once with: npx tauri signer generate -w ~/.tauri/kineloop.key
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           args: ${{ matrix.args }}
           tagName: ${{ github.ref_name }}
           releaseName: 'Kineloop ${{ github.ref_name }}'
           releaseDraft: true
           prerelease: false
+
+  # Mirror the built release to the PUBLIC kineloop-releases repo. The updater
+  # endpoint (github.com/.../kineloop-releases/releases/latest/download/latest.json)
+  # requires public assets — a private repo would need an auth token the app can't ship.
+  mirror:
+    needs: build
+    runs-on: ubuntu-22.04
+    if: startsWith(github.ref, 'refs/tags/')
+    env:
+      TAG: ${{ github.ref_name }}
+      SRC_REPO: ${{ github.repository }}
+      DEST_REPO: sharankarthikyan/kineloop-releases
+    steps:
+      - name: Download release assets from this repo
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p dist
+          # The build job leaves the release as a draft; --clobber-safe fetch of all assets.
+          gh release download "$TAG" --repo "$SRC_REPO" --dir dist --pattern '*'
+          ls -la dist
+
+      - name: Rewrite latest.json asset URLs to the public repo
+        run: |
+          # The signatures inside latest.json sign artifact BYTES, not URLs, so they
+          # stay valid after we repoint the download host to the public repo.
+          sed -i "s#/${SRC_REPO}/releases/download/#/${DEST_REPO}/releases/download/#g" dist/latest.json
+          echo "----- rewritten latest.json -----"
+          cat dist/latest.json
+
+      - name: Publish to the public releases repo
+        env:
+          # A PAT (repo scope) for the PUBLIC kineloop-releases repo — GITHUB_TOKEN
+          # only grants access to THIS repo, so cross-repo publish needs its own token.
+          GH_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+        run: |
+          # Idempotent: create the release if absent, then (over)write its assets.
+          gh release view "$TAG" --repo "$DEST_REPO" >/dev/null 2>&1 \
+            || gh release create "$TAG" --repo "$DEST_REPO" \
+                 --title "Kineloop $TAG" --notes "Automated release $TAG"
+          gh release upload "$TAG" --repo "$DEST_REPO" dist/* --clobber
