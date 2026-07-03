@@ -124,6 +124,25 @@ pub async fn session_set_mode(peer: &RpcPeer, session_id: &str, mode_id: &str) -
     Ok(())
 }
 
+/// session/set_config_option — set a generic ACP session config option (the
+/// model pick uses configId "model"; `value` is the bare string form both
+/// pinned agents accept — claude-agent-acp resolves aliases like "sonnet",
+/// codex-acp treats unknown values as raw model slugs). Best-effort at the
+/// call site (a failure must not kill the run).
+pub async fn session_set_config_option(
+    peer: &RpcPeer,
+    session_id: &str,
+    config_id: &str,
+    value: &str,
+) -> Result<(), RpcError> {
+    peer.request(
+        "session/set_config_option",
+        serde_json::json!({"sessionId": session_id, "configId": config_id, "value": value}),
+    )
+    .await?;
+    Ok(())
+}
+
 /// session/new → the agent-minted session id (persisted as external_thread_id),
 /// plus the session-mode state the response advertised.
 /// A response without a sessionId is a hard error: an empty id would poison
@@ -814,6 +833,32 @@ mod tests {
             agent_write.write_all(format!("{resp}\n").as_bytes()).await.unwrap();
         });
         let _ = initialize(&peer).await.unwrap();
+        agent.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_set_config_option_sends_bare_string_value() {
+        // Wire shape is ground-truth-pinned (2026-07-02) against BOTH agents:
+        // {"sessionId", "configId", "value"} with value a BARE string — no
+        // {"type": ...} wrapper (that form is only for the unstable boolean
+        // config variant neither side needs here).
+        let (ours, theirs) = duplex(64 * 1024);
+        let (read_half, write_half) = tokio::io::split(ours);
+        let peer = RpcPeer::start(read_half, write_half);
+        let (agent_read, mut agent_write) = tokio::io::split(theirs);
+        let agent = tokio::spawn(async move {
+            let mut lines = BufReader::new(agent_read).lines();
+            let req: Value = serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(req["method"], "session/set_config_option");
+            assert_eq!(req["params"]["sessionId"], "acp-abc");
+            assert_eq!(req["params"]["configId"], "model");
+            assert_eq!(req["params"]["value"], "sonnet");
+            assert!(req["params"]["value"].is_string(), "value must be a bare string");
+            let resp = serde_json::json!({"jsonrpc": "2.0", "id": req["id"],
+                "result": {"configOptions": []}});
+            agent_write.write_all(format!("{resp}\n").as_bytes()).await.unwrap();
+        });
+        session_set_config_option(&peer, "acp-abc", "model", "sonnet").await.unwrap();
         agent.await.unwrap();
     }
 
