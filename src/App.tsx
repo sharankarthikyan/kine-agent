@@ -129,6 +129,7 @@ const MAX_SESSION_PANES = 4;
 const MIN_SPLIT_PANE_WIDTH = 520;
 const MIN_SPLIT_PANE_HEIGHT = 340;
 const EXTERNAL_EVENT_PAGE_SIZE = 300;
+const PANEL_MOTION_MS = 160;
 
 type SplitDirection = "vertical" | "horizontal";
 type SessionPane = { id: string; sessionId: string | null };
@@ -229,7 +230,9 @@ export default function App() {
   const [rightTab, setRightTab] = useState<
     "context" | "changes" | "files" | null
   >(null);
+  const [renderedRightTab, setRenderedRightTab] = useState<typeof rightTab>(rightTab);
   const [rightExpanded, setRightExpanded] = useState(false);
+  const [renderedRightExpanded, setRenderedRightExpanded] = useState(rightExpanded);
   const [storedEvents, setStoredEvents] = useState<StoredEvent[]>([]);
   const [rules, setRules] = useState<RuleFile[]>([]);
   const [capabilities, setCapabilities] = useState<Capabilities | null>(null);
@@ -1738,6 +1741,22 @@ export default function App() {
     panes.length < MAX_SESSION_PANES &&
     panes.length < maxPanesForViewport();
 
+  useEffect(() => {
+    if (rightTab !== null) {
+      setRenderedRightTab(rightTab);
+      setRenderedRightExpanded(rightExpanded);
+      return;
+    }
+    if (renderedRightTab === null) return;
+    const timer = window.setTimeout(() => setRenderedRightTab(null), PANEL_MOTION_MS);
+    return () => window.clearTimeout(timer);
+  }, [renderedRightTab, rightExpanded, rightTab]);
+
+  const visibleRightTab = rightTab ?? renderedRightTab;
+  const rightPanePresent = visibleRightTab !== null;
+  const rightPaneOpen = rightTab !== null;
+  const visibleRightExpanded = rightPaneOpen ? rightExpanded : renderedRightExpanded;
+
   return (
     <div className="flex flex-col h-screen bg-background text-foreground">
       <TitleBar
@@ -1751,13 +1770,23 @@ export default function App() {
         onSplitVertical={() => addSplit("vertical")}
         onSplitHorizontal={() => addSplit("horizontal")}
       />
-      <div className="flex flex-1 min-h-0 min-w-0 overflow-hidden gap-2 px-2 pb-2">
-        {!sidebarCollapsed && (
-          <>
-            <div
-              className="shrink-0 max-[900px]:hidden flex flex-col rounded-xl overflow-hidden"
-              style={{ width: sidebarWidth }}
-            >
+      <div
+        className="kl-sidebar-layout flex flex-1 min-h-0 min-w-0 overflow-hidden px-2 pb-2"
+        style={{ columnGap: sidebarCollapsed ? 0 : 8 }}
+      >
+        <div
+          data-state={sidebarCollapsed ? "closed" : "open"}
+          aria-hidden={sidebarCollapsed}
+          className={cn(
+            "kl-sidebar-motion shrink-0 max-[900px]:hidden overflow-hidden",
+            sidebarCollapsed && "pointer-events-none",
+          )}
+          style={{ width: sidebarCollapsed ? 0 : sidebarWidth }}
+        >
+          <div
+            className="kl-sidebar-panel flex h-full flex-col rounded-xl overflow-hidden"
+            style={{ width: sidebarWidth }}
+          >
               <SessionList
                 groups={groupByWorkspace(filteredSessions)}
                 activeId={activeSessionId}
@@ -1777,8 +1806,7 @@ export default function App() {
                 }}
               />
             </div>
-          </>
-        )}
+        </div>
         <main className="relative flex flex-1 min-h-0 min-w-0 gap-2 overflow-hidden">
           {/* Session workspace — hidden only while the right pane is expanded to fullscreen. */}
           {!rightExpanded && (
@@ -2039,11 +2067,14 @@ export default function App() {
           )}
 
           {/* Right side-pane — tabbed Context | Changes | Files, collapsible + expandable. */}
-          {rightTab && (
+          {rightPanePresent && (
             <aside
+              data-state={rightPaneOpen ? "open" : "closed"}
+              aria-hidden={!rightPaneOpen}
               className={cn(
-                "absolute z-30 flex flex-col min-w-0 min-h-0 bg-background overflow-hidden",
-                rightExpanded
+                "kl-detail-panel-motion absolute z-30 flex flex-col min-w-0 min-h-0 bg-background overflow-hidden",
+                !rightPaneOpen && "pointer-events-none",
+                visibleRightExpanded
                   ? // Fullscreen: fill the workspace as a framed card, matching the
                     // session panes (rounded + bordered) instead of a flat plane.
                     "inset-0 rounded-xl border border-border"
@@ -2054,12 +2085,12 @@ export default function App() {
                       "max-[900px]:inset-y-0 max-[900px]:left-0 max-[900px]:right-0 max-[900px]:rounded-none max-[900px]:ring-0",
               )}
               style={
-                rightExpanded
+                visibleRightExpanded
                   ? undefined
                   : { width: `min(${Math.round(rightPaneWidth)}px, 100%)` }
               }
             >
-              {!rightExpanded && (
+              {!visibleRightExpanded && (
                 <div
                   role="separator"
                   aria-label="Resize detail panel"
@@ -2081,7 +2112,7 @@ export default function App() {
                 />
               )}
               <Tabs
-                value={rightTab}
+                value={visibleRightTab ?? "context"}
                 onValueChange={(v) =>
                   setRightTab(v as "context" | "changes" | "files")
                 }
@@ -2099,10 +2130,10 @@ export default function App() {
                       size="icon-sm"
                       onClick={() => setRightExpanded((v) => !v)}
                       aria-label={
-                        rightExpanded ? "Collapse panel" : "Expand panel"
+                        visibleRightExpanded ? "Collapse panel" : "Expand panel"
                       }
                     >
-                      {rightExpanded ? <Minimize2 /> : <Maximize2 />}
+                      {visibleRightExpanded ? <Minimize2 /> : <Maximize2 />}
                     </Button>
                     <Button
                       variant="ghost"
