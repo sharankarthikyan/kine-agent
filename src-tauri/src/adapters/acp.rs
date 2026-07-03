@@ -1206,10 +1206,18 @@ fn prepare_fs_answer(
     } else {
         match client::parse_fs_write(params) {
             Some((path, content)) => match crate::acp::fs_guard::resolve_within_root(root, &path) {
-                Ok(resolved) => InboundAnswer::FsWrite {
-                    path: resolved,
-                    content,
-                },
+                Ok(resolved) => {
+                    match crate::acp::fs_guard::reject_git_control_write(root, &resolved, &path) {
+                        Ok(()) => InboundAnswer::FsWrite {
+                            path: resolved,
+                            content,
+                        },
+                        Err(e) => InboundAnswer::FsRejected {
+                            code: -32602,
+                            message: e,
+                        },
+                    }
+                }
                 Err(e) => InboundAnswer::FsRejected {
                     code: -32602,
                     message: e,
@@ -2705,6 +2713,55 @@ mod tests {
                 .any(|e| matches!(e, AgentEvent::FileWrite { .. })),
             "a rejected write must never emit FileWrite"
         );
+    }
+
+    #[test]
+    fn fs_write_to_git_path_is_rejected_but_read_is_served() {
+        // A .git pointer file, like a linked worktree's gitdir-pointer FILE.
+        let root = unique_worktree();
+        std::fs::write(root.join(".git"), "gitdir: /main/.git/worktrees/wt\n").unwrap();
+
+        let write = serde_json::json!({"sessionId":"s","path":".git","content":"gitdir: /tmp/evil"});
+        let answer = prepare_fs_answer("fs/write_text_file", &write, Some(&root));
+        assert!(matches!(
+            answer,
+            Some(InboundAnswer::FsRejected { code: -32602, ref message })
+                if message == "writes to the worktree's own .git path are not allowed: .git"
+        ));
+
+        let read = serde_json::json!({"sessionId":"s","path":".git"});
+        assert!(matches!(
+            prepare_fs_answer("fs/read_text_file", &read, Some(&root)),
+            Some(InboundAnswer::FsRead { .. })
+        ));
+
+        let benign = serde_json::json!({"sessionId":"s","path":".gitignore","content":"target/\n"});
+        assert!(matches!(
+            prepare_fs_answer("fs/write_text_file", &benign, Some(&root)),
+            Some(InboundAnswer::FsWrite { .. })
+        ));
+    }
+
+    // Case-insensitive filesystems only: on case-sensitive Linux, `.GIT` is a
+    // genuinely distinct, legitimately writable path, not a variant of `.git`.
+    #[cfg(any(target_os = "macos", windows))]
+    #[test]
+    fn fs_write_to_case_variant_git_path_is_rejected() {
+        // Pin, not TDD: this already passes off the Task-1 wiring — it locks
+        // in the `resolve_within_root` ancestor-canonicalization behavior
+        // `reject_git_control_write`'s doc comment relies on (an existing
+        // `.git` absorbs a case-variant request before the exact-match check
+        // ever sees the requested casing).
+        let root = unique_worktree();
+        std::fs::write(root.join(".git"), "gitdir: /main/.git/worktrees/wt\n").unwrap();
+
+        let write = serde_json::json!({"sessionId":"s","path":".GIT/config","content":"x"});
+        let answer = prepare_fs_answer("fs/write_text_file", &write, Some(&root));
+        assert!(matches!(
+            answer,
+            Some(InboundAnswer::FsRejected { code: -32602, ref message })
+                if message == "writes to the worktree's own .git path are not allowed: .GIT/config"
+        ));
     }
 
     #[tokio::test]
