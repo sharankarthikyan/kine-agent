@@ -1213,6 +1213,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(unix)]
     #[test]
     fn read_rejects_symlink_escaping_worktree() {
         let dir = std::env::temp_dir().join(format!("ae-insp3-{}", std::process::id()));

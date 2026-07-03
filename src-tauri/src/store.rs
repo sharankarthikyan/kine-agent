@@ -642,6 +642,8 @@ fn harden_file_permissions(path: &Path) -> Result<(), std::io::Error> {
             }
         }
     }
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 
