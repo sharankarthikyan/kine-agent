@@ -46,7 +46,8 @@ land on a dedicated branch for you to review before anything merges into your re
 - **Frontend:** React + Vite + TypeScript + Tailwind v4 + shadcn/ui, running in the
   system WebView
 - **Persistence:** SQLite via `sqlx` (`~/.kineloop/kineloop.db`); append-only event log
-- **Secrets:** OS keychain via the `keyring` crate (never SQLite or logs)
+- **Secrets:** none stored — agent CLIs handle their own login/keychain; Kineloop
+  bundles no `keyring` crate and keeps no credentials
 - **Agents:** driven headless as subprocesses; one `AgentAdapter` per agent normalizing
   to a single `AgentEvent` enum
 
