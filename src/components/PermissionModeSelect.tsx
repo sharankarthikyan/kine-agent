@@ -169,13 +169,13 @@ export function PermissionModeSelect({
       )}
 
       <Dialog open={confirmingFull} onOpenChange={setConfirmingFull}>
-        <DialogContent className="max-w-md p-6">
+        <DialogContent className="grid max-w-md gap-4 p-6">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <ShieldAlert className="size-5 text-destructive" aria-hidden />
               Enable Full access?
             </DialogTitle>
-            <DialogDescription className="space-y-2 pt-1 text-left">
+            <DialogDescription className="space-y-2 pt-1 text-left text-pretty">
               <span className="block">
                 Full access auto-approves <strong>everything</strong> (file edits, shell commands, and
                 network) with no gating. Kineloop reviews file edits in this session's worktree; it
