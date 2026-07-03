@@ -145,7 +145,7 @@ fn windows_job_for(child: &tokio::process::Child) -> Option<win32job::Job> {
         }
     };
     info.limit_kill_on_job_close();
-    if let Err(e) = job.set_extended_limit_info(&mut info) {
+    if let Err(e) = job.set_extended_limit_info(&info) {
         eprintln!("acp: Job Object limit set failed: {e} — teardown degrades to direct kill");
         return None;
     }
