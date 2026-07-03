@@ -72,6 +72,39 @@ pub fn resolve_within_root(canonical_root: &Path, requested: &str) -> Result<Pat
     Ok(resolved)
 }
 
+/// Security review §3 defense-in-depth: the diff basis lives INSIDE the
+/// proxy-writable surface — a write to the worktree's own `.git` path (the
+/// linked worktree's gitdir-pointer FILE, or any `.git/...` control file)
+/// could make `git diff` misleading. Reject writes whose root-relative FIRST
+/// component is exactly `.git`. Reads stay allowed; `.gitignore`/`.github`
+/// and non-root `.git` dirs (vendored repos) stay writable. Case: `resolved`
+/// comes from `resolve_within_root`, whose ancestor canonicalization already
+/// normalizes an existing `.GIT` to the on-disk `.git` on case-insensitive
+/// filesystems — exact comparison suffices.
+pub fn reject_git_control_write(
+    canonical_root: &Path,
+    resolved: &Path,
+    requested: &str,
+) -> Result<(), String> {
+    let Ok(relative) = resolved.strip_prefix(canonical_root) else {
+        // resolve_within_root guarantees containment; a non-prefix here is a
+        // caller bug — fail closed.
+        return Err(format!(
+            "writes to the worktree's own .git path are not allowed: {requested}"
+        ));
+    };
+    let first_is_git = matches!(
+        relative.components().next(),
+        Some(Component::Normal(name)) if name == ".git"
+    );
+    if first_is_git {
+        return Err(format!(
+            "writes to the worktree's own .git path are not allowed: {requested}"
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,6 +246,42 @@ mod tests {
         let root = root("rejects-empty-path");
         assert!(resolve_within_root(&root, "").is_err());
         assert!(resolve_within_root(&root, "   ").is_err());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rejects_write_to_git_pointer_file_and_nested_git_paths() {
+        let root = root("git-reject");
+        let resolved_pointer = root.join(".git");
+        assert!(reject_git_control_write(&root, &resolved_pointer, ".git").is_err());
+        let resolved_nested = root.join(".git").join("hooks").join("pre-commit");
+        assert!(reject_git_control_write(&root, &resolved_nested, ".git/hooks/pre-commit").is_err());
+        let err = reject_git_control_write(&root, &resolved_pointer, ".git").unwrap_err();
+        assert_eq!(err, "writes to the worktree's own .git path are not allowed: .git");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn allows_gitignore_github_and_non_root_git_dirs() {
+        let root = root("git-allow");
+        for (rel, req) in [
+            (root.join(".gitignore"), ".gitignore"),
+            (root.join(".gitattributes"), ".gitattributes"),
+            (
+                root.join(".github").join("workflows").join("ci.yml"),
+                ".github/workflows/ci.yml",
+            ),
+            (
+                root.join("src").join("vendor").join(".git").join("config"),
+                "src/vendor/.git/config",
+            ),
+            (root.join("git").join("notes.md"), "git/notes.md"),
+        ] {
+            assert!(
+                reject_git_control_write(&root, &rel, req).is_ok(),
+                "must allow {req}"
+            );
+        }
         let _ = fs::remove_dir_all(&root);
     }
 }
