@@ -155,6 +155,9 @@ pub async fn spawn_and_stream(
     // Stream stdout line-by-line as Token events, re-adding the newline so multi-line
     // responses keep their formatting when concatenated in the UI. A per-line size cap
     // bounds memory against a pathological huge line.
+    sink.emit(AgentEvent::Status {
+        text: "Waiting for Antigravity response".to_string(),
+    });
     let mut reader = BufReader::new(stdout);
     let mut emitted_any = false;
     let mut stdout_auth_required = false;

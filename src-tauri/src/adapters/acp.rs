@@ -438,6 +438,9 @@ async fn spawn_and_drive(
     profile: AcpProfile,
     cancel: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), SessionError> {
+    sink.emit(AgentEvent::Status {
+        text: "Launching ACP adapter".to_string(),
+    });
     // resolve_program falls back to the bare name on lookup failure, which would
     // yield a generic "No such file" from spawn — check explicitly so the user
     // gets an actionable message instead.
@@ -491,6 +494,9 @@ async fn spawn_and_drive(
         lines[start..].join("\n")
     });
 
+    sink.emit(AgentEvent::Status {
+        text: "Connecting to ACP agent".to_string(),
+    });
     // On resume, `session_id` is the previously captured ACP session id
     // (external_thread_id), threaded in by the (agent, engine) dispatch — the
     // mirror of `resume_target` for codex/antigravity.

@@ -275,6 +275,9 @@ pub async fn spawn_and_stream(
         lines[start..].join("\n")
     });
 
+    sink.emit(AgentEvent::Status {
+        text: "Waiting for Codex response".to_string(),
+    });
     let mut reader = BufReader::new(stdout);
     loop {
         match read_capped_line(&mut reader, MAX_LINE_BYTES).await? {

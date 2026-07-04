@@ -235,6 +235,9 @@ pub async fn spawn_and_stream(
     // `read_capped_line` bounds memory against a pathological huge line and never aborts
     // on invalid UTF-8 (a single bad byte would otherwise kill the session); genuine IO
     // errors still propagate.
+    sink.emit(AgentEvent::Status {
+        text: "Waiting for Claude response".to_string(),
+    });
     let mut reader = BufReader::new(stdout);
     loop {
         match read_capped_line(&mut reader, MAX_LINE_BYTES).await? {

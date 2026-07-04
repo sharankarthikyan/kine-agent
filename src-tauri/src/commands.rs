@@ -932,6 +932,9 @@ async fn create_session_and_run(
     cancel_rx: watch::Receiver<bool>,
     on_event: Channel<AgentEvent>,
 ) -> Result<(), String> {
+    let _ = on_event.send(AgentEvent::Status {
+        text: "Preparing isolated worktree".to_string(),
+    });
     let root = worktrees_root();
     let sid = session_id.clone();
     let create_repo_path = repo_path.clone();
@@ -978,6 +981,9 @@ async fn create_session_and_run(
         eprintln!("failed to persist prompt for session {session_id}: {e}");
     }
 
+    let _ = on_event.send(AgentEvent::Status {
+        text: "Starting agent".to_string(),
+    });
     run_persisting(
         store,
         approvals,
@@ -1213,6 +1219,9 @@ pub async fn send_message(
     // from amnesia. Built before the new prompt event is appended so the
     // current request isn't replayed to itself. Pipe engines never need it.
     let resume_transcript = if engine == store::ENGINE_ACP {
+        let _ = on_event.send(AgentEvent::Status {
+            text: "Preparing conversation context".to_string(),
+        });
         let events = store
             .session_events(&session_id)
             .await
@@ -1248,6 +1257,9 @@ pub async fn send_message(
         eprintln!("failed to persist prompt for session {session_id}: {e}");
     }
 
+    let _ = on_event.send(AgentEvent::Status {
+        text: "Starting agent".to_string(),
+    });
     run_persisting(
         &store,
         &approvals,

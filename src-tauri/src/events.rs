@@ -21,6 +21,11 @@ pub enum AgentEvent {
     Thought {
         text: String,
     },
+    /// Human-readable progress while Kineloop is preparing or waiting on an agent.
+    /// This keeps slow setup phases visible before the first model/tool event arrives.
+    Status {
+        text: String,
+    },
     /// `tool_call_id` is set by adapters whose protocol assigns stable ids (ACP),
     /// so later `ToolStatus` events can upgrade the matching chip. Pipe adapters
     /// leave it `None` and the serialized shape is unchanged.
@@ -152,6 +157,18 @@ mod tests {
         let ev = AgentEvent::Thought { text: "hmm".into() };
         let json = serde_json::to_string(&ev).unwrap();
         assert_eq!(json, r#"{"kind":"thought","data":{"text":"hmm"}}"#);
+    }
+
+    #[test]
+    fn serializes_status_as_tagged_camelcase() {
+        let ev = AgentEvent::Status {
+            text: "Starting agent".into(),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert_eq!(
+            json,
+            r#"{"kind":"status","data":{"text":"Starting agent"}}"#
+        );
     }
 
     #[test]

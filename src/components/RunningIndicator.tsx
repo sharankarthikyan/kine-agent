@@ -94,6 +94,13 @@ function summarizeActivity(events: AgentEvent[]): ActivitySummary {
         counts: counts || "no activity yet",
       };
     }
+    if (event.kind === "status") {
+      return {
+        title: event.data.text,
+        detail: "Still working.",
+        counts: counts || "no activity yet",
+      };
+    }
     if (event.kind === "approvalNeeded") {
       return {
         title: "Waiting for approval",
