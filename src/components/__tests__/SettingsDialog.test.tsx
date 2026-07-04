@@ -94,3 +94,12 @@ test("disabling Codex is immediate and needs no acknowledgement", async () => {
   const next = onPrefsChange.mock.calls[0][0] as AgentPrefs;
   expect(next.enabled.codex).toBe(false);
 });
+
+test("the About section carries the non-affiliation disclaimer and local-data disclosure", async () => {
+  setup();
+  await userEvent.click(screen.getByRole("button", { name: "About" }));
+  expect(
+    screen.getByText(/not affiliated with, sponsored by, or endorsed by/i),
+  ).toBeInTheDocument();
+  expect(screen.getByText(/no network calls of its own/i)).toBeInTheDocument();
+});

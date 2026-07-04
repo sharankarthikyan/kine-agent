@@ -18,6 +18,7 @@ pub mod worktree;
 
 use tauri::menu::{Menu, MenuItem, MenuItemKind};
 use tauri::{Emitter, Manager};
+use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 
 /// Event id fired at the webview when the native "Check for Updates…" menu item is
 /// clicked. `UpdaterHost.tsx` listens for it and runs the JS updater flow.
@@ -62,20 +63,6 @@ pub fn run() {
     // touches the store, so existing sessions and worktrees carry over.
     agent_paths::migrate_legacy_data_dir();
 
-    // Open the session store before building (block on the async connect once).
-    let store = tauri::async_runtime::block_on(async {
-        let store = store::SessionStore::connect(&store::default_db_path())
-            .await
-            .expect("failed to open session store");
-        // Crash recovery: the in-memory run registry starts empty, so any session still
-        // marked "running" from a previous process is from a run that died with the app.
-        // Reconcile it to "error" so it isn't stranded "running" forever. Best-effort.
-        if let Err(e) = store.reset_running_sessions().await {
-            eprintln!("failed to reconcile stale running sessions on startup: {e}");
-        }
-        store
-    });
-
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
@@ -93,10 +80,36 @@ pub fn run() {
                 let _ = app.emit(MENU_CHECK_UPDATES_EVENT, ());
             }
         })
-        .manage(store)
         .manage(commands::RunRegistry::default())
         .manage(approval::ApprovalRegistry::default())
         .setup(|app| {
+            // Open the session store now that the app context exists: if it can't open
+            // (corrupt DB, read-only or full disk), show a native error dialog and exit
+            // cleanly instead of panicking before any window is up — a GUI-subsystem
+            // binary would otherwise die silently with nothing on screen.
+            let store = match tauri::async_runtime::block_on(store::SessionStore::connect(
+                &store::default_db_path(),
+            )) {
+                Ok(store) => store,
+                Err(e) => {
+                    app.dialog()
+                        .message(format!(
+                            "Kineloop couldn't open its local data store in ~/.kineloop.\n\n{e}\n\nThe database may be corrupt or the disk full or read-only. Kineloop will now close."
+                        ))
+                        .kind(MessageDialogKind::Error)
+                        .title("Kineloop can't start")
+                        .blocking_show();
+                    std::process::exit(1);
+                }
+            };
+            // Crash recovery: any session still marked "running" from a previous process
+            // is from a run that died with the app (the in-memory run registry starts
+            // empty). Reconcile it to "error" so it isn't stranded "running". Best-effort.
+            if let Err(e) = tauri::async_runtime::block_on(store.reset_running_sessions()) {
+                eprintln!("failed to reconcile stale running sessions on startup: {e}");
+            }
+            app.manage(store);
+
             if let Err(e) = install_menu(app.handle()) {
                 eprintln!("failed to install native menu: {e}");
             }

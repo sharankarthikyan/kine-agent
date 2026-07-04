@@ -10,11 +10,46 @@ permissions:
   contents: write
 
 jobs:
+  # Gate the whole release on green tests — a red typecheck/unit suite must never
+  # ship a build. Runs once on Linux; the platform build matrix waits on it.
+  test:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install Linux deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Install frontend deps
+        run: npm ci
+
+      - name: Typecheck + frontend tests
+        run: |
+          npx tsc --noEmit
+          npm test
+
+      - name: Rust tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
   # Build + code-sign + updater-sign each platform. tauri-action aggregates all
   # matrix runs into ONE draft release (with a single latest.json manifest) on
   # THIS (private) repo. The mirror job below copies that release to the public
   # kineloop-releases repo, which is what the app's updater endpoint points at.
   build:
+    needs: test
     strategy:
       fail-fast: false
       matrix:

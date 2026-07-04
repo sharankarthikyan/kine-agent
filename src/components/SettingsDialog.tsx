@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { AlertTriangle, Bot, ExternalLink } from "lucide-react";
+import { AlertTriangle, Bot, ExternalLink, Info } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { toast } from "sonner";
 
@@ -32,7 +32,7 @@ import {
 // Settings is a small orchestrator with a left nav + content panel — the same shell as
 // CustomizationsDialog, so the two dialogs feel like siblings and new preference areas
 // drop in as one more entry here. Only "agents" exists today.
-export type SettingsSection = "agents";
+export type SettingsSection = "agents" | "about";
 
 interface NavItem {
   id: SettingsSection;
@@ -40,7 +40,10 @@ interface NavItem {
   Icon: React.ComponentType<{ className?: string }>;
 }
 
-const NAV_ITEMS: NavItem[] = [{ id: "agents", label: "Agents", Icon: Bot }];
+const NAV_ITEMS: NavItem[] = [
+  { id: "agents", label: "Agents", Icon: Bot },
+  { id: "about", label: "About", Icon: Info },
+];
 
 export interface SettingsDialogProps {
   open: boolean;
@@ -221,6 +224,45 @@ function AgentsSection({
   );
 }
 
+// ─── About section ────────────────────────────────────────────────────────────
+
+// In-app non-affiliation disclaimer + a plain-language disclosure that Kineloop
+// records session content verbatim on-device (audit items: in-app disclaimer +
+// local-store disclosure). Static content — no props.
+function AboutSection() {
+  return (
+    <div className="flex flex-col gap-4 p-4">
+      <div>
+        <h2 className="text-base font-semibold">About</h2>
+        <p className="mt-0.5 text-sm text-muted-foreground">
+          Kineloop — MIT licensed.
+        </p>
+      </div>
+
+      <div className="flex flex-col gap-1.5">
+        <h3 className="text-sm font-medium">Affiliation</h3>
+        <p className="text-xs leading-relaxed text-muted-foreground">
+          Kineloop is an independent project and is not affiliated with, sponsored by, or
+          endorsed by Anthropic, OpenAI, or Google. "Claude", "Codex", "Gemini", and
+          "Antigravity" are trademarks of their respective owners. Kineloop drives each
+          vendor's own official CLI under your existing login and adds no accounts of its own.
+        </p>
+      </div>
+
+      <div className="flex flex-col gap-1.5">
+        <h3 className="text-sm font-medium">Your data stays on this machine</h3>
+        <p className="text-xs leading-relaxed text-muted-foreground">
+          Kineloop makes no network calls of its own and includes no telemetry. Your prompts,
+          the agents' replies, the commands they run, and those commands' output are recorded
+          verbatim in a local SQLite database under <span className="font-mono">~/.kineloop</span>{" "}
+          so you can review and resume sessions — nothing is sent anywhere. Deleting a session,
+          or the <span className="font-mono">~/.kineloop</span> folder, removes that history.
+        </p>
+      </div>
+    </div>
+  );
+}
+
 // ─── SettingsDialog ─────────────────────────────────────────────────────────────
 
 export function SettingsDialog({
@@ -306,6 +348,7 @@ export function SettingsDialog({
                   onInstall={handleInstall}
                 />
               )}
+              {activeSection === "about" && <AboutSection />}
             </ScrollArea>
           </div>
         </div>

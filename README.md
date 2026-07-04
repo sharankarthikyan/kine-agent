@@ -97,6 +97,19 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets
   the agent's own process can access on your machine. Some CLIs apply their own
   sandboxing; full-access modes are opt-in per session.
 
+## Data & privacy
+
+Kineloop is local-only and makes **no network calls of its own** — no telemetry, no
+analytics, no accounts — and stores **no API keys or credentials** (each agent CLI uses
+its own login).
+
+To let you review and resume sessions, Kineloop records session content **verbatim and
+unencrypted on your machine**: your prompts, the agents' replies, the commands they run,
+and those commands' output are written to a local SQLite database and event log under
+`~/.kineloop` (file permissions are restricted to your user on macOS/Linux). If a prompt
+or command output contains a secret, it is stored as-is. Nothing is sent anywhere.
+Deleting a session, or removing the `~/.kineloop` folder, deletes that history.
+
 ## Status
 
 MVP, local-only. Cloud/remote control, live-terminal attach, and mobile are
