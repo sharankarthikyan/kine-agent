@@ -1422,6 +1422,19 @@ export default function App() {
     const startAgent = isAgentSpawnable(preferredAgent)
       ? preferredAgent
       : (selectedModel?.agent ?? "claude");
+    // Adopting external CLI history starts a NEW automated session, so it honors the
+    // agent-enablement gate (unlike follow-ups on an existing Kineloop session, which
+    // always resume their row's agent). This guard MUST run before any optimistic state
+    // mutation below, so a disabled agent is a clean no-op that routes to Settings —
+    // otherwise the early return would strand a half-created "running" row.
+    if (isExternalContinuation && !isAgentEnabled(startAgent, agentPrefs)) {
+      const label = agents.find((a) => a.id === startAgent)?.label ?? startAgent;
+      toast.info(`${label} is disabled`, {
+        description: "Enable it in Settings to continue this session in Kineloop.",
+      });
+      setSettingsOpen(true);
+      return;
+    }
     // TUI-only built-ins (e.g. /status, /model) open interactive screens that a
     // headless `claude -p` spawn rejects — hint instead of burning a turn.
     if (startAgent === "claude") {
@@ -1517,17 +1530,6 @@ export default function App() {
       }
       appendToLastTurn(sessionId, event);
     };
-    // Adopting external CLI history starts a NEW automated session, so it honors the
-    // agent-enablement gate — unlike follow-ups on an existing Kineloop session, which
-    // always resume the agent on their row. A disabled agent routes to Settings instead.
-    if (isExternalContinuation && !isAgentEnabled(startAgent, agentPrefs)) {
-      const label = agents.find((a) => a.id === startAgent)?.label ?? startAgent;
-      toast.info(`${label} is disabled`, {
-        description: "Enable it in Settings to continue this session in Kineloop.",
-      });
-      setSettingsOpen(true);
-      return;
-    }
     // Forward the selected model verbatim (alias for Claude, concrete id for
     // Codex/Antigravity); null model → omit → CLI default. The agent is only sent
     // on new sessions — follow-ups resume the agent recorded on the session row.
