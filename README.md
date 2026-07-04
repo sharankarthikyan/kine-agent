@@ -43,7 +43,7 @@ land on a dedicated branch for you to review before anything merges into your re
 ## Installing
 
 Download the build for your OS from the
-[latest release](https://github.com/sharankarthikyan/kineloop-releases/releases/latest).
+[latest release](https://github.com/sharankarthikyan/kineloop/releases/latest).
 
 **macOS:** the app is not yet notarized by Apple, so Gatekeeper will warn on first
 launch ("Kineloop can't be opened because Apple cannot check it for malicious
