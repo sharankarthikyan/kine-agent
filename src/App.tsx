@@ -61,6 +61,13 @@ import {
   type AgentInfo,
   type ModelInfo,
 } from "./lib/models";
+import { SettingsDialog } from "./components/SettingsDialog";
+import {
+  readAgentPrefs,
+  writeAgentPrefs,
+  isAgentEnabled,
+  type AgentPrefs,
+} from "./lib/agentPrefs";
 import { reviewSession, type SessionDiff } from "./lib/review";
 import {
   listSessions,
@@ -247,6 +254,15 @@ export default function App() {
   const [sessionModelValues, setSessionModelValues] = useState<Record<string, string>>({});
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [selectedAgent, setSelectedAgent] = useState<AgentInfo | null>(null);
+  // Per-agent enable/disable choices (localStorage-backed). Codex ships enabled;
+  // Claude/Antigravity are opt-in. Held in state so the Settings dialog and the New
+  // Session picker share one reactive source, and written through on every change.
+  const [agentPrefs, setAgentPrefs] = useState<AgentPrefs>(() => readAgentPrefs());
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const updateAgentPrefs = useCallback((next: AgentPrefs) => {
+    setAgentPrefs(next);
+    writeAgentPrefs(next);
+  }, []);
   // Node presence gates the ACP default for new drafts (ACP agents launch via
   // npx). Optimistic true: worst case a Node-less machine's first draft shows
   // ACP and the spawn error explains — flipped to false as soon as the check
@@ -592,10 +608,17 @@ export default function App() {
       const all = results
         .flatMap((r) => (r.status === "fulfilled" ? r.value : []))
         .filter((m) => !m.disabled);
-      // Default to a spawnable agent (Claude today); fall back to any installed
-      // one so the picker is never empty even before adapters land.
+      // Default to an ENABLED spawnable agent (Codex ships on; Claude/Antigravity are
+      // opt-in), then fall back to any spawnable, then any installed — so the picker is
+      // never empty even before the user visits Settings. A disabled default still can't
+      // send: the composer gates on enablement and points the user to Settings.
       const defaultAgent =
-        installed.find((a) => isAgentSpawnable(a.id)) ?? installed[0] ?? null;
+        installed.find(
+          (a) => isAgentSpawnable(a.id) && isAgentEnabled(a.id, agentPrefs),
+        ) ??
+        installed.find((a) => isAgentSpawnable(a.id)) ??
+        installed[0] ??
+        null;
       const defaultModel =
         all.find((m) => m.agent === defaultAgent?.id) ?? all[0] ?? null;
       setAgents(supported);
@@ -1494,6 +1517,17 @@ export default function App() {
       }
       appendToLastTurn(sessionId, event);
     };
+    // Adopting external CLI history starts a NEW automated session, so it honors the
+    // agent-enablement gate — unlike follow-ups on an existing Kineloop session, which
+    // always resume the agent on their row. A disabled agent routes to Settings instead.
+    if (isExternalContinuation && !isAgentEnabled(startAgent, agentPrefs)) {
+      const label = agents.find((a) => a.id === startAgent)?.label ?? startAgent;
+      toast.info(`${label} is disabled`, {
+        description: "Enable it in Settings to continue this session in Kineloop.",
+      });
+      setSettingsOpen(true);
+      return;
+    }
     // Forward the selected model verbatim (alias for Claude, concrete id for
     // Codex/Antigravity); null model → omit → CLI default. The agent is only sent
     // on new sessions — follow-ups resume the agent recorded on the session row.
@@ -1793,6 +1827,7 @@ export default function App() {
         canSplit={canSplitWorkspace}
         onSplitVertical={() => addSplit("vertical")}
         onSplitHorizontal={() => addSplit("horizontal")}
+        onOpenSettings={() => setSettingsOpen(true)}
       />
       <div
         className="kl-sidebar-layout flex flex-1 min-h-0 min-w-0 overflow-hidden px-2 pb-2"
@@ -1957,6 +1992,7 @@ export default function App() {
                             permissionMode={draft?.permissionMode ?? DEFAULT_PERMISSION_MODE}
                             sandboxTerminal={draft?.sandbox ?? false}
                             running={false}
+                            agentPrefs={agentPrefs}
                             onPickRepo={() => void pickRepoForPane(pane.id)}
                             onPickRecent={(p) => updatePaneDraft(pane.id, { repo: p })}
                             onAgentChange={(a) => paneAgentChange(pane.id, a)}
@@ -1964,6 +2000,7 @@ export default function App() {
                             onPermissionModeChange={(mode) => panePermissionChange(pane.id, mode)}
                             onSandboxTerminalChange={(v) => updatePaneDraft(pane.id, { sandbox: v })}
                             onStart={(text) => handleStartNewSession(text, pane.id)}
+                            onOpenSettings={() => setSettingsOpen(true)}
                           />
                         </div>
                       </>
@@ -2315,6 +2352,15 @@ export default function App() {
           onChanged={() => setCustReloadKey((k) => k + 1)}
         />
       </Suspense>
+
+      {/* Settings — global app preferences (which agents may start new sessions). */}
+      <SettingsDialog
+        open={settingsOpen}
+        onOpenChange={setSettingsOpen}
+        agents={agents}
+        prefs={agentPrefs}
+        onPrefsChange={updateAgentPrefs}
+      />
 
       <Toaster />
       <UpdaterHost />

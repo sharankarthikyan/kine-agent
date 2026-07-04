@@ -2,12 +2,26 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { NewSession } from "../NewSession";
 import type { AgentInfo, ModelInfo } from "../../lib/models";
+import type { AgentPrefs } from "../../lib/agentPrefs";
+
+// Most existing tests select Claude, so treat every agent as enabled unless a test
+// overrides prefs to exercise the enablement gate.
+const ALL_ENABLED: AgentPrefs = {
+  enabled: { claude: true, codex: true, antigravity: true },
+  acknowledged: { claude: true, antigravity: true },
+};
+// Ships-default posture: only Codex enabled.
+const CODEX_ONLY: AgentPrefs = {
+  enabled: { codex: true, claude: false, antigravity: false },
+  acknowledged: {},
+};
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
 const claudeAgent: AgentInfo = { id: "claude", label: "Claude Code", installed: true };
 const geminiAgent: AgentInfo = { id: "gemini", label: "Gemini CLI", installed: true };
 const codexAgent: AgentInfo = { id: "codex", label: "Codex", installed: false };
+const codexAgentInstalled: AgentInfo = { id: "codex", label: "Codex", installed: true };
 
 const FIXTURE_AGENTS: AgentInfo[] = [claudeAgent, geminiAgent, codexAgent];
 
@@ -44,6 +58,7 @@ function setup(overrides: Partial<React.ComponentProps<typeof NewSession>> = {})
   const onPermissionModeChange = vi.fn();
   const onSandboxTerminalChange = vi.fn();
   const onStart = vi.fn();
+  const onOpenSettings = vi.fn();
 
   render(
     <NewSession
@@ -56,6 +71,7 @@ function setup(overrides: Partial<React.ComponentProps<typeof NewSession>> = {})
       permissionMode="default"
       sandboxTerminal={false}
       running={false}
+      agentPrefs={ALL_ENABLED}
       onPickRepo={onPickRepo}
       onPickRecent={onPickRecent}
       onAgentChange={onAgentChange}
@@ -63,6 +79,7 @@ function setup(overrides: Partial<React.ComponentProps<typeof NewSession>> = {})
       onPermissionModeChange={onPermissionModeChange}
       onSandboxTerminalChange={onSandboxTerminalChange}
       onStart={onStart}
+      onOpenSettings={onOpenSettings}
       {...overrides}
     />,
   );
@@ -75,6 +92,7 @@ function setup(overrides: Partial<React.ComponentProps<typeof NewSession>> = {})
     onPermissionModeChange,
     onSandboxTerminalChange,
     onStart,
+    onOpenSettings,
   };
 }
 
@@ -264,4 +282,46 @@ test("Antigravity offers only Ask before edits + Full access (no Auto-edit or ad
   expect(screen.getByRole("menuitemradio", { name: /Full access/i })).toBeInTheDocument();
   expect(screen.queryByRole("menuitemradio", { name: /Auto-edit/i })).not.toBeInTheDocument();
   expect(screen.queryByRole("menuitemradio", { name: /Locked-down/i })).not.toBeInTheDocument();
+});
+
+// ── Agent enablement gate ──────────────────────────────────────────────────────
+// Only agents the user has enabled in Settings may start a session. Claude and
+// Antigravity ship disabled; the composer blocks Send and points to Settings.
+
+test("Send is disabled when the selected agent is disabled, even with repo + text", async () => {
+  setup({ repo: REPO_PATH, agent: claudeAgent, agentPrefs: CODEX_ONLY });
+  await userEvent.type(screen.getByPlaceholderText(PLACEHOLDER), "add auth");
+  expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+});
+
+test("a disabled agent surfaces a hint that opens Settings", async () => {
+  const { onOpenSettings, onStart } = setup({
+    repo: REPO_PATH,
+    agent: claudeAgent,
+    agentPrefs: CODEX_ONLY,
+  });
+  const hint = screen.getByRole("button", { name: /Claude Code is disabled/i });
+  await userEvent.click(hint);
+  expect(onOpenSettings).toHaveBeenCalledTimes(1);
+  expect(onStart).not.toHaveBeenCalled();
+});
+
+test("a disabled-but-installed agent shows a 'disabled' hint in the picker and isn't selectable", async () => {
+  const { onAgentChange } = setup({ agent: codexAgentInstalled, agentPrefs: CODEX_ONLY });
+  await userEvent.click(screen.getByRole("button", { name: /Agent:/i }));
+  // Claude is installed + spawnable but disabled in CODEX_ONLY → "disabled" hint.
+  expect(screen.getByText("disabled")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("menuitem", { name: /Claude Code/i }));
+  expect(onAgentChange).not.toHaveBeenCalled();
+});
+
+test("an enabled agent sends normally", async () => {
+  const { onStart } = setup({
+    repo: REPO_PATH,
+    agent: codexAgentInstalled,
+    agentPrefs: CODEX_ONLY,
+  });
+  await userEvent.type(screen.getByPlaceholderText(PLACEHOLDER), "ship it");
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+  expect(onStart).toHaveBeenCalledWith("ship it");
 });

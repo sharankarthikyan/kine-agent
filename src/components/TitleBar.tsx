@@ -1,4 +1,4 @@
-import { Columns2, PanelLeft, Rows2, SquareCode, SquareTerminal } from "lucide-react";
+import { Columns2, PanelLeft, Rows2, Settings, SquareCode, SquareTerminal } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ThemeToggle } from "./ThemeToggle";
 import { KineloopMark } from "./KineloopMark";
@@ -23,6 +23,7 @@ export interface TitleBarProps {
   canSplit?: boolean;
   onSplitVertical?: () => void;
   onSplitHorizontal?: () => void;
+  onOpenSettings?: () => void;
 }
 
 export function TitleBar({
@@ -35,6 +36,7 @@ export function TitleBar({
   canSplit = false,
   onSplitVertical = () => {},
   onSplitHorizontal = () => {},
+  onOpenSettings = () => {},
 }: TitleBarProps) {
   const sidebarLabel = sidebarCollapsed ? "Show sidebar" : "Hide sidebar";
 
@@ -111,6 +113,14 @@ export function TitleBar({
             aria-label="Open terminal"
           >
             <SquareTerminal data-icon />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            onClick={onOpenSettings}
+            aria-label="Settings"
+          >
+            <Settings data-icon />
           </Button>
           <ThemeToggle />
         </span>

@@ -78,6 +78,7 @@ pub fn run() {
 
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init());
 
     // The self-updater is desktop-only (no mobile artifacts to update).

@@ -5,6 +5,7 @@ import {
   ChevronDown,
   FolderOpen,
   Paperclip,
+  Settings2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -21,6 +22,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { type AgentInfo, type ModelInfo, isAgentSpawnable } from "@/lib/models";
+import { type AgentPrefs, isAgentEnabled } from "@/lib/agentPrefs";
 import { AgentLogo } from "./AgentLogo";
 
 interface NewSessionProps {
@@ -33,6 +35,8 @@ interface NewSessionProps {
   permissionMode: PermissionMode;
   sandboxTerminal: boolean;
   running: boolean;
+  /** User's per-agent enable/disable choices — gates which agents can start a session. */
+  agentPrefs: AgentPrefs;
   onPickRepo: () => void;
   onPickRecent: (path: string) => void;
   onAgentChange: (a: AgentInfo) => void;
@@ -40,6 +44,8 @@ interface NewSessionProps {
   onPermissionModeChange: (mode: PermissionMode) => void;
   onSandboxTerminalChange: (v: boolean) => void;
   onStart: (text: string) => void;
+  /** Open the Settings dialog (to enable/install the selected agent). */
+  onOpenSettings: () => void;
 }
 
 /** Extract the last path segment for display. Works with both / and \ separators. */
@@ -73,6 +79,7 @@ export function NewSession({
   permissionMode,
   sandboxTerminal,
   running,
+  agentPrefs,
   onPickRepo,
   onPickRecent,
   onAgentChange,
@@ -80,10 +87,26 @@ export function NewSession({
   onPermissionModeChange,
   onSandboxTerminalChange,
   onStart,
+  onOpenSettings,
 }: NewSessionProps) {
   const [text, setText] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const canSend = !running && repo !== null && text.trim().length > 0;
+  // The selected agent must be installed, spawnable, AND enabled by the user before a
+  // session can start. When it isn't, `agentHint` explains why and the composer routes
+  // the user to Settings (to enable it, or install it if the CLI is missing).
+  const agentHint: string | null =
+    agent === null
+      ? "No agent selected"
+      : !agent.installed
+        ? `${agent.label} isn't installed`
+        : !isAgentSpawnable(agent.id)
+          ? `${agent.label} isn't available yet`
+          : !isAgentEnabled(agent.id, agentPrefs)
+            ? `${agent.label} is disabled`
+            : null;
+  const agentReady = agentHint === null;
+  const canSend =
+    !running && repo !== null && text.trim().length > 0 && agentReady;
 
   // Auto-grow the textarea up to a compact height, then scroll.
   useEffect(() => {
@@ -182,11 +205,12 @@ export function NewSession({
               {agents.length > 0 ? (
                 agents.map((a) => {
                   const spawnable = isAgentSpawnable(a.id);
-                  const enabled = a.installed && spawnable;
+                  const agentEnabled =
+                    a.installed && spawnable && isAgentEnabled(a.id, agentPrefs);
                   return (
                     <DropdownMenuItem
                       key={a.id}
-                      disabled={!enabled}
+                      disabled={!agentEnabled}
                       onSelect={() => onAgentChange(a)}
                       className="gap-2"
                     >
@@ -202,6 +226,8 @@ export function NewSession({
                         <span className="text-xs text-muted-foreground">not installed</span>
                       ) : !spawnable ? (
                         <span className="text-xs text-muted-foreground">coming soon</span>
+                      ) : !isAgentEnabled(a.id, agentPrefs) ? (
+                        <span className="text-xs text-muted-foreground">disabled</span>
                       ) : null}
                     </DropdownMenuItem>
                   );
@@ -317,6 +343,16 @@ export function NewSession({
               </Button>
             </div>
           </div>
+          {agentHint && (
+            <button
+              type="button"
+              onClick={onOpenSettings}
+              className="flex items-center gap-1.5 self-start text-xs text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded"
+            >
+              <Settings2 className="size-3 shrink-0" />
+              {agentHint} — open Settings
+            </button>
+          )}
         </div>
       </div>
     </div>
