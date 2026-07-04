@@ -102,25 +102,22 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets
 
 ## Data & privacy
 
-- All data is local. Sessions and the event log live under `~/.kineloop/`; session
-  worktrees under `~/Kineloop/worktrees/`.
-- Agent CLIs run under your own subscription/auth; Kineloop does not store API keys.
-- Kineloop reviews file edits in each session's worktree; it does not sandbox what
-  the agent's own process can access on your machine. Some CLIs apply their own
-  sandboxing; full-access modes are opt-in per session.
-
-## Data & privacy
-
 Kineloop is local-only and makes **no network calls of its own** — no telemetry, no
 analytics, no accounts — and stores **no API keys or credentials** (each agent CLI uses
 its own login).
 
-To let you review and resume sessions, Kineloop records session content **verbatim and
-unencrypted on your machine**: your prompts, the agents' replies, the commands they run,
-and those commands' output are written to a local SQLite database and event log under
-`~/.kineloop` (file permissions are restricted to your user on macOS/Linux). If a prompt
-or command output contains a secret, it is stored as-is. Nothing is sent anywhere.
-Deleting a session, or removing the `~/.kineloop` folder, deletes that history.
+- **Where data lives.** Sessions and the append-only event log are stored under
+  `~/.kineloop/`; each session's worktree lives under `~/Kineloop/worktrees/`.
+- **Recorded verbatim, unencrypted.** To let you review and resume sessions, Kineloop
+  records session content as-is on your machine: your prompts, the agents' replies, the
+  commands they run, and those commands' output go into a local SQLite database and event
+  log under `~/.kineloop` (file permissions restricted to your user on macOS/Linux). If a
+  prompt or command output contains a secret, it is stored as-is. Nothing is sent anywhere.
+- **Review boundary, not a sandbox.** Kineloop reviews the file edits an agent makes in its
+  worktree; it does **not** sandbox what the agent's own process can access on your machine.
+  Some CLIs apply their own sandboxing; full-access modes are opt-in per session.
+- **Deleting history.** Deleting a session, or removing the `~/.kineloop` folder, deletes
+  that history.
 
 ## Status
 
