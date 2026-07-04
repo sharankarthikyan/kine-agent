@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { AlertTriangle, Bot, ExternalLink, Info } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { getVersion } from "@tauri-apps/api/app";
 import { toast } from "sonner";
 
 import { cn } from "@/lib/utils";
@@ -230,12 +231,22 @@ function AgentsSection({
 // records session content verbatim on-device (audit items: in-app disclaimer +
 // local-store disclosure). Static content — no props.
 function AboutSection() {
+  // The version is compiled into the app (tauri.conf.json), so read it at runtime
+  // rather than hardcoding — it can never drift from the actual build. Absent until
+  // it resolves (and in non-Tauri contexts like tests), the line just omits it.
+  const [version, setVersion] = useState<string | null>(null);
+  useEffect(() => {
+    getVersion()
+      .then(setVersion)
+      .catch(() => {});
+  }, []);
+
   return (
     <div className="flex flex-col gap-4 p-4">
       <div>
         <h2 className="text-base font-semibold">About</h2>
         <p className="mt-0.5 text-sm text-muted-foreground">
-          Kineloop — MIT licensed.
+          Kineloop{version ? ` v${version}` : ""} — MIT licensed.
         </p>
       </div>
 

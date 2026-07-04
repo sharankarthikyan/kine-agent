@@ -9,6 +9,10 @@ vi.mock("@tauri-apps/plugin-opener", () => ({
   openUrl: vi.fn(() => Promise.resolve()),
 }));
 
+vi.mock("@tauri-apps/api/app", () => ({
+  getVersion: vi.fn(() => Promise.resolve("0.1.2")),
+}));
+
 const AGENTS: AgentInfo[] = [
   { id: "codex", label: "OpenAI Codex", installed: true },
   { id: "claude", label: "Claude Code", installed: true },
@@ -102,4 +106,10 @@ test("the About section carries the non-affiliation disclaimer and local-data di
     screen.getByText(/not affiliated with, sponsored by, or endorsed by/i),
   ).toBeInTheDocument();
   expect(screen.getByText(/no network calls of its own/i)).toBeInTheDocument();
+});
+
+test("the About section shows the app version", async () => {
+  setup();
+  await userEvent.click(screen.getByRole("button", { name: "About" }));
+  expect(await screen.findByText(/Kineloop v0\.1\.2/i)).toBeInTheDocument();
 });
