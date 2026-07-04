@@ -40,6 +40,18 @@ land on a dedicated branch for you to review before anything merges into your re
 | **Antigravity** (`agy`) | ✅ text-only | ✅ | `agy --print` emits final text only — no live tool/file/usage events; scoped to the worktree via `--add-dir` |
 | **Gemini CLI** | — | ✅ | deprecated upstream (succeeded by Antigravity); history listed, spawning gated |
 
+## Installing
+
+Download the build for your OS from the
+[latest release](https://github.com/sharankarthikyan/kineloop-releases/releases/latest).
+
+**macOS:** the app is not yet notarized by Apple, so Gatekeeper will warn on first
+launch ("Kineloop can't be opened because Apple cannot check it for malicious
+software"). To open it, **right-click (or Control-click) the app icon → Open → Open**,
+or go to **System Settings → Privacy & Security** and click **Open Anyway**. You only
+need to do this once. (Windows SmartScreen shows a similar one-time "More info → Run
+anyway" prompt.)
+
 ## Stack
 
 - **Backend core:** Rust, in a Tauri 2 desktop shell (`kineloop` crate / `kineloop_lib`)
