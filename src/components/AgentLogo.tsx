@@ -9,6 +9,16 @@ const AGENT_LABELS: Record<string, string> = {
   antigravity: "Antigravity CLI",
 };
 
+// A distinct tint per agent so the neutral Bot glyphs stay tellable apart at a
+// glance — no vendor logo artwork, just a color plus the label beside it. Chosen
+// to read on both light and dark grounds; an unknown agent falls back to muted.
+const AGENT_COLORS: Record<string, string> = {
+  claude: "text-amber-500",
+  codex: "text-teal-500",
+  gemini: "text-blue-500",
+  antigravity: "text-violet-500",
+};
+
 interface AgentLogoProps {
   agent: string;
   className?: string;
@@ -26,7 +36,11 @@ export function AgentLogo({ agent, className }: AgentLogoProps) {
   return (
     <Bot
       aria-label={label}
-      className={cn("shrink-0 text-muted-foreground", className)}
+      className={cn(
+        "shrink-0",
+        AGENT_COLORS[agent] ?? "text-muted-foreground",
+        className,
+      )}
     />
   );
 }
