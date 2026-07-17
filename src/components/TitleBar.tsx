@@ -1,7 +1,7 @@
 import { Columns2, PanelLeft, Rows2, Settings, SquareCode, SquareTerminal } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ThemeToggle } from "./ThemeToggle";
-import { KineloopMark } from "./KineloopMark";
+import { KineMark } from "./KineMark";
 import { cn } from "@/lib/utils";
 
 /**
@@ -66,12 +66,16 @@ export function TitleBar({
       >
         <span
           className={cn(
-            "flex items-center gap-1 text-sm text-muted-foreground truncate max-w-xs select-none"
+            "flex items-center gap-1 text-sm text-muted-foreground max-w-xs min-w-0 select-none"
           )}
         >
-          <KineloopMark className="size-4" />
-          {title ?? "New Session"}
-          {repo != null && ` · ${repo}`}
+          <KineMark className="size-4 shrink-0" />
+          {/* truncate must live on a non-flex text element — on the flex row above it clips
+              mid-word with no ellipsis. min-w-0 lets this child shrink below its content. */}
+          <span className="truncate min-w-0">
+            {title ?? "New Session"}
+            {repo != null && ` · ${repo}`}
+          </span>
         </span>
       </div>
 

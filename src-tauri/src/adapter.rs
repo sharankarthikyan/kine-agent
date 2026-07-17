@@ -31,6 +31,12 @@ pub struct Prompt {
     /// agent session still starts with conversation context. Other adapters
     /// ignore it. `None` for new sessions and pipe engines.
     pub resume_transcript: Option<String>,
+    /// Resolved API-key-vs-subscription auth to apply to the spawned child (see
+    /// [`crate::auth`]). The command layer fills this from the agent's persisted
+    /// choice; each adapter applies it to its command right after construction.
+    /// `Default` is a no-op that inherits the parent env unchanged — the pre-BYOK
+    /// behavior — so tests building `Prompt::default()` are unaffected.
+    pub auth: crate::auth::AgentAuth,
 }
 
 /// Fatal session-level failure (the agent never ran or died). In-band errors the

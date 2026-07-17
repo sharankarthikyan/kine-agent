@@ -1,6 +1,6 @@
 # Design System
 
-> Kineloop is a local-first Tauri 2 desktop app that supervises AI coding-agent CLIs.
+> Kine Agent is a local-first Tauri 2 desktop app that supervises AI coding-agent CLIs.
 > **Design direction (user, 2026-06-28): minimalistic shadcn/ui aesthetic — ALWAYS.**
 > This supersedes the original custom near-black token palette (`src/styles/tokens.css`),
 > which the user explicitly disliked (too harsh/raw). Calm, neutral, low-contrast.

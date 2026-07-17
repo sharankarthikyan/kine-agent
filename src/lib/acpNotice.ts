@@ -1,4 +1,4 @@
-const KEY = "kineloop.acpAdapterNoticeShown";
+const KEY = "kine-agent.acpAdapterNoticeShown";
 
 /**
  * True exactly once per install: the first ACP run downloads the pinned

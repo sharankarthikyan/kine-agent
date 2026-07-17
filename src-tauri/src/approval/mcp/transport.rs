@@ -126,7 +126,7 @@ mod tests {
         // The notification produced no response, so only two lines.
         assert_eq!(responses.len(), 2);
         assert_eq!(responses[0]["id"], 1);
-        assert_eq!(responses[0]["result"]["serverInfo"]["name"], "kineloop");
+        assert_eq!(responses[0]["result"]["serverInfo"]["name"], "kine_agent");
         assert_eq!(responses[1]["id"], 2);
         assert_eq!(responses[1]["result"]["tools"][0]["name"], "approve");
     }

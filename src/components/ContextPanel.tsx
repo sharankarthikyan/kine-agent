@@ -25,7 +25,7 @@ export interface ContextPanelProps {
   model: ModelInfo | null;
   contextFootprint?: ContextFootprint | null;
   agent?: string;
-  source?: "kineloop" | "external";
+  source?: "kine-agent" | "external";
   permissionMode?: PermissionMode | null;
   sandboxTerminal?: boolean;
   sessionTurnCount?: number | null;
@@ -52,7 +52,7 @@ function SectionHeading({ children }: { children: React.ReactNode }) {
 // Normalizes Windows separators to `/` so the match works cross-platform.
 function displayPath(path: string): string {
   const norm = path.replace(/\\/g, "/");
-  const match = norm.match(/\/(?:\.(?:kineloop|agent-editor)|Kineloop)\/worktrees\/[^/]+\/(.+)$/);
+  const match = norm.match(/\/(?:\.(?:kine-agent|kineloop|agent-editor)|KineAgent|Kineloop)\/worktrees\/[^/]+\/(.+)$/);
   return match ? match[1] : norm;
 }
 
@@ -340,7 +340,7 @@ export function ContextPanel({
   model,
   contextFootprint,
   agent,
-  source = "kineloop",
+  source = "kine-agent",
   permissionMode = DEFAULT_PERMISSION_MODE,
   sandboxTerminal = false,
   sessionTurnCount = null,

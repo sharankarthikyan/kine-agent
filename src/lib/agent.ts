@@ -9,7 +9,7 @@ import { invoke, Channel } from "@tauri-apps/api/core";
 export function assertDesktop(): void {
   if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) {
     throw new Error(
-      "Agents run only in the Kineloop desktop app. Launch it with `npm run tauri dev` — the browser preview can't reach the backend.",
+      "Agents run only in the Kine Agent desktop app. Launch it with `npm run tauri dev` — the browser preview can't reach the backend.",
     );
   }
 }
@@ -182,7 +182,7 @@ export interface ContinueExternalSessionArgs {
   externalSessionId: string;
   prompt: string;
   sessionId: string;
-  /** Supported Kineloop agent used for the writable continuation. */
+  /** Supported Kine Agent agent used for the writable continuation. */
   agent?: string;
   /** Model id/alias forwarded to the adopted session's agent CLI. */
   model?: string;
@@ -215,7 +215,7 @@ export async function sendMessage({ sessionId, prompt, model, permissionMode, sa
   await invoke("send_message", { sessionId, prompt, model, permissionMode, sandboxTerminal, onEvent: channel });
 }
 
-/** Adopt an imported CLI history session into a new writable Kineloop continuation. */
+/** Adopt an imported CLI history session into a new writable Kine Agent continuation. */
 export async function continueExternalSession({
   externalSessionId,
   prompt,

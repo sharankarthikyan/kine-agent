@@ -77,10 +77,10 @@ test("renders external CLI continuation mode distinctly", () => {
   setup({ mode: "external-continuation" });
   expect(screen.getByPlaceholderText("Continue this CLI history…")).toBeInTheDocument();
   expect(
-    screen.getByText("Replies start a writable Kineloop continuation."),
+    screen.getByText("Replies start a writable Kine Agent continuation."),
   ).toBeInTheDocument();
   expect(
-    screen.getByRole("button", { name: "Continue in Kineloop" }),
+    screen.getByRole("button", { name: "Continue in Kine Agent" }),
   ).toBeDisabled();
 });
 

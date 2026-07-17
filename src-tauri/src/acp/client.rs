@@ -36,7 +36,7 @@ pub enum SessionUpdate {
     /// `usage_update` — context-window occupancy for the session. `used` =
     /// tokens currently in context, `size` = total window. `cost_usd` rides
     /// only on claude-agent-acp's turn-final update (cumulative for the acp
-    /// process, which Kineloop spawns per turn — effectively per-turn).
+    /// process, which Kine Agent spawns per turn — effectively per-turn).
     /// codex-acp emits {used,size} only and skips emission entirely when its
     /// model_context_window is unknown.
     UsageUpdate { used: u64, size: u64, cost_usd: Option<f64> },
@@ -77,7 +77,7 @@ pub async fn initialize(peer: &RpcPeer) -> Result<bool, RpcError> {
                     "fs": {"readTextFile": true, "writeTextFile": true},
                     "_meta": {"terminal_output": true}
                 },
-                "clientInfo": {"name": "kineloop", "version": env!("CARGO_PKG_VERSION")}
+                "clientInfo": {"name": "kine-agent", "version": env!("CARGO_PKG_VERSION")}
             }),
         )
         .await?;
@@ -141,7 +141,7 @@ pub fn parse_turn_usage(result: &Value) -> Option<TurnUsage> {
     })
 }
 
-/// The ACP session mode a Kineloop permission mode should run under. The agent
+/// The ACP session mode a Kine Agent permission mode should run under. The agent
 /// otherwise inherits the USER'S OWN settings default (e.g. permissions.defaultMode
 /// "auto"), which silently auto-approves edits — "Ask before edits" must force
 /// the agent into a mode that actually asks. Chains cover both claude-agent-acp ids
@@ -184,7 +184,7 @@ pub fn acp_mode_for(permission_mode: Option<&str>, available: &[String]) -> Stri
         .to_string()
 }
 
-/// session/set_mode — point the agent at the session mode matching Kineloop's
+/// session/set_mode — point the agent at the session mode matching Kine Agent's
 /// permission mode. Best-effort at the call site (a failure must not kill the run).
 pub async fn session_set_mode(
     peer: &RpcPeer,

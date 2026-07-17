@@ -111,5 +111,5 @@ test("the About section carries the non-affiliation disclaimer and local-data di
 test("the About section shows the app version", async () => {
   setup();
   await userEvent.click(screen.getByRole("button", { name: "About" }));
-  expect(await screen.findByText(/Kineloop v0\.1\.2/i)).toBeInTheDocument();
+  expect(await screen.findByText(/Kine Agent v0\.1\.2/i)).toBeInTheDocument();
 });

@@ -24,7 +24,7 @@ export interface SessionHeaderProps {
   agent: string;
   repo: string | null;
   status: string;
-  source: "kineloop" | "external";
+  source: "kine-agent" | "external";
   onClose: () => void;
   onCleanup: () => void;
   onTogglePanel: () => void;

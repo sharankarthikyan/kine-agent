@@ -1,7 +1,7 @@
 //! Unified, agent-agnostic tool-approval core.
 //!
 //! When an agent wants to run a gated tool, the agent's approval bridge registers a
-//! pending request here and awaits the decision. Kineloop emits an
+//! pending request here and awaits the decision. Kine Agent emits an
 //! `AgentEvent::ApprovalNeeded` so the UI shows Approve/Deny; the user's answer arrives via
 //! the `respond_to_approval` IPC command, which resolves the pending request and unblocks
 //! the awaiting bridge.
@@ -26,7 +26,7 @@ use crate::events::{AgentEvent, ApprovalOption};
 
 /// What the Claude adapter adds to its launch when approvals are enabled for a run: the
 /// `--permission-prompt-tool` name and the inline `--mcp-config` JSON that registers the
-/// Kineloop permission MCP server. `None` on a `Prompt` leaves the launch unchanged (the
+/// Kine Agent permission MCP server. `None` on a `Prompt` leaves the launch unchanged (the
 /// default), so this is inert unless a run explicitly turns approvals on.
 #[derive(Debug, Clone)]
 pub struct ApprovalLaunch {

@@ -16,8 +16,8 @@ test("renders line numbers and preserves code text", () => {
 });
 
 test("highlights json property tokens", () => {
-  render(<CodeBlock content={'{"name": "kineloop"}'} path="package.json" />);
+  render(<CodeBlock content={'{"name": "kine-agent"}'} path="package.json" />);
 
   expect(screen.getByText('"name":')).toBeInTheDocument();
-  expect(screen.getByText('"kineloop"')).toBeInTheDocument();
+  expect(screen.getByText('"kine-agent"')).toBeInTheDocument();
 });

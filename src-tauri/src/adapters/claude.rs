@@ -158,6 +158,9 @@ pub async fn spawn_and_stream(
     // reads the prompt from stdin when no positional prompt is supplied.
     let prompt_via_stdin = is_batch_shim(&program);
     let mut command = crate::proc::tokio_command(&program);
+    // Apply the resolved BYOK auth: inject ANTHROPIC_API_KEY (key mode) or strip inherited
+    // key vars (subscription mode) so the login the UI advertises is the one actually used.
+    prompt.auth.apply(&mut command);
     command.arg("-p");
     if !prompt_via_stdin {
         command.arg(&prompt.text);
@@ -177,7 +180,7 @@ pub async fn spawn_and_stream(
     if let Some(mode) = permission_mode {
         command.arg("--permission-mode").arg(mode.claude_flag());
     }
-    // Interactive approval (opt-in): route gated tool calls through Kineloop's permission
+    // Interactive approval (opt-in): route gated tool calls through Kine Agent's permission
     // MCP server. `--mcp-config` merges our server with the user's own MCP config, so their
     // tools keep working. Absent by default, leaving the launch unchanged.
     if let Some(approval) = prompt.approval.as_ref() {

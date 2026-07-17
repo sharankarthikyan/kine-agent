@@ -81,13 +81,13 @@ test("tool chip summaries hide internal call ids and normalize mcp names", () =>
       kind: "toolCall",
       data: {
         name: "mcp__mem0__search_memory",
-        input: '{"call_id":"call_9KNnG4","query":"kineloop context"}',
+        input: '{"call_id":"call_9KNnG4","query":"kine-agent context"}',
       },
     },
   ] as AgentEvent[];
   render(<EventStream events={events} />);
   expect(screen.getByText(/mem0\/search_memory/)).toBeInTheDocument();
-  expect(screen.getByText(/kineloop context/)).toBeInTheDocument();
+  expect(screen.getByText(/kine-agent context/)).toBeInTheDocument();
   expect(screen.queryByText(/call_9KNnG4/)).not.toBeInTheDocument();
 });
 
@@ -96,19 +96,19 @@ test("file write chips display a compact filename but open the full path", async
   const events = [
     {
       kind: "fileWrite",
-      data: { path: "/Users/me/Kineloop/worktrees/abc/docs/M6-SMOKE.md" },
+      data: { path: "/Users/me/KineAgent/worktrees/abc/docs/M6-SMOKE.md" },
     },
   ] as AgentEvent[];
   render(<EventStream events={events} onOpenFile={onOpenFile} />);
   expect(screen.getByText("M6-SMOKE.md")).toBeInTheDocument();
-  expect(screen.queryByText(/Kineloop\/worktrees/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/KineAgent\/worktrees/)).not.toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: /M6-SMOKE.md/ }));
-  expect(onOpenFile).toHaveBeenCalledWith("/Users/me/Kineloop/worktrees/abc/docs/M6-SMOKE.md");
+  expect(onOpenFile).toHaveBeenCalledWith("/Users/me/KineAgent/worktrees/abc/docs/M6-SMOKE.md");
 });
 
 test("edit tool details render an inline diff instead of raw json when available", async () => {
   const onOpenFile = vi.fn();
-  const path = "/Users/me/Kineloop/worktrees/48b590f9/docs/M6-SMOKE.md";
+  const path = "/Users/me/KineAgent/worktrees/48b590f9/docs/M6-SMOKE.md";
   const events = [
     {
       kind: "toolCall",
@@ -259,7 +259,7 @@ test("renders Antigravity auth as an access-code login flow", async () => {
         agent: "antigravity",
         command: "agy --prompt-interactive \"Sign in to Antigravity\"",
         message:
-          "Antigravity is not signed in. Kineloop can open the real CLI login prompt, but the browser access code must be pasted into Antigravity's terminal prompt.",
+          "Antigravity is not signed in. Kine Agent can open the real CLI login prompt, but the browser access code must be pasted into Antigravity's terminal prompt.",
       },
     },
   ];
@@ -268,7 +268,7 @@ test("renders Antigravity auth as an access-code login flow", async () => {
   expect(screen.getByText("Manual terminal command")).toBeInTheDocument();
   expect(screen.getByText("agy --prompt-interactive \"Sign in to Antigravity\"")).toBeInTheDocument();
   expect(screen.getByText(/Choose a login method/)).toBeInTheDocument();
-  expect(screen.getByText(/Kineloop does not accept the code in chat/)).toBeInTheDocument();
+  expect(screen.getByText(/Kine Agent does not accept the code in chat/)).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "Open login terminal" }));
   expect(onOpenAuthLogin).toHaveBeenCalledWith("antigravity");
   expect(screen.getByRole("button", { name: "Copy antigravity sign-in command" })).toBeInTheDocument();

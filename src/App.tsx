@@ -177,7 +177,7 @@ function storedNumber(key: string, fallback: number, min: number, max: number): 
 }
 
 /** The remembered default permission mode for NEW sessions, from localStorage. */
-const PERMISSION_MODE_KEY = "kineloop.defaultPermissionMode";
+const PERMISSION_MODE_KEY = "kine-agent.defaultPermissionMode";
 const PERMISSION_MODES: readonly PermissionMode[] = [
   "plan",
   "default",
@@ -295,7 +295,7 @@ export default function App() {
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
   const [sidebarWidth, setSidebarWidth] = useState(() =>
     storedNumber(
-      "kineloop.sidebarWidth",
+      "kine-agent.sidebarWidth",
       SIDEBAR_DEFAULT_WIDTH,
       SIDEBAR_MIN_WIDTH,
       SIDEBAR_MAX_WIDTH,
@@ -303,7 +303,7 @@ export default function App() {
   );
   const [rightPaneWidth, setRightPaneWidth] = useState(() =>
     storedNumber(
-      "kineloop.rightPaneWidth",
+      "kine-agent.rightPaneWidth",
       RIGHT_PANE_DEFAULT_WIDTH,
       RIGHT_PANE_MIN_WIDTH,
       RIGHT_PANE_MAX_WIDTH,
@@ -312,7 +312,7 @@ export default function App() {
   // Sidebar collapse — persisted in localStorage.
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
     try {
-      return localStorage.getItem("kineloop.sidebarCollapsed") === "true";
+      return localStorage.getItem("kine-agent.sidebarCollapsed") === "true";
     } catch {
       return false;
     }
@@ -831,7 +831,7 @@ export default function App() {
     setSidebarCollapsed((prev) => {
       const next = !prev;
       try {
-        localStorage.setItem("kineloop.sidebarCollapsed", String(next));
+        localStorage.setItem("kine-agent.sidebarCollapsed", String(next));
       } catch {
         /* ignore */
       }
@@ -876,7 +876,7 @@ export default function App() {
         SIDEBAR_MAX_WIDTH,
       );
       setSidebarWidth(next);
-      persistPanelWidth("kineloop.sidebarWidth", next);
+      persistPanelWidth("kine-agent.sidebarWidth", next);
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
       window.removeEventListener("pointermove", onMove);
@@ -912,7 +912,7 @@ export default function App() {
         rightPaneMaxWidth(),
       );
       setRightPaneWidth(next);
-      persistPanelWidth("kineloop.rightPaneWidth", next);
+      persistPanelWidth("kine-agent.rightPaneWidth", next);
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
       window.removeEventListener("pointermove", onMove);
@@ -928,7 +928,7 @@ export default function App() {
   function resizeSidebarBy(delta: number) {
     const next = clampNumber(sidebarWidth + delta, SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
     setSidebarWidth(next);
-    persistPanelWidth("kineloop.sidebarWidth", next);
+    persistPanelWidth("kine-agent.sidebarWidth", next);
   }
 
   function resizeRightPaneBy(delta: number) {
@@ -938,7 +938,7 @@ export default function App() {
       rightPaneMaxWidth(),
     );
     setRightPaneWidth(next);
-    persistPanelWidth("kineloop.rightPaneWidth", next);
+    persistPanelWidth("kine-agent.rightPaneWidth", next);
   }
 
   function centerWorkspaceSize() {
@@ -1423,14 +1423,14 @@ export default function App() {
       ? preferredAgent
       : (selectedModel?.agent ?? "claude");
     // Adopting external CLI history starts a NEW automated session, so it honors the
-    // agent-enablement gate (unlike follow-ups on an existing Kineloop session, which
+    // agent-enablement gate (unlike follow-ups on an existing Kine Agent session, which
     // always resume their row's agent). This guard MUST run before any optimistic state
     // mutation below, so a disabled agent is a clean no-op that routes to Settings —
     // otherwise the early return would strand a half-created "running" row.
     if (isExternalContinuation && !isAgentEnabled(startAgent, agentPrefs)) {
       const label = agents.find((a) => a.id === startAgent)?.label ?? startAgent;
       toast.info(`${label} is disabled`, {
-        description: "Enable it in Settings to continue this session in Kineloop.",
+        description: "Enable it in Settings to continue this session in Kine Agent.",
       });
       setSettingsOpen(true);
       return;
@@ -1446,7 +1446,7 @@ export default function App() {
       if (tuiCommand) {
         toast.info(`/${tuiCommand} needs Claude Code's interactive terminal`, {
           description:
-            "Headless sessions can't open its screen. Run `claude` in a terminal for that — model, permission mode, and usage live in Kineloop's Context panel.",
+            "Headless sessions can't open its screen. Run `claude` in a terminal for that — model, permission mode, and usage live in Kine Agent's Context panel.",
         });
         return;
       }
@@ -1482,7 +1482,7 @@ export default function App() {
                 ? currentSession.title
                 : titleFromPrompt(text),
             status: "running",
-            source: "kineloop",
+            source: "kine-agent",
             turnCount: null,
             toolCallCount: null,
             fileActionCount: null,
@@ -2013,7 +2013,7 @@ export default function App() {
                           agent={paneSession?.agent ?? "claude"}
                           repo={paneRepo}
                           status={paneSession?.status ?? "idle"}
-                          source={paneSession?.source ?? "kineloop"}
+                          source={paneSession?.source ?? "kine-agent"}
                           onClose={() => closePane(pane.id)}
                           onCleanup={() => void handleCleanupSession(pane.sessionId!)}
                           onRename={
@@ -2242,9 +2242,9 @@ export default function App() {
                 >
                   {activeIsExternal ? (
                     <div className="flex h-full flex-col justify-center p-6 text-sm text-muted-foreground">
-                      <p className="font-medium text-foreground">No Kineloop worktree</p>
+                      <p className="font-medium text-foreground">No Kine Agent worktree</p>
                       <p className="mt-1">
-                        This CLI history is read-only, so Kineloop cannot compute a live
+                        This CLI history is read-only, so Kine Agent cannot compute a live
                         branch diff. Use Files to review files mentioned by the session.
                       </p>
                     </div>

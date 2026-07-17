@@ -4,7 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
 import { checkForUpdate, installUpdate, restartApp } from "@/lib/updater";
 
-const PROGRESS_TOAST = "kineloop-update-progress";
+const PROGRESS_TOAST = "kine-agent-update-progress";
 
 /** Event the native "Check for Updates…" menu item emits from Rust (lib.rs). */
 const MENU_CHECK_EVENT = "menu://check-for-updates";
@@ -17,7 +17,7 @@ function formatMb(bytes: number): string {
  * Headless self-update controller. Renders nothing — it owns the updater IPC and
  * toast lifecycle for BOTH triggers:
  *  - a silent check on launch (surfaces a toast only when an update exists)
- *  - the native macOS menu item "Kineloop ▸ Check for Updates…", which emits
+ *  - the native macOS menu item "Kine Agent ▸ Check for Updates…", which emits
  *    `menu://check-for-updates` from Rust; that path always gives feedback
  *    (up-to-date / error) since the user asked explicitly.
  *
@@ -38,7 +38,7 @@ export function UpdaterHost() {
           : `Downloading ${update.version} — ${formatMb(downloaded)}`;
         toast.loading(label, { id: PROGRESS_TOAST });
       });
-      toast.success(`Kineloop ${update.version} installed`, {
+      toast.success(`Kine Agent ${update.version} installed`, {
         id: PROGRESS_TOAST,
         description: "Restart to finish updating.",
         duration: Infinity,
@@ -56,7 +56,7 @@ export function UpdaterHost() {
 
   const promptInstall = useCallback(
     (update: Update) => {
-      toast(`Update available — Kineloop ${update.version}`, {
+      toast(`Update available — Kine Agent ${update.version}`, {
         description: update.body?.trim() || "A newer version is ready to install.",
         duration: Infinity,
         action: { label: "Install", onClick: () => void runInstall(update) },

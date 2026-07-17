@@ -136,7 +136,7 @@ mod tests {
 
     #[tokio::test]
     async fn socket_roundtrip_surfaces_and_returns_a_decision() {
-        let dir = std::env::temp_dir().join(format!("kineloop-approval-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("kine-agent-approval-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("t.sock");
 
@@ -180,7 +180,7 @@ mod tests {
 
     #[tokio::test]
     async fn request_decision_fails_closed_when_the_socket_is_absent() {
-        let path = std::env::temp_dir().join("kineloop-approval-nonexistent.sock");
+        let path = std::env::temp_dir().join("kine-agent-approval-nonexistent.sock");
         let _ = std::fs::remove_file(&path);
         let call = ToolCall {
             tool_name: "Bash".into(),

@@ -178,7 +178,7 @@ pub fn default_base(worktree: &Path) -> String {
     "main".to_string()
 }
 
-/// First local branch that isn't a Kineloop `agent/<id>` session branch (branches are
+/// First local branch that isn't a Kine Agent `agent/<id>` session branch (branches are
 /// shared across a repo's worktrees, so the session worktree can still see the repo's real
 /// base branch). Sorted by name; rejects names starting with `-` as an argument-injection
 /// guard, mirroring the rest of this module. `None` when no such branch exists.

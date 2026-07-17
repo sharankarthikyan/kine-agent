@@ -42,46 +42,54 @@ fn non_empty_env(key: &str) -> Option<OsString> {
     std::env::var_os(key).filter(|v| !v.is_empty())
 }
 
-/// Kineloop's own per-user data directory (`<home>/.kineloop`), holding the session DB.
+/// Kine Agent's own per-user data directory (`<home>/.kine-agent`), holding the session DB.
 /// Falls back to the temp dir if no home is available. Per-session git worktrees do NOT
 /// live here: they need a non-hidden path (the Antigravity CLI refuses hidden-path
-/// workspaces), so they sit under a visible `<home>/Kineloop/worktrees`
+/// workspaces), so they sit under a visible `<home>/KineAgent/worktrees`
 /// (`commands::worktrees_root`). Pre-relocation sessions still resolve to the legacy
-/// `<home>/.kineloop/worktrees`.
+/// worktree roots (`commands::legacy_worktrees_roots`).
 pub fn data_dir() -> PathBuf {
     home_dir()
         .unwrap_or_else(std::env::temp_dir)
-        .join(".kineloop")
+        .join(".kine-agent")
 }
 
-/// One-time migration of the pre-rename data directory (`~/.agent-editor`) to
-/// `~/.kineloop`, including the SQLite DB file (and its WAL/SHM sidecars). Idempotent
-/// and best-effort: runs only when the legacy directory exists and the new one does not,
-/// so existing sessions and worktrees survive the rename. Safe to call on every launch.
+/// One-time migration of an older data directory to the current `~/.kine-agent`, including
+/// the SQLite DB file (and its WAL/SHM sidecars). The product was renamed twice — the app
+/// dir went `~/.agent-editor` → `~/.kineloop` → `~/.kine-agent` — so this migrates from
+/// either predecessor. Idempotent and best-effort: the directory move runs only when a
+/// legacy dir exists and the new one does not, so existing sessions survive the rename.
+/// Safe to call on every launch.
 pub fn migrate_legacy_data_dir() {
     let Some(home) = home_dir() else {
         return;
     };
-    let legacy = home.join(".agent-editor");
-    let current = home.join(".kineloop");
+    let current = home.join(".kine-agent");
 
-    if legacy.is_dir() && !current.exists() {
-        // Same parent (the home dir), so this is a cheap rename, not a cross-device move.
-        if std::fs::rename(&legacy, &current).is_err() {
-            return;
+    // Adopt the newest predecessor dir that still exists (only if we don't already have
+    // our own). Same parent (the home dir), so each is a cheap rename, not a cross-device
+    // move. `.kineloop` is preferred over `.agent-editor` as the more recent name.
+    if !current.exists() {
+        for legacy_name in [".kineloop", ".agent-editor"] {
+            let legacy = home.join(legacy_name);
+            if legacy.is_dir() {
+                if std::fs::rename(&legacy, &current).is_err() {
+                    return;
+                }
+                break;
+            }
         }
     }
 
-    // Rename the DB file (+ WAL/SHM) inside the now-current directory.
-    for (from, to) in [
-        ("agent-editor.db", "kineloop.db"),
-        ("agent-editor.db-wal", "kineloop.db-wal"),
-        ("agent-editor.db-shm", "kineloop.db-shm"),
-    ] {
-        let from_path = current.join(from);
-        let to_path = current.join(to);
-        if from_path.exists() && !to_path.exists() {
-            let _ = std::fs::rename(&from_path, &to_path);
+    // Rename any predecessor DB file (+ WAL/SHM) inside the now-current directory to the
+    // current name. Ordered newest-first so a partially-migrated dir converges.
+    for old_stem in ["kineloop", "agent-editor"] {
+        for suffix in ["db", "db-wal", "db-shm"] {
+            let from_path = current.join(format!("{old_stem}.{suffix}"));
+            let to_path = current.join(format!("kine-agent.{suffix}"));
+            if from_path.exists() && !to_path.exists() {
+                let _ = std::fs::rename(&from_path, &to_path);
+            }
         }
     }
 }
@@ -102,7 +110,7 @@ pub fn resolve_program(name: &str) -> OsString {
 
 /// Marker isolating `$PATH` from any profile stdout noise (banners, nvm messages).
 #[cfg(unix)]
-const PATH_MARKER: &str = "__KINELOOP_PATH__";
+const PATH_MARKER: &str = "__KINE_AGENT_PATH__";
 
 /// Adopt the user's login-shell PATH into this process — once.
 ///
@@ -121,7 +129,7 @@ pub fn adopt_login_shell_path() {
     ONCE.call_once(|| {
         let Some(login) = login_shell_path() else {
             eprintln!(
-                "kineloop: could not read the login-shell PATH — agent CLIs may look \
+                "kine-agent: could not read the login-shell PATH — agent CLIs may look \
                  missing when launched from Finder/desktop"
             );
             return;

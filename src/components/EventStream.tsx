@@ -498,7 +498,7 @@ function renderEvent(
               </div>
               {isAntigravity && (
                 <ol className="mt-2 list-decimal space-y-1 pl-4 text-xs text-muted-foreground">
-                  <li>Open Antigravity's login terminal from Kineloop.</li>
+                  <li>Open Antigravity's login terminal from Kine Agent.</li>
                   <li>Choose a login method in that terminal.</li>
                   <li>Finish the browser step.</li>
                   <li>Paste the browser access code into the terminal prompt, then retry here.</li>
@@ -515,7 +515,7 @@ function renderEvent(
                     Open login terminal
                   </Button>
                   <div className="text-xs text-muted-foreground">
-                    Kineloop does not accept the code in chat.
+                    Kine Agent does not accept the code in chat.
                   </div>
                 </div>
               )}
@@ -908,7 +908,13 @@ function displayDiffText(line: { kind: DiffLineKind; text: string }): string {
 
 function displayWorktreePath(path: string): string {
   const normalized = path.replace(/\\/g, "/");
-  const match = normalized.match(/\/(?:\.(?:kineloop|agent-editor)|Kineloop)\/worktrees\/[^/]+\/(.+)$/);
+  // Strip the per-session worktree prefix so only the repo-relative path shows. Recognizes
+  // every worktree root the product has used across renames: the current visible
+  // `KineAgent/worktrees`, the previous visible `Kineloop/worktrees`, and the older hidden
+  // `.kine-agent`, `.kineloop`, and `.agent-editor` dirs.
+  const match = normalized.match(
+    /\/(?:\.(?:kine-agent|kineloop|agent-editor)|KineAgent|Kineloop)\/worktrees\/[^/]+\/(.+)$/,
+  );
   return match ? match[1] : normalized;
 }
 

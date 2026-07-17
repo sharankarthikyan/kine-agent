@@ -127,7 +127,7 @@ impl Drop for KillTreeOnDrop {
 /// negligible against npx's tens-of-ms shim→node startup. BEST-EFFORT: any
 /// failure logs and returns None — teardown then degrades to the direct
 /// `child.kill()` (today's behavior), never failing the spawn. Nested jobs are
-/// fine on the supported Windows versions (Win8+), so running Kineloop itself
+/// fine on the supported Windows versions (Win8+), so running Kine Agent itself
 /// under a job (some shells/CI) does not break assignment.
 #[cfg(windows)]
 fn windows_job_for(child: &tokio::process::Child) -> Option<win32job::Job> {
@@ -162,7 +162,7 @@ fn windows_job_for(child: &tokio::process::Child) -> Option<win32job::Job> {
 }
 
 /// Emitted when a resume request degrades to a fresh session WITH replayed context.
-const RESUME_NOTICE_WITH_CONTEXT: &str = "This agent can't restore the previous session natively — Kineloop replayed recent conversation context into this turn.";
+const RESUME_NOTICE_WITH_CONTEXT: &str = "This agent can't restore the previous session natively — Kine Agent replayed recent conversation context into this turn.";
 /// Emitted when a resume request degrades to a fresh session with NO context to replay.
 const RESUME_NOTICE_NO_CONTEXT: &str = "This agent can't restore the previous session natively — this turn starts without prior context.";
 
@@ -372,7 +372,7 @@ pub struct AcpAdapter {
     /// Shared handle to the app's approval registry: interactive permission
     /// requests register here and are resolved by respond_to_approval.
     approvals: crate::approval::ApprovalRegistry,
-    /// The KINELOOP session id approvals belong to. Distinct from the `session_id`
+    /// The Kine Agent session id approvals belong to. Distinct from the `session_id`
     /// run() receives, which on resume is the ACP-minted thread id.
     app_session_id: String,
     /// Which agent's ACP package to launch, and its login hint on auth failure.
@@ -458,6 +458,11 @@ async fn spawn_and_drive(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
+    // Apply the resolved BYOK auth. The ACP wrappers (claude-agent-acp / codex-acp) inherit
+    // the full child env, so injecting the agent's key var here flows through to the CLI;
+    // in subscription mode this strips inherited key vars instead. Agent-agnostic — the
+    // resolved value already encodes the correct var for this session's agent.
+    prompt.auth.apply(&mut cmd);
     // The child must lead its own process group: npx's descendants (the node
     // shim and codex-acp's native binary) don't die with npx — SIGKILL doesn't
     // propagate — and codex-acp doesn't exit on stdin EOF either (observed
@@ -671,7 +676,7 @@ pub async fn drive_session(
     let permission_mode = prompt.permission_mode.clone();
 
     // The agent inherits the user's own settings default (often permissive).
-    // Force the session into the mode Kineloop's permission mode demands —
+    // Force the session into the mode Kine Agent's permission mode demands —
     // otherwise "Ask before edits" never generates a permission request at all.
     let target_mode = client::acp_mode_for(permission_mode.as_deref(), &modes.available);
     if modes.current.as_deref() != Some(target_mode.as_str()) {
@@ -904,7 +909,7 @@ fn is_auth_required_rpc(e: &crate::acp::jsonrpc::RpcError) -> bool {
 
 /// Await session/load while DISCARDING the replayed history. The ACP spec
 /// requires the agent to replay the entire prior conversation as session/update
-/// notifications before answering session/load; Kineloop already persists that
+/// notifications before answering session/load; Kine Agent already persists that
 /// history itself, so re-emitting it would duplicate the transcript on every
 /// resume (and grow the events table multiplicatively). Returns the mode state
 /// the load response advertised, plus any FileWrite events from fs writes the
@@ -1075,7 +1080,7 @@ fn handle_notification(
 /// `EventSink: Sync`. A returned FileWrite is emitted by the CALLER,
 /// synchronously, after the await — the sink must never cross an await point.
 enum InboundAnswer {
-    /// Not a permission or fs request: terminal/*, anything else Kineloop
+    /// Not a permission or fs request: terminal/*, anything else Kine Agent
     /// doesn't implement.
     NotSupported,
     /// Autonomous mode, or the agent offered no options: answer right away.
@@ -1289,7 +1294,7 @@ fn build_usage_event(
 /// fallback path composes this — native session/load sends the raw text.
 fn compose_resume_fallback_prompt(transcript: &str, user_prompt: &str) -> String {
     format!(
-        "You are continuing a previous Kineloop session with this agent. \
+        "You are continuing a previous Kine Agent session with this agent. \
          Native session resume is unavailable, so the transcript below restores your context. \
          Treat it as prior conversation. Do not assume any earlier process is still alive. \
          Continue from the user's new request using the current repository state.\n\n\
@@ -1860,7 +1865,7 @@ mod tests {
         );
     }
 
-    /// The agent's session/new default differs from what Kineloop's permission
+    /// The agent's session/new default differs from what Kine Agent's permission
     /// mode demands ("default" here, since permission_mode is None/"Ask before
     /// edits") — drive_session must sync via session/set_mode before the first
     /// session/prompt, or the agent silently runs under its own inherited
@@ -2566,7 +2571,7 @@ mod tests {
             prompt,
             None,
             |mut lines, mut w, prompt_id, _wt| async move {
-                // A real ACP method Kineloop doesn't implement (fs/* IS handled now
+                // A real ACP method Kine Agent doesn't implement (fs/* IS handled now
                 // that M4 wires the proxy — see the fs_* fixtures below).
                 let msg = serde_json::json!({"jsonrpc":"2.0","id":7,"method":"terminal/create",
                 "params":{"sessionId":"acp-abc"}});
@@ -3819,7 +3824,7 @@ mod tests {
                 text: "hi".into(),
                 ..Default::default()
             },
-            "/kineloop-does-not-exist-m5".into(), // canonicalize fails ⇒ fs_root None
+            "/kine-agent-does-not-exist-m5".into(), // canonicalize fails ⇒ fs_root None
             None,
             sink,
             Arc::new(Mutex::new(None)),

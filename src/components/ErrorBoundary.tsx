@@ -24,8 +24,8 @@ export class ErrorBoundary extends Component<Props, State> {
   }
 
   componentDidCatch(error: Error, info: ErrorInfo) {
-    // Log for a local bug report — Kineloop ships no telemetry, so this stays on-device.
-    console.error("Kineloop crashed:", error, info.componentStack);
+    // Log for a local bug report — Kine Agent ships no telemetry, so this stays on-device.
+    console.error("Kine Agent crashed:", error, info.componentStack);
   }
 
   render() {
@@ -37,14 +37,14 @@ export class ErrorBoundary extends Component<Props, State> {
         <div className="flex flex-col gap-1">
           <h1 className="text-lg font-semibold text-foreground">Something went wrong</h1>
           <p className="max-w-md text-sm text-muted-foreground">
-            Kineloop hit an unexpected error. Reloading usually fixes it — your
+            Kine Agent hit an unexpected error. Reloading usually fixes it — your
             sessions are saved locally and will still be here.
           </p>
         </div>
         <pre className="max-h-40 max-w-lg overflow-auto rounded-md border border-border bg-muted/30 p-3 text-left text-xs text-muted-foreground">
           {error.message}
         </pre>
-        <Button onClick={() => window.location.reload()}>Reload Kineloop</Button>
+        <Button onClick={() => window.location.reload()}>Reload Kine Agent</Button>
       </div>
     );
   }

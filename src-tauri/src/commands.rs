@@ -133,7 +133,7 @@ impl EventSink for StoreSink {
 /// picked: only "Ask before edits" (the `default` mode, or none) surfaces prompts — "Auto-edit"
 /// and "Full access" don't ask, so they never attach the bridge. Claude + Unix only.
 ///
-/// The `KINELOOP_APPROVAL` env var is a temporary SAFETY SWITCH, not product UX: it keeps the
+/// The `KINE_AGENT_APPROVAL` env var is a temporary SAFETY SWITCH, not product UX: it keeps the
 /// bridge off until the end-to-end Claude handshake is verified live (see
 /// docs/approval-architecture.md). Once verified, drop the env check so the mode alone drives it.
 ///
@@ -144,7 +144,7 @@ fn approval_socket_setup(agent: &str, session_id: &str, prompt: &mut Prompt) -> 
     // "Ask before edits" is the wire mode `default` (the UI always sends it; `None` is the same
     // read-only-ask default). Every other mode is a deliberate "don't ask" choice.
     let mode_asks = matches!(prompt.permission_mode.as_deref(), None | Some("default"));
-    if agent != "claude" || !mode_asks || std::env::var_os("KINELOOP_APPROVAL").is_none() {
+    if agent != "claude" || !mode_asks || std::env::var_os("KINE_AGENT_APPROVAL").is_none() {
         return None;
     }
     let dir = crate::agent_paths::data_dir().join("approvals");
@@ -213,7 +213,7 @@ async fn run_persisting(
     // Interactive approval: for a Claude "Ask before edits" run, stand up a per-session
     // permission MCP server so gated tool calls route through the Approve/Deny UI.
     // `approval_socket_setup` decides from the permission mode (gated for now by the
-    // KINELOOP_APPROVAL safety switch until the live handshake is verified), sets the launch
+    // KINE_AGENT_APPROVAL safety switch until the live handshake is verified), sets the launch
     // flags on `prompt`, and returns the socket path; otherwise None and the launch is unchanged.
     // Pipe-only: under ACP, approvals arrive as protocol requests, not via the MCP socket.
     let approval_socket_path = if engine == store::ENGINE_PIPE {
@@ -262,12 +262,25 @@ async fn run_persisting(
     // Dispatch to the agent's adapter. Codex, Antigravity, and claude-over-ACP mint
     // their own conversation id; `captured` collects it during the run so we can
     // persist it for resume. On resume those adapters take the previously-captured id
-    // (not the Kineloop session id); only pipe Claude uses the Kineloop session id
+    // (not the Kine Agent session id); only pipe Claude uses the Kine Agent session id
     // directly.
     let captured: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     // Codex, Antigravity, and claude-over-ACP resume by the CLI-minted conversation
-    // id captured on a previous run; only pipe Claude uses the Kineloop session id.
+    // id captured on a previous run; only pipe Claude uses the Kine Agent session id.
     let (adapter_id, do_resume) = resume_target(&session_id, resume, external_thread_id.as_deref());
+    // Resolve this agent's BYOK auth choice into the concrete child-env operations each
+    // adapter applies at spawn. Only act when the user has EXPLICITLY chosen a mode: with
+    // no stored choice, `prompt.auth` stays the default no-op, inheriting the parent env
+    // unchanged (exactly the pre-BYOK behavior — so a user who authenticated their CLI via a
+    // shell-exported key isn't broken by the subscription-mode leak guard). Reading the mode
+    // or the keychain must never abort a run.
+    if let Some(mode_str) = store.get_agent_auth_mode(&agent).await.ok().flatten() {
+        let mode = crate::auth::AuthMode::from_wire(Some(&mode_str));
+        let auth_agent = agent.clone();
+        prompt.auth = tokio::task::spawn_blocking(move || crate::auth::resolve(&auth_agent, mode))
+            .await
+            .unwrap_or_default();
+    }
     // Cloned before `run_future` is built so the async block below captures its own owned
     // receiver by value; otherwise it would capture `cancel_rx` by reference (for `.clone()`)
     // and hold that borrow alive for the block's lifetime, conflicting with the `cancel_rx`
@@ -574,7 +587,7 @@ fn build_external_continuation_prompt(
             .join("\n\n"),
     );
     format!(
-        "You are continuing an imported CLI history session inside Kineloop.\n\
+        "You are continuing an imported CLI history session inside Kine Agent.\n\
          External session id: {external_session_id}\n\
          Original agent: {original_agent}\n\
          Continuation agent: {continuation_agent}\n\
@@ -600,11 +613,11 @@ fn original_agent_from_external_session_id(session_id: &str) -> Result<String, S
 
 /// Root under which NEW per-session worktrees are created (outside any target repo).
 ///
-/// Deliberately a **non-hidden** directory (`<home>/Kineloop/worktrees`): the Antigravity
+/// Deliberately a **non-hidden** directory (`<home>/KineAgent/worktrees`): the Antigravity
 /// CLI (`agy`) silently refuses to adopt a workspace whose path contains a dot-prefixed
 /// (hidden) component and falls back to its default `scratch` project, which breaks
-/// worktree isolation for antigravity sessions. The rest of Kineloop's data stays hidden
-/// under `~/.kineloop`; only worktrees — which are plain working copies of the user's
+/// worktree isolation for antigravity sessions. The rest of Kine Agent's data stays hidden
+/// under `~/.kine-agent`; only worktrees — which are plain working copies of the user's
 /// repos — must be visible. (Verified 2026-07-01 via `agy --print` smoke tests; claude and
 /// codex honor the process cwd regardless and are unaffected either way.)
 ///
@@ -614,41 +627,51 @@ fn original_agent_from_external_session_id(session_id: &str) -> Result<String, S
 fn worktrees_root() -> PathBuf {
     crate::agent_paths::home_dir()
         .unwrap_or_else(std::env::temp_dir)
-        .join("Kineloop")
+        .join("KineAgent")
         .join("worktrees")
 }
 
-/// Pre-relocation worktrees root (`<home>/.kineloop/worktrees`, hidden). Sessions created
-/// before worktrees moved to the visible [`worktrees_root`] still have their worktree here;
-/// resolution falls back to it so those sessions keep resuming, diffing, and cleaning up.
-fn legacy_worktrees_root() -> PathBuf {
-    crate::agent_paths::data_dir().join("worktrees")
+/// Pre-relocation worktrees roots, newest-first. The product was renamed twice, and the
+/// worktrees dir also moved from hidden to visible, so a pre-relocation session may live
+/// under any of: `<home>/Kineloop/worktrees` (previous visible name),
+/// `<home>/.kineloop/worktrees` or `<home>/.agent-editor/worktrees` (older hidden dirs).
+/// Resolution falls back through these so those sessions keep resuming, diffing, and
+/// cleaning up.
+fn legacy_worktrees_roots() -> Vec<PathBuf> {
+    let home = crate::agent_paths::home_dir().unwrap_or_else(std::env::temp_dir);
+    vec![
+        home.join("Kineloop").join("worktrees"),
+        home.join(".kineloop").join("worktrees"),
+        home.join(".agent-editor").join("worktrees"),
+    ]
 }
 
 /// Pick the root that actually holds `session_id`'s worktree: the visible root if its
-/// directory exists there, else the legacy hidden root, else the visible root (the case of
-/// a worktree about to be created). Resolution-only — `worktree::create` always targets the
-/// visible [`worktrees_root`]. Pure helper split out for testing.
-fn resolve_worktree_root(visible: PathBuf, legacy: PathBuf, session_id: &str) -> PathBuf {
+/// directory exists there, else the first legacy root that has it, else the visible root
+/// (the case of a worktree about to be created). Resolution-only — `worktree::create`
+/// always targets the visible [`worktrees_root`]. Pure helper split out for testing.
+fn resolve_worktree_root(visible: PathBuf, legacies: &[PathBuf], session_id: &str) -> PathBuf {
     if visible.join(session_id).exists() {
         return visible;
     }
-    if legacy.join(session_id).exists() {
-        return legacy;
+    for legacy in legacies {
+        if legacy.join(session_id).exists() {
+            return legacy.clone();
+        }
     }
     visible
 }
 
 /// The worktrees root holding `session_id`, preferring the visible root and falling back to
-/// the legacy hidden root for pre-relocation sessions. Feeds the `root` argument of the
+/// the legacy roots for pre-relocation sessions. Feeds the `root` argument of the
 /// resolution helpers (`worktree_for`, `worktree_resolve`, `inspect_scope`).
 fn worktree_root_for(session_id: &str) -> PathBuf {
-    resolve_worktree_root(worktrees_root(), legacy_worktrees_root(), session_id)
+    resolve_worktree_root(worktrees_root(), &legacy_worktrees_roots(), session_id)
 }
 
 /// [`worktree_root_for`] for the optional session id the inspect commands carry. A concrete
 /// (non-external, non-empty) id resolves per-session; `None`/empty/external ids have no
-/// Kineloop worktree, so the visible root is used (only its `.global-scope` sentinel matters
+/// Kine Agent worktree, so the visible root is used (only its `.global-scope` sentinel matters
 /// there).
 fn worktree_root_for_opt(session_id: Option<&str>) -> PathBuf {
     match session_id {
@@ -670,7 +693,7 @@ fn worktree_root_for_opt(session_id: Option<&str>) -> PathBuf {
 /// `ensure_scope_dir`.
 fn inspect_scope(root: &Path, session_id: Option<String>) -> Result<PathBuf, String> {
     match session_id.filter(|s| !s.is_empty()) {
-        // External (read-only CLI history) sessions have no Kineloop worktree — their
+        // External (read-only CLI history) sessions have no Kine Agent worktree — their
         // `external:` ids aren't valid worktree ids. Resolve to the session's real repo
         // so its `.claude` customizations surface; fall back to global scope when the
         // transcript recorded no usable repo path.
@@ -758,7 +781,7 @@ fn mcp_json_path(scope: &Path, source: &str) -> Result<PathBuf, String> {
 /// rejected so only the unified vocabulary crosses the boundary; adapters translate `full`
 /// to each CLI's real bypass flag. `full` is intentionally allowed (the UI gates it behind
 /// an explicit confirmation). Claude's `auto` classifier mode is not accepted: it aborts
-/// under headless `-p`, so Kineloop never offers it.
+/// under headless `-p`, so Kine Agent never offers it.
 fn validate_permission_mode(mode: Option<String>) -> Result<Option<String>, String> {
     match mode.as_deref() {
         None | Some("default") | Some("acceptEdits") | Some("plan") | Some("full")
@@ -767,7 +790,7 @@ fn validate_permission_mode(mode: Option<String>) -> Result<Option<String>, Stri
     }
 }
 
-/// Agents Kineloop can spawn. The frontend gates the picker, but the backend
+/// Agents Kine Agent can spawn. The frontend gates the picker, but the backend
 /// re-validates because the IPC boundary is untrusted.
 const SPAWNABLE_AGENTS: [&str; 3] = ["claude", "codex", "antigravity"];
 
@@ -1001,6 +1024,8 @@ async fn create_session_and_run(
             sandbox_terminal,
             approval: None,
             resume_transcript: None,
+            // Overwritten by run_persisting after resolving the agent's auth choice.
+            auth: Default::default(),
         },
         wt.path,
         cancel_rx,
@@ -1277,6 +1302,8 @@ pub async fn send_message(
             sandbox_terminal,
             approval: None,
             resume_transcript,
+            // Overwritten by run_persisting after resolving the agent's auth choice.
+            auth: Default::default(),
         },
         wt_path,
         cancel_rx,
@@ -1400,7 +1427,7 @@ pub async fn list_sessions(store: State<'_, SessionStore>) -> Result<Vec<Session
         .map_err(|e| e.to_string())?;
     sessions.extend(external);
     // Apply user-set title overrides (chiefly for external sessions, whose on-disk
-    // transcripts we never rewrite). Kineloop sessions are renamed in place, so they
+    // transcripts we never rewrite). Kine Agent sessions are renamed in place, so they
     // normally have no override; if one exists it still wins, which is harmless.
     let overrides = store.title_overrides().await.map_err(|e| e.to_string())?;
     if !overrides.is_empty() {
@@ -1429,7 +1456,7 @@ fn normalize_title(title: &str) -> Result<String, String> {
 }
 
 /// Rename a session. Trims and caps the title at 60 chars (mirroring `title_from_prompt`)
-/// and rejects empty titles. Kineloop sessions are renamed in place; external CLI sessions
+/// and rejects empty titles. Kine Agent sessions are renamed in place; external CLI sessions
 /// get a stored title override (their on-disk transcript is never modified). Returns the
 /// stored title so the frontend can display the canonical form.
 #[tauri::command]
@@ -1533,6 +1560,143 @@ fn worktree_resolve(
     session_id: &str,
 ) -> Result<std::path::PathBuf, review::ReviewError> {
     Ok(crate::worktree::worktree_for(root, session_id)?.path)
+}
+
+// ─── BYOK API-key auth ──────────────────────────────────────────────────────────
+//
+// The key itself lives ONLY in the OS keychain (auth.rs) and is never returned to the
+// WebView after it's saved. These commands expose the non-secret status (which mode,
+// whether a key exists) and the write paths (save/clear key, switch mode). Keychain
+// access is blocking, so it's offloaded via `spawn_blocking`.
+
+/// Non-secret auth status for one agent, surfaced to the Settings UI. Never carries the key.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentAuthStatus {
+    pub agent: String,
+    /// Whether this agent's CLI can authenticate with an API key at all (Antigravity can't).
+    pub supports_api_key: bool,
+    /// The persisted choice: `"subscription"` or `"apikey"`.
+    pub mode: String,
+    /// Whether a key is stored in the keychain (without exposing it).
+    pub has_key: bool,
+}
+
+/// Report an agent's auth status (mode + whether a key is stored). Never returns the key.
+#[tauri::command]
+pub async fn agent_auth_status(
+    agent: String,
+    store: State<'_, SessionStore>,
+) -> Result<AgentAuthStatus, String> {
+    let supports_api_key = crate::auth::supports_api_key(&agent);
+    // Agents with no key path are always subscription, regardless of any stale stored value.
+    let mode = if supports_api_key {
+        store
+            .get_agent_auth_mode(&agent)
+            .await
+            .map_err(|e| e.to_string())?
+            .unwrap_or_else(|| crate::auth::AuthMode::Subscription.as_str().to_string())
+    } else {
+        crate::auth::AuthMode::Subscription.as_str().to_string()
+    };
+    let has_key = if supports_api_key {
+        let a = agent.clone();
+        tokio::task::spawn_blocking(move || crate::auth::has_key(&a))
+            .await
+            .map_err(|e| e.to_string())??
+    } else {
+        false
+    };
+    Ok(AgentAuthStatus {
+        agent,
+        supports_api_key,
+        mode,
+        has_key,
+    })
+}
+
+/// Store an agent's API key in the OS keychain and switch it to API-key mode. The key
+/// crosses the IPC boundary once here (write-only) and is never read back to the WebView.
+#[tauri::command]
+pub async fn set_agent_api_key(
+    agent: String,
+    key: String,
+    store: State<'_, SessionStore>,
+) -> Result<(), String> {
+    if !crate::auth::supports_api_key(&agent) {
+        return Err(format!(
+            "{agent} does not support API-key authentication"
+        ));
+    }
+    let key = key.trim().to_string();
+    if key.is_empty() {
+        return Err("The API key is empty.".into());
+    }
+    // A sane upper bound: real keys are well under this; a huge value is a paste mistake.
+    if key.len() > 8192 {
+        return Err("That doesn't look like an API key (too long).".into());
+    }
+    let a = agent.clone();
+    tokio::task::spawn_blocking(move || crate::auth::store_key(&a, &key))
+        .await
+        .map_err(|e| e.to_string())??;
+    store
+        .set_agent_auth_mode(&agent, crate::auth::AuthMode::ApiKey.as_str())
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Delete an agent's stored API key and revert it to subscription mode.
+#[tauri::command]
+pub async fn clear_agent_api_key(
+    agent: String,
+    store: State<'_, SessionStore>,
+) -> Result<(), String> {
+    let a = agent.clone();
+    tokio::task::spawn_blocking(move || crate::auth::delete_key(&a))
+        .await
+        .map_err(|e| e.to_string())??;
+    store
+        .set_agent_auth_mode(&agent, crate::auth::AuthMode::Subscription.as_str())
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Switch an agent between subscription and API-key auth. API-key mode is refused unless
+/// the agent supports it AND a key is already stored — so the mode can never claim an
+/// API key that isn't there (which would silently fall back to the subscription login).
+#[tauri::command]
+pub async fn set_agent_auth_mode(
+    agent: String,
+    mode: String,
+    store: State<'_, SessionStore>,
+) -> Result<(), String> {
+    let mode = match mode.as_str() {
+        "subscription" => crate::auth::AuthMode::Subscription,
+        "apikey" => crate::auth::AuthMode::ApiKey,
+        other => return Err(format!("unknown auth mode: {other}")),
+    };
+    if mode == crate::auth::AuthMode::ApiKey {
+        if !crate::auth::supports_api_key(&agent) {
+            return Err(format!(
+                "{agent} does not support API-key authentication"
+            ));
+        }
+        let a = agent.clone();
+        let has_key = tokio::task::spawn_blocking(move || crate::auth::has_key(&a))
+            .await
+            .map_err(|e| e.to_string())??;
+        if !has_key {
+            return Err("Add an API key before switching to API-key mode.".into());
+        }
+    }
+    store
+        .set_agent_auth_mode(&agent, mode.as_str())
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// Probe PATH for each supported agent CLI (claude, codex, gemini) and return
@@ -2199,23 +2363,25 @@ mod tests {
         std::fs::create_dir_all(&visible).unwrap();
         std::fs::create_dir_all(&legacy).unwrap();
 
+        let legacies = [legacy.clone()];
+
         // Absent from both → visible root (the worktree is about to be created there).
         assert_eq!(
-            resolve_worktree_root(visible.clone(), legacy.clone(), "sess"),
+            resolve_worktree_root(visible.clone(), &legacies, "sess"),
             visible
         );
 
         // Present only under the legacy hidden root (a pre-relocation session).
         std::fs::create_dir_all(legacy.join("sess")).unwrap();
         assert_eq!(
-            resolve_worktree_root(visible.clone(), legacy.clone(), "sess"),
+            resolve_worktree_root(visible.clone(), &legacies, "sess"),
             legacy
         );
 
         // Present under both → the visible root wins.
         std::fs::create_dir_all(visible.join("sess")).unwrap();
         assert_eq!(
-            resolve_worktree_root(visible.clone(), legacy.clone(), "sess"),
+            resolve_worktree_root(visible.clone(), &legacies, "sess"),
             visible
         );
 

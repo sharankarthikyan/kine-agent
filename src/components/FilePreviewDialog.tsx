@@ -23,7 +23,7 @@ interface FilePreviewDialogProps {
 
 function displayPath(path: string): string {
   const normalized = path.replace(/\\/g, "/");
-  const match = normalized.match(/\/(?:\.(?:kineloop|agent-editor)|Kineloop)\/worktrees\/[^/]+\/(.+)$/);
+  const match = normalized.match(/\/(?:\.(?:kine-agent|kineloop|agent-editor)|KineAgent|Kineloop)\/worktrees\/[^/]+\/(.+)$/);
   return match ? match[1] : normalized;
 }
 

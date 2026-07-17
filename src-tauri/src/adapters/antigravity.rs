@@ -76,6 +76,9 @@ pub async fn spawn_and_stream(
     // agy ignores stdin is a clean "no prompt" exit, not a hang.
     let prompt_via_stdin = is_batch_shim(&program);
     let mut command = crate::proc::tokio_command(&program);
+    // Antigravity has no API-key path, so this only ever strips inherited key vars (a
+    // no-op for agy, which ignores them) — it stays on the user's Google login.
+    prompt.auth.apply(&mut command);
     command.arg("--print");
     if !prompt_via_stdin {
         command.arg(&prompt.text);
@@ -89,7 +92,7 @@ pub async fn spawn_and_stream(
     // `agy` silently refuses to adopt a hidden-path workspace and falls back to its default
     // `scratch` project, so unqualified edits would land outside the worktree, breaking
     // isolation. That's why `commands::worktrees_root` puts worktrees under a VISIBLE
-    // `~/Kineloop` rather than `~/.kineloop`. (Verified 2026-07-01 via `agy --print`.)
+    // `~/KineAgent` rather than `~/.kine-agent`. (Verified 2026-07-01 via `agy --print`.)
     command.arg("--add-dir").arg(&cwd);
     if let Some(m) = prompt.model.as_deref() {
         command.arg("--model").arg(m);
@@ -243,7 +246,7 @@ fn antigravity_auth_required_event() -> AgentEvent {
     AgentEvent::AuthRequired {
         agent: "antigravity".to_string(),
         command: "agy --prompt-interactive \"Sign in to Antigravity\"".to_string(),
-        message: "Antigravity is not signed in. Kineloop can open the real CLI login prompt, but the browser access code must be pasted into Antigravity's terminal prompt.".to_string(),
+        message: "Antigravity is not signed in. Kine Agent can open the real CLI login prompt, but the browser access code must be pasted into Antigravity's terminal prompt.".to_string(),
     }
 }
 

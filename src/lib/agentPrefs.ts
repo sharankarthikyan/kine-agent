@@ -1,6 +1,6 @@
 // Per-agent enablement preferences (frontend-only, like recents.ts / acpNotice.ts).
 //
-// Kineloop drives each vendor's official CLI under the user's OWN subscription
+// Kine Agent drives each vendor's official CLI under the user's OWN subscription
 // login. For OpenAI Codex that is an officially supported, scriptable path; for
 // Claude Code and Antigravity, driving a CONSUMER subscription non-interactively
 // through a third-party wrapper may breach the vendor's terms and, in rare cases,
@@ -11,7 +11,7 @@
 // which agents are spawnable. Disabling an agent only governs starting NEW sessions
 // with it — sessions already running keep working (a disable is never a kill switch).
 
-/** How risky it is to drive this agent under a consumer subscription via Kineloop. */
+/** How risky it is to drive this agent under a consumer subscription via Kine Agent. */
 export type AgentRisk = "compliant" | "warn" | "high";
 
 export interface AgentMeta {
@@ -49,7 +49,7 @@ export const AGENT_META: AgentMeta[] = [
     installDocsUrl: "https://code.claude.com/docs/en/setup",
     consent: {
       title: "Before you enable Claude Code",
-      body: "Kineloop drives Claude Code non-interactively. Under a consumer Claude subscription (Pro/Max), that may violate Anthropic's terms and, in rare cases, affect your account. Codex has no such restriction. Enable only if you accept that risk for your own account.",
+      body: "Anthropic's Consumer Terms only cover automated access to Claude through an official API key. Using your Pro/Max subscription login here relies on OAuth, which those terms don't cover for third-party tools like Kine Agent — Anthropic has begun enforcing this, so it could affect your account. Switching to the API key option keeps you on the supported path. You can still use your subscription login if you accept that risk.",
     },
   },
   {
@@ -60,7 +60,7 @@ export const AGENT_META: AgentMeta[] = [
     installDocsUrl: "https://antigravity.google/docs/cli-install",
     consent: {
       title: "Before you enable Antigravity",
-      body: "Kineloop drives Antigravity non-interactively. Under a consumer Google/Antigravity subscription, that may violate Google's terms — Google enforces this actively and can suspend a subscriber's access. Enable only if you accept that risk for your own account.",
+      body: "Antigravity signs in with your Google account. Google's terms don't cover automated use through third-party tools like Kine Agent, and Google has enforced this — it could affect your access. Antigravity's CLI has no API-key alternative, so enable it only if you accept that risk for your own account.",
     },
   },
 ];
@@ -70,7 +70,10 @@ export function agentMeta(id: string): AgentMeta | undefined {
   return AGENT_META.find((m) => m.id === id);
 }
 
-const STORAGE_KEY = "kineloop.agentPrefs";
+const STORAGE_KEY = "kine-agent.agentPrefs";
+// Pre-rename storage key. Read as a fallback so an existing user's agent enable/acknowledge
+// choices survive the rename; the next write lands under the new key.
+const LEGACY_STORAGE_KEY = "kineloop.agentPrefs";
 
 // Agents enabled on a fresh install. Only Codex — everything else, including any
 // future agent not yet in a stored prefs blob, defaults OFF until the user opts in.
@@ -98,7 +101,7 @@ export function readAgentPrefs(
 ): AgentPrefs {
   const prefs: AgentPrefs = { enabled: {}, acknowledged: {} };
   try {
-    const raw = storage.getItem(STORAGE_KEY);
+    const raw = storage.getItem(STORAGE_KEY) ?? storage.getItem(LEGACY_STORAGE_KEY);
     if (!raw) return prefs;
     const parsed: unknown = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object") return prefs;

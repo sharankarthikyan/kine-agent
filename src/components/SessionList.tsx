@@ -31,7 +31,7 @@ import { AgentLogo } from "./AgentLogo";
 /** Sidebar filter on session status. `"all"` disables the status filter. */
 export type StatusFilter = "all" | SessionStatus;
 /** Sidebar filter on session origin. `"all"` disables the source filter. */
-export type SourceFilter = "all" | "kineloop" | "external";
+export type SourceFilter = "all" | "kine-agent" | "external";
 
 interface SessionListProps {
   groups: { workspace: string; sessions: SessionSummary[] }[];
@@ -46,7 +46,7 @@ interface SessionListProps {
   onStatusFilterChange: (f: StatusFilter) => void;
   onSourceFilterChange: (f: SourceFilter) => void;
   onOpenCustomization: (section: CustomizationSection) => void;
-  /** Persist a new title for a session. Only called for editable (Kineloop) sessions. */
+  /** Persist a new title for a session. Only called for editable (Kine Agent) sessions. */
   onRename: (id: string, title: string) => void;
 }
 
@@ -232,7 +232,7 @@ export function SessionList({
                 onValueChange={(v) => onSourceFilterChange(v as SourceFilter)}
               >
                 <DropdownMenuRadioItem value="all">All</DropdownMenuRadioItem>
-                <DropdownMenuRadioItem value="kineloop">Kineloop</DropdownMenuRadioItem>
+                <DropdownMenuRadioItem value="kine-agent">Kine Agent</DropdownMenuRadioItem>
                 <DropdownMenuRadioItem value="external">CLI history</DropdownMenuRadioItem>
               </DropdownMenuRadioGroup>
             </DropdownMenuContent>
@@ -338,7 +338,7 @@ export function SessionList({
                     const active = session.id === activeId;
                     const config = STATUS_CONFIG[session.status] ?? FALLBACK_CONFIG;
                     // Activity meta (turns · tools · files) is rendered the same way for
-                    // Kineloop and external CLI sessions — both carry these counts now.
+                    // Kine Agent and external CLI sessions — both carry these counts now.
                     const metaParts = [
                       session.turnCount !== null ? `${session.turnCount}t` : null,
                       session.toolCallCount !== null ? `${session.toolCallCount} tools` : null,
@@ -352,7 +352,7 @@ export function SessionList({
                     const fullTime = relativeTime(session.updatedAt, now);
                     const shortTime = compactRelativeTime(session.updatedAt, now);
                     // Fallback when a session reports no counts at all: external history
-                    // reads "CLI history"; a countless Kineloop row shows only its time.
+                    // reads "CLI history"; a countless Kine Agent row shows only its time.
                     const metaLabel =
                       metaParts.length > 0
                         ? metaParts.join(" · ")
@@ -368,7 +368,7 @@ export function SessionList({
                     const secondaryTitle = fullMetaLabel
                       ? `${fullMetaLabel} · ${fullTime}`
                       : fullTime;
-                    // Every session is renameable: Kineloop rows update their DB title in
+                    // Every session is renameable: Kine Agent rows update their DB title in
                     // place; external CLI rows get a stored title override (their on-disk
                     // transcript is never touched).
                     const editable = true;

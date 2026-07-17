@@ -6,7 +6,7 @@ use std::process::Stdio;
 use std::sync::mpsc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// An agent CLI that Kineloop can drive, with an `installed` flag
+/// An agent CLI that Kine Agent can drive, with an `installed` flag
 /// indicating whether the binary is reachable on PATH.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -18,7 +18,7 @@ pub struct AgentInfo {
 
 /// A single model entry offered to the user in the model selector.
 ///
-/// `value` is forwarded verbatim to `--model` on the CLI. Kineloop drives the
+/// `value` is forwarded verbatim to `--model` on the CLI. Kine Agent drives the
 /// Claude CLI under the user's subscription auth (never an API key), so the
 /// values are the CLI's family aliases (`opus`, `sonnet`, `haiku`). Each alias
 /// always resolves to the latest released version of that family, so the list
@@ -62,7 +62,7 @@ pub fn detect_agents() -> Vec<AgentInfo> {
     .collect()
 }
 
-/// The Claude family aliases Kineloop offers, paired with their bare
+/// The Claude family aliases Kine Agent offers, paired with their bare
 /// (unresolved) display labels. Ordered opus-first so the frontend can use
 /// index 0 as the default.
 const CLAUDE_ALIASES: [(&str, &str); 3] = [

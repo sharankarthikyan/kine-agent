@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024" role="img" aria-label="Kineloop logo">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024" role="img" aria-label="Kine Agent logo">
   <rect x="64" y="64" width="896" height="896" rx="225" fill="#09090b" stroke="#27272a" stroke-width="2"/>
   <g fill="none" stroke="#ffffff" stroke-width="76" stroke-linecap="round" stroke-linejoin="round">
     <path d="M 444 318 C 394 268 348 230 286 230 C 202 230 152 310 152 414 L 152 650 C 152 754 204 822 292 822 C 356 822 404 790 450 740 L 704 462"/>

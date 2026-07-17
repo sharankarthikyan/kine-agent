@@ -10,14 +10,14 @@ export interface SessionSummary {
   branch: string;
   title: string;
   status: SessionStatus;
-  source: "kineloop" | "external";
+  source: "kine-agent" | "external";
   turnCount: number | null;
   toolCallCount: number | null;
   fileActionCount: number | null;
   /**
    * The unified permission mode last used for this session, or null before any run
    * recorded one (and always null for external CLI-history sessions). Optional so test
-   * fixtures needn't set it; the backend always sends it for Kineloop sessions.
+   * fixtures needn't set it; the backend always sends it for Kine Agent sessions.
    */
   permissionMode?: string | null;
   /** Antigravity terminal-sandbox toggle last used. Absent ⇒ false. */
@@ -50,7 +50,7 @@ export async function listSessions(): Promise<SessionSummary[]> {
 
 /**
  * Rename a session. The backend trims and caps the title at 60 chars and returns the
- * canonical stored form; empty titles are rejected. Kineloop sessions are renamed in
+ * canonical stored form; empty titles are rejected. Kine Agent sessions are renamed in
  * place; external CLI-history sessions get a stored title override (their on-disk
  * transcript is never modified), so both kinds are renameable.
  */

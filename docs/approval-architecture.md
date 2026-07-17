@@ -1,6 +1,6 @@
 # Tool-approval architecture
 
-Unified, agent-agnostic manual approval: when an agent wants to run a gated tool, Kineloop
+Unified, agent-agnostic manual approval: when an agent wants to run a gated tool, Kine Agent
 surfaces Approve/Deny in the UI and blocks the tool until the user answers.
 
 ## Why a shared core (not a per-agent hack)
@@ -13,7 +13,7 @@ The three CLIs diverge sharply on what they expose (verified against each CLI, n
 | **codex** | `codex exec --json` | No. `codex exec` has no interactive-approval flag at all |
 | **antigravity** | `agy --print` | No. Gated actions stall to `--print-timeout`, then continue |
 
-Because only Claude can be wired today, the unification has to live at Kineloop's layer, not
+Because only Claude can be wired today, the unification has to live at Kine Agent's layer, not
 the CLI's. The approval flow is therefore an agent-neutral core that every adapter reaches the
 same way. Codex and Antigravity attach to the identical core the moment their CLIs expose a
 gate, with zero UI or IPC changes.
@@ -45,8 +45,8 @@ tool-call volume. The mechanism is swappable behind the core, so hooks remain a 
 
 Flow:
 
-1. Launch Claude with `--permission-prompt-tool mcp__kineloop__approve`, an `--mcp-config` that
-   registers a Kineloop-hosted stdio MCP server, and `--strict-mcp-config` so only our server
+1. Launch Claude with `--permission-prompt-tool mcp__kine_agent__approve`, an `--mcp-config` that
+   registers a Kine Agent-hosted stdio MCP server, and `--strict-mcp-config` so only our server
    loads (`permission_prompt_tool()` + `mcp_config_json()` in `approval/mcp.rs`).
 2. Claude spawns the server and, before each gated tool call, invokes `approve` with
    `{ tool_name, input }`.
@@ -64,7 +64,7 @@ Flow:
   decide)` drives initialize / tools/list / tools/call / ping / notifications over
   newline-delimited JSON-RPC, generic over an async `decide` closure. 4 tests with in-memory IO.
 
-### Transport hosting (built + tested on the Kineloop side)
+### Transport hosting (built + tested on the Kine Agent side)
 
 The whole bridge is now wired; only the live Claude handshake is unverified:
 
@@ -80,7 +80,7 @@ The whole bridge is now wired; only the live Claude handshake is unverified:
   A Claude run in "Ask before edits" (`default`) mode attaches the bridge; "Auto-edit" and
   "Full access" are deliberate "don't ask" choices and don't. Sets the launch flags on `Prompt`,
   registers the session emitter, runs `serve` concurrently in the run's `select!` (torn down when
-  the run ends), and cleans up the socket. Unix only. The `KINELOOP_APPROVAL` env var is a
+  the run ends), and cleans up the socket. Unix only. The `KINE_AGENT_APPROVAL` env var is a
   temporary SAFETY SWITCH (not product UX) kept until the live handshake is verified; once
   verified, drop the env check so the permission mode alone drives it.
 - **Claude adapter** (`adapters/claude.rs`): adds `--permission-prompt-tool` + `--mcp-config`
@@ -90,7 +90,7 @@ Only unverified: whether Claude spawns the server, calls `approve`, blocks, and 
 decision under `-p` (needs a live login). The exact tool-result envelope is isolated in
 `tool_call_result` / `permission_tool_response` — a one-line change if the live run differs.
 
-### Verification checklist (live env, `KINELOOP_APPROVAL=1`)
+### Verification checklist (live env, `KINE_AGENT_APPROVAL=1`)
 
 - [ ] `claude -p --permission-prompt-tool ... --mcp-config ... --strict-mcp-config` spawns the server and calls `approve` before a gated action.
 - [ ] The tool call blocks Claude until the handler returns.

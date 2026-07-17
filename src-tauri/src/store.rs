@@ -37,7 +37,7 @@ pub struct SessionSummary {
     pub title: String,
     /// "running" | "idle" | "error".
     pub status: String,
-    /// "kineloop" for app-created worktree sessions, "external" for CLI history.
+    /// "kine-agent" for app-created worktree sessions, "external" for CLI history.
     pub source: String,
     /// User turns found in the session transcript, when known.
     pub turn_count: Option<u32>,
@@ -47,14 +47,14 @@ pub struct SessionSummary {
     pub file_action_count: Option<u32>,
     /// The unified permission mode last used for this session (`default`/`acceptEdits`/
     /// `plan`/`full`/`dontAsk`/`auto`), or `None` before any run recorded one. Always
-    /// `None` for external CLI-history sessions (Kineloop doesn't own their runs).
+    /// `None` for external CLI-history sessions (Kine Agent doesn't own their runs).
     pub permission_mode: Option<String>,
     /// Antigravity terminal-sandbox toggle last used for this session. Always false for
     /// external sessions and non-Antigravity agents.
     pub sandbox_terminal: bool,
     /// Streaming engine the session runs on ("pipe" | "acp"). The UI uses it to show
     /// an honest model display (ACP runs the CLI-default model). Always "pipe" for
-    /// external CLI-history sessions (Kineloop doesn't run them).
+    /// external CLI-history sessions (Kine Agent doesn't run them).
     pub engine: String,
     pub created_at: i64,
     pub updated_at: i64,
@@ -207,6 +207,43 @@ impl SessionStore {
                 return Err(e.into());
             }
         }
+        // Per-agent auth mode for BYOK API keys ("subscription" | "apikey"). Only the
+        // NON-secret choice lives here; the key itself is in the OS keychain (see auth.rs),
+        // never in this database. Absent row ⇒ subscription (the default).
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS agent_auth (
+                agent TEXT PRIMARY KEY,
+                mode TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// The persisted auth mode for an agent (`"subscription"` | `"apikey"`), or `None`
+    /// when the user has never chosen one (⇒ subscription default). Only the mode is
+    /// stored here — never the key, which lives in the OS keychain.
+    pub async fn get_agent_auth_mode(&self, agent: &str) -> Result<Option<String>, StoreError> {
+        let mode = sqlx::query_scalar::<_, String>("SELECT mode FROM agent_auth WHERE agent = ?")
+            .bind(agent)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(mode)
+    }
+
+    /// Persist an agent's auth mode (upsert). Stores only the non-secret choice.
+    pub async fn set_agent_auth_mode(&self, agent: &str, mode: &str) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO agent_auth (agent, mode, updated_at) VALUES (?, ?, ?)
+             ON CONFLICT(agent) DO UPDATE SET mode = excluded.mode, updated_at = excluded.updated_at",
+        )
+        .bind(agent)
+        .bind(mode)
+        .bind(now_ms())
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -318,7 +355,7 @@ impl SessionStore {
     }
 
     /// Rename a session and bump `updated_at`. Affects only the given row; returns the
-    /// number of rows changed so callers can tell a missing/non-Kineloop id from a hit.
+    /// number of rows changed so callers can tell a missing/non-Kine-Agent id from a hit.
     pub async fn set_title(&self, id: &str, title: &str) -> Result<u64, StoreError> {
         let result = sqlx::query("UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?")
             .bind(title)
@@ -370,7 +407,7 @@ impl SessionStore {
         Ok(())
     }
 
-    /// Permanently delete a Kineloop session: its row, all of its events, and any title
+    /// Permanently delete a Kine Agent session: its row, all of its events, and any title
     /// override — in one transaction so a torn-down session never leaves orphan rows.
     /// Used by `cleanup_session`. Returns the number of session rows removed (0 when the
     /// id was unknown).
@@ -470,7 +507,7 @@ impl SessionStore {
         .await?;
 
         // One grouped pass over the events table yields per-session activity counts so
-        // Kineloop rows read the same way as external CLI history (turns · tools · files):
+        // Kine Agent rows read the same way as external CLI history (turns · tools · files):
         //   - turns: `prompt` events (user turn boundaries)
         //   - tools: `toolCall` events
         //   - files: distinct `fileWrite` payloads. The FileWrite payload is always
@@ -498,7 +535,7 @@ impl SessionStore {
             .iter()
             .map(|r| {
                 let id: String = r.get("id");
-                // Every Kineloop session reports counts (0 when it has no events yet) so
+                // Every Kine Agent session reports counts (0 when it has no events yet) so
                 // the sidebar meta line is consistent with external CLI sessions.
                 let (turns, tools, files) = counts.get(&id).copied().unwrap_or((0, 0, 0));
                 SessionSummary {
@@ -507,7 +544,7 @@ impl SessionStore {
                     branch: r.get("branch"),
                     title: r.get("title"),
                     status: r.get("status"),
-                    source: "kineloop".to_string(),
+                    source: "kine-agent".to_string(),
                     turn_count: Some(turns as u32),
                     tool_call_count: Some(tools as u32),
                     file_action_count: Some(files as u32),
@@ -586,11 +623,11 @@ impl SessionStore {
     }
 }
 
-/// Default on-disk DB location: `<home>/.kineloop/kineloop.db` (mirrors the worktrees
+/// Default on-disk DB location: `<home>/.kine-agent/kine-agent.db` (mirrors the worktrees
 /// root). Falls back to the temp dir only if the home dir is unavailable. The legacy
 /// `~/.agent-editor/agent-editor.db` is migrated to this path at startup.
 pub fn default_db_path() -> PathBuf {
-    crate::agent_paths::data_dir().join("kineloop.db")
+    crate::agent_paths::data_dir().join("kine-agent.db")
 }
 
 /// Split an AgentEvent into its persisted (kind, payload_json) — payload is the `data`
@@ -842,7 +879,7 @@ mod tests {
             .unwrap();
         let sessions = store.list_sessions().await.unwrap();
         let s1 = sessions.iter().find(|s| s.id == "s1").unwrap();
-        // Fresh Kineloop sessions report 0 (not null) so the sidebar stays consistent
+        // Fresh Kine Agent sessions report 0 (not null) so the sidebar stays consistent
         // with external CLI rows, which always carry counts.
         assert_eq!(s1.turn_count, Some(0));
         assert_eq!(s1.tool_call_count, Some(0));

@@ -1,6 +1,6 @@
 //! Process-spawn constructors that keep child consoles off-screen on Windows.
 //!
-//! Kineloop's release binary is a GUI-subsystem app (`windows_subsystem = "windows"`
+//! Kine Agent's release binary is a GUI-subsystem app (`windows_subsystem = "windows"`
 //! in main.rs), so it owns no console. On Windows, every console-subsystem child —
 //! git, `claude.cmd` → cmd.exe → node, codex, agy, npx — then allocates its OWN
 //! console, i.e. a visible terminal window flashing on app open (model discovery)
@@ -80,23 +80,23 @@ mod tests {
     #[test]
     fn hidden_std_command_spawns_with_piped_io() {
         let out = super::std_command("cmd")
-            .args(["/C", "echo kineloop-hidden"])
+            .args(["/C", "echo kine-agent-hidden"])
             .output()
             .expect("spawn cmd");
         assert!(out.status.success());
-        assert!(String::from_utf8_lossy(&out.stdout).contains("kineloop-hidden"));
+        assert!(String::from_utf8_lossy(&out.stdout).contains("kine-agent-hidden"));
     }
 
     #[cfg(windows)]
     #[tokio::test]
     async fn hidden_tokio_command_spawns_with_piped_io() {
         let out = super::tokio_command("cmd")
-            .args(["/C", "echo kineloop-hidden"])
+            .args(["/C", "echo kine-agent-hidden"])
             .output()
             .await
             .expect("spawn cmd");
         assert!(out.status.success());
-        assert!(String::from_utf8_lossy(&out.stdout).contains("kineloop-hidden"));
+        assert!(String::from_utf8_lossy(&out.stdout).contains("kine-agent-hidden"));
     }
 
     /// Regression guard for the Windows console-flash bug: a naked `Command::new`

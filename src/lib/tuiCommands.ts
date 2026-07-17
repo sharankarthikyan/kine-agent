@@ -2,7 +2,7 @@
  * Claude Code built-in commands that only work in the interactive terminal UI —
  * they open a screen/picker or manage the interactive session/account, so a
  * headless `claude -p` spawn rejects them ("/status isn't available in this
- * environment"). Kineloop intercepts these before spawning and shows a hint
+ * environment"). Kine Agent intercepts these before spawning and shows a hint
  * instead of burning a session on a guaranteed refusal.
  *
  * Deliberately conservative: commands that print text headless (/usage, /cost,

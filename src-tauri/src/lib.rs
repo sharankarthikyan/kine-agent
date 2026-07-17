@@ -3,6 +3,7 @@ pub mod adapter;
 pub mod adapters;
 pub mod agent_paths;
 pub mod approval;
+pub mod auth;
 mod commands;
 pub mod events;
 pub mod external_sessions;
@@ -26,7 +27,7 @@ const MENU_CHECK_UPDATES_EVENT: &str = "menu://check-for-updates";
 const MENU_CHECK_UPDATES_ID: &str = "check-for-updates";
 
 /// Add a "Check for Updates…" item to the native menu. On macOS it goes into the
-/// app menu (the "Kineloop" submenu, right under About, per platform convention);
+/// app menu (the "Kine Agent" submenu, right under About, per platform convention);
 /// on Windows/Linux it's appended to the last submenu (Help). Clicking it emits
 /// `MENU_CHECK_UPDATES_EVENT` to the frontend — see the builder's on_menu_event.
 fn install_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
@@ -41,7 +42,7 @@ fn install_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
     let items = menu.items()?;
     #[cfg(target_os = "macos")]
     if let Some(MenuItemKind::Submenu(app_menu)) = items.first() {
-        // Index 1 = just below "About Kineloop".
+        // Index 1 = just below "About Kine Agent".
         app_menu.insert(&check, 1)?;
     }
     #[cfg(not(target_os = "macos"))]
@@ -59,7 +60,7 @@ pub fn run() {
     // Adopt the user's login-shell PATH before anything resolves or spawns a CLI.
     agent_paths::adopt_login_shell_path();
 
-    // Migrate the pre-rename data dir (~/.agent-editor → ~/.kineloop) before anything
+    // Migrate the pre-rename data dir (~/.agent-editor or ~/.kineloop → ~/.kine-agent) before anything
     // touches the store, so existing sessions and worktrees carry over.
     agent_paths::migrate_legacy_data_dir();
 
@@ -94,10 +95,10 @@ pub fn run() {
                 Err(e) => {
                     app.dialog()
                         .message(format!(
-                            "Kineloop couldn't open its local data store in ~/.kineloop.\n\n{e}\n\nThe database may be corrupt or the disk full or read-only. Kineloop will now close."
+                            "Kine Agent couldn't open its local data store in ~/.kine-agent.\n\n{e}\n\nThe database may be corrupt or the disk full or read-only. Kine Agent will now close."
                         ))
                         .kind(MessageDialogKind::Error)
-                        .title("Kineloop can't start")
+                        .title("Kine Agent can't start")
                         .blocking_show();
                     std::process::exit(1);
                 }
@@ -137,6 +138,10 @@ pub fn run() {
             commands::session_events,
             commands::session_events_page,
             commands::detect_agents,
+            commands::agent_auth_status,
+            commands::set_agent_api_key,
+            commands::clear_agent_api_key,
+            commands::set_agent_auth_mode,
             commands::list_models,
             commands::refresh_models,
             commands::node_available,

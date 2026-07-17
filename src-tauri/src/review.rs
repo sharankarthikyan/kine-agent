@@ -7,7 +7,7 @@ use std::process::{Command, Stdio};
 const PATCH_CAP_BYTES: usize = 2 * 1024 * 1024;
 const UNTRACKED_FILE_CAP_BYTES: u64 = 512 * 1024;
 const PATCH_TRUNCATED_MARKER: &str =
-    "\n\ndiff --git a/.kineloop-truncated b/.kineloop-truncated\n--- a/.kineloop-truncated\n+++ b/.kineloop-truncated\n@@ -0,0 +1 @@\n+Patch truncated by Kineloop because it exceeded 2 MiB.\n";
+    "\n\ndiff --git a/.kine-agent-truncated b/.kine-agent-truncated\n--- a/.kine-agent-truncated\n+++ b/.kine-agent-truncated\n@@ -0,0 +1 @@\n+Patch truncated by Kine Agent because it exceeded 2 MiB.\n";
 
 /// How a file changed in a session worktree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -323,7 +323,7 @@ fn truncate_patch(mut patch: String) -> String {
 }
 
 fn patch_was_truncated(patch: &str) -> bool {
-    patch.contains("diff --git a/.kineloop-truncated b/.kineloop-truncated")
+    patch.contains("diff --git a/.kine-agent-truncated b/.kine-agent-truncated")
 }
 
 /// Reconstruct the destination path from a `git diff --numstat` path field.

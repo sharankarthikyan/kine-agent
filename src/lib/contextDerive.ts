@@ -280,7 +280,7 @@ export function contextFootprintFromSources(input: ContextFootprintInput): Conte
   }
 
   add("user", "User messages", estimateTokens(userText), "Visible prompts in this session");
-  add("agent", "Agent output", estimateTokens(agentText), "Visible assistant text stored by Kineloop");
+  add("agent", "Agent output", estimateTokens(agentText), "Visible assistant text stored by Kine Agent");
   add("tools", "Tool calls", estimateTokens(toolText), "Tool names and arguments stored in the transcript");
 
   const ruleTokens = input.rules
@@ -299,7 +299,7 @@ export function contextFootprintFromSources(input: ContextFootprintInput): Conte
   );
   add("files", "Files referenced", fileTokens, `${input.files.length} paths observed`);
 
-  // Reconcile with the measured window load: everything Kineloop cannot see
+  // Reconcile with the measured window load: everything Kine Agent cannot see
   // (the CLI's system prompt, tool schemas, injected context) goes into one
   // explicit bucket so the estimate and the telemetry never look contradictory.
   const estimatedTotal = items.reduce((sum, item) => sum + item.tokens, 0);
@@ -308,7 +308,7 @@ export function contextFootprintFromSources(input: ContextFootprintInput): Conte
     "unattributed",
     "System & unobserved",
     measured - estimatedTotal,
-    "CLI system prompt, tool schemas, and context not visible to Kineloop",
+    "CLI system prompt, tool schemas, and context not visible to Kine Agent",
   );
 
   return {

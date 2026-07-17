@@ -1,5 +1,5 @@
-use kineloop_lib::review::{diff, diff_from_base, ChangeStatus};
-use kineloop_lib::worktree::create;
+use kine_agent_lib::review::{diff, diff_from_base, ChangeStatus};
+use kine_agent_lib::worktree::create;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -165,7 +165,7 @@ fn diff_from_base_includes_committed_branch_changes_and_truncates_patch() {
     assert!(d.files.iter().any(|file| file.path == "huge.txt"));
     assert!(d
         .patch
-        .contains("Patch truncated by Kineloop because it exceeded 2 MiB."));
+        .contains("Patch truncated by Kine Agent because it exceeded 2 MiB."));
     assert!(d.patch.len() < 2 * 1024 * 1024 + 512);
 
     std::fs::remove_dir_all(&root).ok();

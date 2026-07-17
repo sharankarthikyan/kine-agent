@@ -1,7 +1,7 @@
 //! The Claude `--permission-prompt-tool` MCP bridge.
 //!
-//! Claude launches with `--permission-prompt-tool mcp__kineloop__approve`, a `--mcp-config`
-//! that points at a Kineloop-hosted stdio MCP server, and `--strict-mcp-config` so only our
+//! Claude launches with `--permission-prompt-tool mcp__kine_agent__approve`, a `--mcp-config`
+//! that points at a Kine Agent-hosted stdio MCP server, and `--strict-mcp-config` so only our
 //! server loads. Before each gated tool call Claude invokes the `approve` tool with the tool
 //! name + input; the handler registers an [`super::ApprovalRegistry`] request, emits
 //! `AgentEvent::ApprovalNeeded` into that session's stream, awaits the user's decision, and
@@ -27,8 +27,8 @@ use serde_json::{json, Value};
 
 use super::ApprovalDecision;
 
-/// The MCP server name Kineloop registers under `--mcp-config`.
-pub const SERVER_NAME: &str = "kineloop";
+/// The MCP server name Kine Agent registers under `--mcp-config`.
+pub const SERVER_NAME: &str = "kine_agent";
 /// The permission tool exposed by that server.
 pub const TOOL_NAME: &str = "approve";
 /// The MCP protocol version we speak if the client doesn't pin one.
@@ -40,7 +40,7 @@ pub fn permission_prompt_tool() -> String {
 }
 
 /// Build the inline `--mcp-config` JSON that registers our stdio server. Claude spawns
-/// `program args...` (the Kineloop binary in approval-server mode) and speaks MCP over its
+/// `program args...` (the Kine Agent binary in approval-server mode) and speaks MCP over its
 /// stdio. Pair with `--strict-mcp-config` so the user's other MCP servers don't load.
 pub fn mcp_config_json(program: &str, args: &[String]) -> String {
     json!({
@@ -86,7 +86,7 @@ pub fn describe(tool_name: &str, input: &Value) -> String {
 ///   - allow: `{ "behavior": "allow", "updatedInput": <input> }`
 ///   - deny:  `{ "behavior": "deny", "message": <reason> }`
 ///
-/// On allow we echo the original input unchanged (Kineloop approves as-is; it does not
+/// On allow we echo the original input unchanged (Kine Agent approves as-is; it does not
 /// rewrite tool arguments). On deny we fall back to a generic reason when none was given.
 pub fn permission_tool_response(decision: &ApprovalDecision, original_input: &Value) -> Value {
     if decision.allow {
@@ -130,7 +130,7 @@ pub fn tools_list_result(id: &Value) -> Value {
         "result": {
             "tools": [{
                 "name": TOOL_NAME,
-                "description": "Ask the Kineloop user to approve or deny a tool call.",
+                "description": "Ask the Kine Agent user to approve or deny a tool call.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -196,15 +196,15 @@ mod tests {
 
     #[test]
     fn permission_prompt_tool_uses_the_mcp_naming_scheme() {
-        assert_eq!(permission_prompt_tool(), "mcp__kineloop__approve");
+        assert_eq!(permission_prompt_tool(), "mcp__kine_agent__approve");
     }
 
     #[test]
     fn mcp_config_registers_a_stdio_server() {
-        let cfg = mcp_config_json("/usr/bin/kineloop", &["--approval-server".to_string()]);
+        let cfg = mcp_config_json("/usr/bin/kine-agent", &["--approval-server".to_string()]);
         let v: Value = serde_json::from_str(&cfg).unwrap();
-        assert_eq!(v["mcpServers"]["kineloop"]["command"], "/usr/bin/kineloop");
-        assert_eq!(v["mcpServers"]["kineloop"]["args"][0], "--approval-server");
+        assert_eq!(v["mcpServers"]["kine_agent"]["command"], "/usr/bin/kine-agent");
+        assert_eq!(v["mcpServers"]["kine_agent"]["args"][0], "--approval-server");
     }
 
     #[test]
@@ -241,7 +241,7 @@ mod tests {
         let resp = handle_initialize(&json!(1), &json!({ "protocolVersion": "2025-03-26" }));
         assert_eq!(resp["result"]["protocolVersion"], "2025-03-26");
         assert!(resp["result"]["capabilities"]["tools"].is_object());
-        assert_eq!(resp["result"]["serverInfo"]["name"], "kineloop");
+        assert_eq!(resp["result"]["serverInfo"]["name"], "kine_agent");
     }
 
     #[test]

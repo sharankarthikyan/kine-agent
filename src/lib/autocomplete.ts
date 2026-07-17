@@ -241,7 +241,7 @@ export function acpCommandsToSuggestions(
 
 /**
  * Build `@agent-<name>` suggestions from a session's subagents. Offered only for Claude (the
- * only agent whose subagents Kineloop can enumerate); on send the token is expanded to a
+ * only agent whose subagents Kine Agent can enumerate); on send the token is expanded to a
  * natural-language nudge, since the raw `@agent-` token is cosmetic in headless mode.
  */
 export function agentsToSuggestions(caps: Capabilities): Suggestion[] {

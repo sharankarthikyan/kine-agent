@@ -276,7 +276,7 @@ fn collect_jsonl_inner(agent: &'static str, dir: &Path, depth: usize, out: &mut 
 ///
 /// Deliberately does NOT reject large files: an active Claude/Codex session can be tens
 /// of MB (and grows while running). Parsing streams JSONL line-by-line so large sessions
-/// are not hidden or artificially truncated by Kineloop.
+/// are not hidden or artificially truncated by Kine Agent.
 fn readable_session_file(path: &Path) -> bool {
     fs::metadata(path).map(|m| m.is_file()).unwrap_or(false)
 }
@@ -361,7 +361,7 @@ fn summarize_claude(path: &Path) -> Option<SessionSummary> {
         return None;
     }
     let repo = repo.unwrap_or_else(|| "Claude CLI".to_string());
-    if is_kineloop_worktree(&repo) {
+    if is_kine_agent_worktree(&repo) {
         return None;
     }
     let updated_at = modified_ms(path);
@@ -373,10 +373,10 @@ fn summarize_claude(path: &Path) -> Option<SessionSummary> {
         title: title.unwrap_or_else(|| "Claude CLI session".to_string()),
         status: "idle".to_string(),
         source: "external".to_string(),
-        // Kineloop doesn't own external runs, so it has no permission setting for them.
+        // Kine Agent doesn't own external runs, so it has no permission setting for them.
         permission_mode: None,
         sandbox_terminal: false,
-        // External CLI history is never run by Kineloop — report the pipe default.
+        // External CLI history is never run by Kine Agent — report the pipe default.
         engine: ENGINE_PIPE.to_string(),
         turn_count: Some(turn_count),
         tool_call_count: Some(tool_call_count),
@@ -471,10 +471,10 @@ fn summarize_codex(path: &Path) -> Option<SessionSummary> {
         title: title.unwrap_or_else(|| "Codex CLI session".to_string()),
         status: "idle".to_string(),
         source: "external".to_string(),
-        // Kineloop doesn't own external runs, so it has no permission setting for them.
+        // Kine Agent doesn't own external runs, so it has no permission setting for them.
         permission_mode: None,
         sandbox_terminal: false,
-        // External CLI history is never run by Kineloop — report the pipe default.
+        // External CLI history is never run by Kine Agent — report the pipe default.
         engine: ENGINE_PIPE.to_string(),
         turn_count: Some(turn_count),
         tool_call_count: Some(tool_call_count),
@@ -693,7 +693,7 @@ fn summarize_gemini(path: &Path) -> Option<SessionSummary> {
         return None;
     }
     let repo = gemini_project_root(path).unwrap_or_else(|| "Gemini CLI".to_string());
-    if is_kineloop_worktree(&repo) {
+    if is_kine_agent_worktree(&repo) {
         return None;
     }
     let updated_at = modified_ms(path);
@@ -705,10 +705,10 @@ fn summarize_gemini(path: &Path) -> Option<SessionSummary> {
         title: title.unwrap_or_else(|| "Gemini CLI session".to_string()),
         status: "idle".to_string(),
         source: "external".to_string(),
-        // Kineloop doesn't own external runs, so it has no permission setting for them.
+        // Kine Agent doesn't own external runs, so it has no permission setting for them.
         permission_mode: None,
         sandbox_terminal: false,
-        // External CLI history is never run by Kineloop — report the pipe default.
+        // External CLI history is never run by Kine Agent — report the pipe default.
         engine: ENGINE_PIPE.to_string(),
         turn_count: Some(turn_count),
         tool_call_count: Some(tool_call_count),
@@ -865,7 +865,7 @@ fn summarize_antigravity(path: &Path) -> Option<SessionSummary> {
         return None;
     }
     let repo = antigravity_workspace(path).unwrap_or_else(|| "Antigravity CLI".to_string());
-    if is_kineloop_worktree(&repo) {
+    if is_kine_agent_worktree(&repo) {
         return None;
     }
     let updated_at = modified_ms(path);
@@ -877,10 +877,10 @@ fn summarize_antigravity(path: &Path) -> Option<SessionSummary> {
         title: title.unwrap_or_else(|| "Antigravity CLI session".to_string()),
         status: "idle".to_string(),
         source: "external".to_string(),
-        // Kineloop doesn't own external runs, so it has no permission setting for them.
+        // Kine Agent doesn't own external runs, so it has no permission setting for them.
         permission_mode: None,
         sandbox_terminal: false,
-        // External CLI history is never run by Kineloop — report the pipe default.
+        // External CLI history is never run by Kine Agent — report the pipe default.
         engine: ENGINE_PIPE.to_string(),
         turn_count: Some(turn_count),
         tool_call_count: Some(tool_call_count),
@@ -1403,17 +1403,33 @@ fn modified_ms(path: &Path) -> i64 {
         .unwrap_or(0)
 }
 
-/// True when `path` is one of Kineloop's own per-session worktrees, so the app doesn't
+/// True when `path` is one of Kine Agent's own per-session worktrees, so the app doesn't
 /// list a duplicate of a session it created. Handles both the raw cwd form (with the
 /// OS-native separator — `/` on Unix, `\` on Windows) and Claude's dash-encoded project
-/// directory form. Matches both the current `.kineloop` directory and the legacy
-/// `.agent-editor` one so transcripts recorded before the rename are still recognized.
-fn is_kineloop_worktree(path: &str) -> bool {
+/// directory form. Recognizes every worktree location the product has used across its
+/// renames: the current visible `KineAgent/worktrees`, the previous visible
+/// `Kineloop/worktrees`, and the older hidden `.kine-agent`, `.kineloop`, and
+/// `.agent-editor` dirs — so transcripts recorded before any rename are still matched.
+fn is_kine_agent_worktree(path: &str) -> bool {
     let normalized = path.replace('\\', "/");
-    normalized.contains("/.kineloop/worktrees/")
-        || normalized.contains("/.agent-editor/worktrees/")
-        || path.contains("-kineloop-worktrees-")
-        || path.contains("-agent-editor-worktrees-")
+    const SLASH_FORMS: [&str; 5] = [
+        "/KineAgent/worktrees/",
+        "/Kineloop/worktrees/",
+        "/.kine-agent/worktrees/",
+        "/.kineloop/worktrees/",
+        "/.agent-editor/worktrees/",
+    ];
+    // Claude flattens the cwd into its project dir name (`/` → `-`), so `/.kineloop/` shows
+    // up as `--kineloop-`; the leading `-worktrees-` substring below matches within that.
+    const DASH_FORMS: [&str; 5] = [
+        "-KineAgent-worktrees-",
+        "-Kineloop-worktrees-",
+        "-kine-agent-worktrees-",
+        "-kineloop-worktrees-",
+        "-agent-editor-worktrees-",
+    ];
+    SLASH_FORMS.iter().any(|f| normalized.contains(f))
+        || DASH_FORMS.iter().any(|f| path.contains(f))
 }
 
 fn is_claude_subagent_path(path: &Path) -> bool {
@@ -1996,23 +2012,30 @@ mod tests {
     }
 
     #[test]
-    fn is_kineloop_worktree_matches_unix_and_windows_paths() {
-        // Current `.kineloop` worktree (Unix + Windows).
-        assert!(is_kineloop_worktree("/Users/me/.kineloop/worktrees/abc"));
-        assert!(is_kineloop_worktree(r"C:\Users\me\.kineloop\worktrees\abc"));
-        // Legacy `.agent-editor` worktree (pre-rename transcripts) still recognized.
-        assert!(is_kineloop_worktree(
+    fn is_kine_agent_worktree_matches_unix_and_windows_paths() {
+        // Current visible `KineAgent/worktrees` (Unix + Windows).
+        assert!(is_kine_agent_worktree("/Users/me/KineAgent/worktrees/abc"));
+        assert!(is_kine_agent_worktree(r"C:\Users\me\KineAgent\worktrees\abc"));
+        // Previous visible `Kineloop/worktrees` still recognized.
+        assert!(is_kine_agent_worktree("/Users/me/Kineloop/worktrees/abc"));
+        // Older hidden dirs across both renames (.kine-agent, .kineloop, .agent-editor).
+        assert!(is_kine_agent_worktree("/Users/me/.kine-agent/worktrees/abc"));
+        assert!(is_kine_agent_worktree("/Users/me/.kineloop/worktrees/abc"));
+        assert!(is_kine_agent_worktree(r"C:\Users\me\.kineloop\worktrees\abc"));
+        assert!(is_kine_agent_worktree(
             "/Users/me/.agent-editor/worktrees/abc"
         ));
-        assert!(is_kineloop_worktree(
+        assert!(is_kine_agent_worktree(
             r"C:\Users\me\.agent-editor\worktrees\abc"
         ));
-        // Claude's dash-encoded project-dir form (current + legacy).
-        assert!(is_kineloop_worktree("-Users-me--kineloop-worktrees-id"));
-        assert!(is_kineloop_worktree("-Users-me--agent-editor-worktrees-id"));
-        // A normal repo must NOT be treated as a Kineloop worktree.
-        assert!(!is_kineloop_worktree("/Users/me/projects/my-app"));
-        assert!(!is_kineloop_worktree(r"C:\Users\me\projects\my-app"));
+        // Claude's dash-encoded project-dir form (current + every legacy).
+        assert!(is_kine_agent_worktree("-Users-me-KineAgent-worktrees-id"));
+        assert!(is_kine_agent_worktree("-Users-me--kine-agent-worktrees-id"));
+        assert!(is_kine_agent_worktree("-Users-me--kineloop-worktrees-id"));
+        assert!(is_kine_agent_worktree("-Users-me--agent-editor-worktrees-id"));
+        // A normal repo must NOT be treated as a Kine Agent worktree.
+        assert!(!is_kine_agent_worktree("/Users/me/projects/my-app"));
+        assert!(!is_kine_agent_worktree(r"C:\Users\me\projects\my-app"));
     }
 
     #[test]
@@ -2046,7 +2069,7 @@ mod tests {
     }
 
     #[test]
-    fn skips_kineloop_claude_worktree_duplicates() {
+    fn skips_kine_agent_claude_worktree_duplicates() {
         let home = temp_home("skip");
         let dir = home.join(".claude/projects/-Users-me--agent-editor-worktrees-id");
         fs::create_dir_all(&dir).unwrap();

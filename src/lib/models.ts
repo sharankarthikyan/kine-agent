@@ -26,7 +26,7 @@ export interface ModelInfo {
 }
 
 /**
- * Agent ids Kineloop can currently spawn. Any other detected agent (e.g. the
+ * Agent ids Kine Agent can currently spawn. Any other detected agent (e.g. the
  * deprecated standalone Gemini CLI) still appears in the pickers for
  * discoverability but is disabled with a "coming soon" hint until its spawn
  * adapter lands. Keep in sync with the backend's `start_session` dispatch /
@@ -38,7 +38,7 @@ export const SPAWNABLE_AGENT_IDS = new Set<string>([
   "antigravity",
 ]);
 
-/** Whether Kineloop can currently launch a session with this agent. */
+/** Whether Kine Agent can currently launch a session with this agent. */
 export function isAgentSpawnable(agentId: string): boolean {
   return SPAWNABLE_AGENT_IDS.has(agentId);
 }

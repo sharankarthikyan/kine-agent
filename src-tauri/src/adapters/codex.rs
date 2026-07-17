@@ -207,6 +207,9 @@ pub async fn spawn_and_stream(
     // closed (EOF) or `codex exec` hangs waiting for more input.
     let prompt_via_stdin = is_batch_shim(&program);
     let mut command = crate::proc::tokio_command(&program);
+    // Apply the resolved BYOK auth: inject CODEX_API_KEY (key mode) or strip inherited key
+    // vars (subscription mode). We never touch the CLI's own `~/.codex/auth.json`.
+    prompt.auth.apply(&mut command);
     command.arg("exec");
     // The sandbox/bypass flag is an `exec`-level option and MUST precede the `resume`
     // subcommand (`codex exec -s <tier> resume <id>` is accepted; `codex exec resume -s`

@@ -12,7 +12,7 @@ const sessions: SessionSummary[] = [
     branch: "agent/a",
     title: "add auth",
     status: "idle",
-    source: "kineloop",
+    source: "kine-agent",
     turnCount: null,
     toolCallCount: null,
     fileActionCount: null,
@@ -26,7 +26,7 @@ const sessions: SessionSummary[] = [
     branch: "agent/b",
     title: "fix bug",
     status: "running",
-    source: "kineloop",
+    source: "kine-agent",
     turnCount: null,
     toolCallCount: null,
     fileActionCount: null,
@@ -72,7 +72,7 @@ test("renders each session title", () => {
   expect(screen.getByText("fix bug")).toBeInTheDocument();
 });
 
-test("does not render a git diffstat on Kineloop session rows", () => {
+test("does not render a git diffstat on Kine Agent session rows", () => {
   // The live diff moved to the Changes tab; sidebar rows show only a relative time.
   render(<SessionList {...defaultProps} />);
   expect(screen.queryByText(/^\+\d/)).not.toBeInTheDocument();
@@ -86,7 +86,7 @@ test("shows relative time for each session row", () => {
   expect(timeLabels.length).toBeGreaterThan(0);
 });
 
-test("shows turns · tools · files on Kineloop rows, like CLI rows", () => {
+test("shows turns · tools · files on Kine Agent rows, like CLI rows", () => {
   render(
     <SessionList
       {...defaultProps}

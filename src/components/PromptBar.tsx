@@ -97,7 +97,7 @@ export function PromptBar({
   const inputLabel = continuingExternal
     ? "Continue this CLI history"
     : "Message the agent";
-  const sendLabel = continuingExternal ? "Continue in Kineloop" : "Send";
+  const sendLabel = continuingExternal ? "Continue in Kine Agent" : "Send";
 
   // Auto-grow the textarea up to 240px, then scroll.
   useEffect(() => {
@@ -187,7 +187,7 @@ export function PromptBar({
           <div className="flex items-center gap-2 rounded-md bg-muted/50 px-2 py-1.5 text-xs text-muted-foreground">
             <GitBranchPlus className="size-3.5 shrink-0" aria-hidden />
             <span className="min-w-0 truncate">
-              Replies start a writable Kineloop continuation.
+              Replies start a writable Kine Agent continuation.
             </span>
           </div>
         )}

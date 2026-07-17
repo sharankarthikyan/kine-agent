@@ -159,7 +159,7 @@ function NavRow({ item, active, count, onClick }: NavRowProps) {
 // (`\`, drive letters) separators by normalizing to `/` for matching.
 function shortenPath(path: string): string {
   const norm = path.replace(/\\/g, "/");
-  const wt = norm.match(/\/(?:\.(?:kineloop|agent-editor)|Kineloop)\/worktrees\/[^/]+\/(.+)$/);
+  const wt = norm.match(/\/(?:\.(?:kine-agent|kineloop|agent-editor)|KineAgent|Kineloop)\/worktrees\/[^/]+\/(.+)$/);
   if (wt) return wt[1];
   // ~/ for Unix homes (/Users/x, /home/x) and Windows homes (C:/Users/x).
   return norm.replace(/^(?:[A-Za-z]:)?\/(?:Users|home)\/[^/]+\//, "~/");

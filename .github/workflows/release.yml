@@ -100,7 +100,7 @@ jobs:
         with:
           args: ${{ matrix.args }}
           tagName: ${{ github.ref_name }}
-          releaseName: 'Kineloop ${{ github.ref_name }}'
+          releaseName: 'Kine Agent ${{ github.ref_name }}'
           releaseDraft: true
           prerelease: false
 

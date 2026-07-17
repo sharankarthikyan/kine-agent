@@ -21,7 +21,7 @@ pub enum AgentEvent {
     Thought {
         text: String,
     },
-    /// Human-readable progress while Kineloop is preparing or waiting on an agent.
+    /// Human-readable progress while Kine Agent is preparing or waiting on an agent.
     /// This keeps slow setup phases visible before the first model/tool event arrives.
     Status {
         text: String,

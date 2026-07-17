@@ -26,7 +26,7 @@ interface AgentLogoProps {
 
 /**
  * The icon identifying which CLI a session belongs to. Renders a neutral Bot
- * glyph for every agent — Kineloop does not ship the vendors' own logo artwork
+ * glyph for every agent — Kine Agent does not ship the vendors' own logo artwork
  * (that would be redistributing their trademarks). The agent's name still rides
  * alongside as the accessible label / tooltip, and in the UI the label text sits
  * next to this glyph almost everywhere, so agents stay identifiable.

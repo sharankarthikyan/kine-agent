@@ -2,7 +2,7 @@
  * `@` mentions are resolved differently per agent (all verified 2026-07-01):
  *
  * - `@file`: `claude -p` inlines file contents natively; `codex exec` and `agy --print`
- *   treat `@path` as literal text, so Kineloop inlines those files client-side before sending.
+ *   treat `@path` as literal text, so Kine Agent inlines those files client-side before sending.
  * - `@agent-<name>`: the explicit token is cosmetic in every headless mode (Claude's `-p`
  *   ignores it — smoke-tested; codex/agy have no subagent selector at all). Agents are only
  *   offered for Claude, where on send we expand the token to the documented natural-language
