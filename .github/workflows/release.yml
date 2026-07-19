@@ -80,6 +80,10 @@ jobs:
             args: ''
             rust-targets: ''
     runs-on: ${{ matrix.os }}
+    # Exposed at job level so the macOS import step's `if:` can test whether signing
+    # secrets are configured (a step `if:` can read `env`, not `secrets`, directly).
+    env:
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
     steps:
       - uses: actions/checkout@v4
 
@@ -105,6 +109,42 @@ jobs:
       - name: Install frontend deps
         run: npm ci
 
+      # Import the Developer-ID cert into a dedicated keychain OURSELVES rather than
+      # letting tauri-action's internal `security import` do it — the internal path
+      # fails on current macOS runners with "SecKeychainItemImport: parameters not
+      # valid", and doing it explicitly lets `find-identity` verify the import and
+      # surface a precise error. Runs only on macOS when signing secrets are present;
+      # otherwise it's skipped and the build falls back to ad-hoc signing.
+      - name: Import Apple Developer certificate
+        if: matrix.os == 'macos-latest' && env.APPLE_CERTIFICATE != ''
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          CERT_PATH="$RUNNER_TEMP/certificate.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -base64 24)"
+
+          # Decode the secret. If it isn't valid base64 of a real PKCS#12, fail here
+          # with a clear message instead of deep inside the bundler.
+          echo -n "$APPLE_CERTIFICATE" | base64 --decode > "$CERT_PATH"
+          if ! openssl pkcs12 -in "$CERT_PATH" -passin pass:"$APPLE_CERTIFICATE_PASSWORD" -noout -legacy 2>/dev/null; then
+            echo "::error::APPLE_CERTIFICATE is not a valid .p12 for APPLE_CERTIFICATE_PASSWORD. Re-export the 'Developer ID Application' cert WITH its private key as .p12 and re-encode with: openssl base64 -A -in cert.p12 -out cert.txt"
+            exit 1
+          fi
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" >/dev/null
+          # Make our keychain visible to codesign alongside the login keychain.
+          security list-keychain -d user -s "$KEYCHAIN_PATH" login.keychain-db
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+
       - name: Build + sign + attach to draft release
         uses: tauri-apps/tauri-action@v0
         env:
@@ -113,10 +153,12 @@ jobs:
           # Generate once with: npx tauri signer generate -w ~/.tauri/kineloop.key
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          # macOS Developer-ID signing + notarization. Only consumed on the macOS
-          # runner; unused (harmless) on Linux/Windows. Empty when unset → ad-hoc build.
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          # macOS Developer-ID signing + notarization. The cert is already imported
+          # (step above), so we deliberately do NOT pass APPLE_CERTIFICATE here —
+          # that would make tauri-action re-import it and hit the same failure. tauri
+          # signs with APPLE_SIGNING_IDENTITY (found in the keychain) and notarizes via
+          # APPLE_ID/APPLE_PASSWORD/APPLE_TEAM_ID. All empty on Linux/Windows and when
+          # unset → ad-hoc build, so the pipeline still passes without secrets.
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
