@@ -44,10 +44,26 @@ jobs:
       - name: Rust tests
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
-  # Build + code-sign + updater-sign each platform. tauri-action aggregates all
-  # matrix runs into ONE draft release (with a single latest.json manifest) on
-  # this repo. The publish job below flips that draft live once every platform
-  # build has attached its assets — the app's updater endpoint points here.
+  # Build each platform, updater-sign it, and (macOS) Developer-ID code-sign +
+  # notarize it. tauri-action aggregates all matrix runs into ONE draft release
+  # (with a single latest.json manifest) on this repo. The publish job below flips
+  # that draft live once every platform build has attached its assets — the app's
+  # updater endpoint points here.
+  #
+  # macOS signing/notarization is driven ENTIRELY by the APPLE_* env on the build
+  # step below. When those secrets are set, tauri-action imports the certificate
+  # into a temporary keychain, signs with the hardened runtime, and notarizes via
+  # notarytool — no manual keychain steps needed. When they are ABSENT (e.g. before
+  # the secrets are configured) tauri-action falls back to ad-hoc signing, so the
+  # pipeline still succeeds; the download is simply flagged by Gatekeeper until the
+  # secrets exist. Required repo secrets (Settings → Secrets and variables → Actions):
+  #   APPLE_CERTIFICATE           base64 of the "Developer ID Application" .p12
+  #                               (openssl base64 -A -in cert.p12 -out cert.txt)
+  #   APPLE_CERTIFICATE_PASSWORD  the .p12 export password
+  #   APPLE_SIGNING_IDENTITY      e.g. "Developer ID Application: Name (TEAMID)"
+  #   APPLE_ID                    Apple Developer account email
+  #   APPLE_PASSWORD              an app-specific password for that Apple ID
+  #   APPLE_TEAM_ID               the 10-char Team ID
   build:
     needs: test
     strategy:
@@ -97,6 +113,14 @@ jobs:
           # Generate once with: npx tauri signer generate -w ~/.tauri/kineloop.key
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # macOS Developer-ID signing + notarization. Only consumed on the macOS
+          # runner; unused (harmless) on Linux/Windows. Empty when unset → ad-hoc build.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           args: ${{ matrix.args }}
           tagName: ${{ github.ref_name }}

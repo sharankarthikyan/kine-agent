@@ -127,6 +127,15 @@ const PATH_MARKER: &str = "__KINE_AGENT_PATH__";
 pub fn adopt_login_shell_path() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
+        // If the inherited PATH already resolves `node`, this process was launched from a
+        // shell that already sourced the user's profile (a terminal or `tauri dev`), so
+        // there is nothing to adopt. Skipping avoids spawning the user's shell — which, on
+        // macOS, runs their profile and can trigger a burst of Desktop/Documents/Downloads
+        // access prompts attributed to this app (see `login_shell_path`).
+        let current = std::env::var("PATH").unwrap_or_default();
+        if resolves_node(&current) {
+            return;
+        }
         let Some(login) = login_shell_path() else {
             eprintln!(
                 "kine-agent: could not read the login-shell PATH — agent CLIs may look \
@@ -134,7 +143,6 @@ pub fn adopt_login_shell_path() {
             );
             return;
         };
-        let current = std::env::var("PATH").unwrap_or_default();
         std::env::set_var("PATH", merged_path(&login, &current));
     });
 }
@@ -143,12 +151,43 @@ pub fn adopt_login_shell_path() {
 #[cfg(not(unix))]
 pub fn adopt_login_shell_path() {}
 
-/// Run the user's login shell and capture its `$PATH`, marker-delimited. Interactive +
-/// login (`-l -i`) so both profile (`~/.zprofile`, Homebrew shellenv) and rc (`~/.zshrc`,
-/// nvm) PATH edits apply. Bounded by a 5s timeout so a hung dotfile can never wedge app
-/// startup; the child is killed either way.
+/// Capture the user's login-shell `$PATH`, preferring the quietest shell that still finds
+/// `node`.
+///
+/// A NON-interactive login shell (`-l`) sources the login profile (`~/.zprofile`,
+/// `~/.bash_profile` — where Homebrew's `shellenv` and most PATH setup live) but NOT the
+/// interactive rc file (`~/.zshrc`). That distinction matters on macOS: the rc file is
+/// where prompt frameworks and shell helpers run, and those routinely read `~/Desktop`,
+/// `~/Documents`, `~/Downloads`, … — accesses the OS attributes to THIS app (the shell's
+/// parent), producing a cascade of TCC permission prompts on launch. So we try `-l` first
+/// and fall back to an interactive login shell (`-l -i`) only when the quiet PATH can't
+/// find `node` (e.g. nvm, which appends to `~/.zshrc`).
 #[cfg(unix)]
 fn login_shell_path() -> Option<String> {
+    let login = capture_shell_path(&["-l"]);
+    if login.as_deref().is_some_and(resolves_node) {
+        return login;
+    }
+    capture_shell_path(&["-l", "-i"]).or(login)
+}
+
+/// Whether `node` resolves on the given colon-separated `$PATH`. Used both to short-circuit
+/// PATH adoption when the inherited env is already rich and to decide whether the quiet
+/// login shell was enough. An empty PATH never resolves.
+#[cfg(unix)]
+fn resolves_node(path: &str) -> bool {
+    if path.is_empty() {
+        return false;
+    }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+    which::which_in("node", Some(path), cwd).is_ok()
+}
+
+/// Run the user's login shell with `login_flags` and capture its `$PATH`, marker-delimited.
+/// Bounded by a 5s timeout so a hung dotfile can never wedge app startup; the child is
+/// killed either way.
+#[cfg(unix)]
+fn capture_shell_path(login_flags: &[&str]) -> Option<String> {
     use std::io::Read;
     use std::process::Stdio;
     use std::time::Duration;
@@ -169,7 +208,9 @@ fn login_shell_path() -> Option<String> {
     };
 
     let mut child = crate::proc::std_command(&shell)
-        .args(["-l", "-i", "-c", &script])
+        .args(login_flags)
+        .arg("-c")
+        .arg(&script)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -248,5 +289,23 @@ mod tests {
     fn login_shell_path_captures_a_real_path() {
         let path = login_shell_path().expect("login shell PATH");
         assert!(path.contains('/'), "not a PATH: {path:?}");
+    }
+
+    /// `resolves_node` gates whether we spawn the user's shell at all, so it must find an
+    /// executable `node` on a given PATH and reject empty / missing dirs.
+    #[test]
+    fn resolves_node_detects_an_executable_on_the_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("kine-node-probe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let node = dir.join("node");
+        std::fs::write(&node, "#!/bin/sh\ntrue\n").unwrap();
+        std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(resolves_node(dir.to_str().unwrap()));
+        assert!(!resolves_node(""));
+        assert!(!resolves_node("/no/such/kine-agent/dir"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
