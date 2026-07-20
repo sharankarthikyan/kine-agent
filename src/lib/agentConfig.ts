@@ -126,12 +126,15 @@ export function getAgentConfig(map: AgentConfigMap, agentId: string): AgentConfi
 
 /**
  * Return a new map with `patch` applied to `agentId`. Enforces the invariant
- * that defaultModel never names a hidden or removed model.
+ * that defaultModel never names a hidden model or a removed custom model.
+ * If `discoveredValues` is provided, clearing is skipped when the removed
+ * custom value is still present among discovered models.
  */
 export function updateAgentConfig(
   map: AgentConfigMap,
   agentId: string,
   patch: Partial<AgentConfig>,
+  discoveredValues?: readonly string[],
 ): AgentConfigMap {
   const current = getAgentConfig(map, agentId);
   const next: AgentConfig = { ...current, ...patch };
@@ -139,7 +142,8 @@ export function updateAgentConfig(
     const hidden = next.hiddenModels.includes(next.defaultModel);
     const wasCustom = current.customModels.some((m) => m.value === next.defaultModel);
     const stillCustom = next.customModels.some((m) => m.value === next.defaultModel);
-    if (hidden || (wasCustom && !stillCustom)) next.defaultModel = null;
+    const stillDiscovered = discoveredValues?.includes(next.defaultModel) ?? false;
+    if (hidden || (wasCustom && !stillCustom && !stillDiscovered)) next.defaultModel = null;
   }
   return { ...map, [agentId]: next };
 }

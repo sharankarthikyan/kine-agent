@@ -135,6 +135,18 @@ describe("updateAgentConfig", () => {
     const next = updateAgentConfig(map, "claude", { color: "cyan" });
     expect(next.claude.defaultModel).toBe("opus");
   });
+
+  it("keeps defaultModel when its custom entry is removed but the value is still discovered", () => {
+    const map = {
+      claude: {
+        ...emptyAgentConfig(),
+        defaultModel: "opus",
+        customModels: [{ value: "opus", label: "My Opus" }],
+      },
+    };
+    const next = updateAgentConfig(map, "claude", { customModels: [] }, ["opus", "sonnet"]);
+    expect(next.claude.defaultModel).toBe("opus");
+  });
 });
 
 describe("pickDefaultModel", () => {
