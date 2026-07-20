@@ -1699,6 +1699,33 @@ pub async fn set_agent_auth_mode(
     Ok(())
 }
 
+/// Live provider model list for a BYOK agent. Gated: the agent must support
+/// API-key auth, be in apikey mode, and have a stored key. The key is read
+/// from the keychain here and never crosses IPC or logs.
+#[tauri::command]
+pub async fn list_provider_models(
+    agent: String,
+    store: State<'_, SessionStore>,
+) -> Result<Vec<crate::models::ModelInfo>, String> {
+    if !crate::auth::supports_api_key(&agent) {
+        return Err("unsupported-agent".to_string());
+    }
+    let mode = store
+        .get_agent_auth_mode(&agent)
+        .await
+        .ok()
+        .flatten();
+    if crate::auth::AuthMode::from_wire(mode.as_deref()) != crate::auth::AuthMode::ApiKey {
+        return Err("not-apikey-mode".to_string());
+    }
+    let a = agent.clone();
+    let key = tokio::task::spawn_blocking(move || crate::auth::read_key(&a))
+        .await
+        .map_err(|e| e.to_string())??
+        .ok_or_else(|| "no-key".to_string())?;
+    crate::provider_models::fetch_provider_models(&agent, &key).await
+}
+
 /// Probe PATH for each supported agent CLI (claude, codex, gemini) and return
 /// their `AgentInfo` records with `installed` set accordingly. Blocking work is
 /// offloaded from the async runtime via `spawn_blocking`.

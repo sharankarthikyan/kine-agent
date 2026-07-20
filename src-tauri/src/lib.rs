@@ -143,6 +143,7 @@ pub fn run() {
             commands::set_agent_api_key,
             commands::clear_agent_api_key,
             commands::set_agent_auth_mode,
+            commands::list_provider_models,
             commands::list_models,
             commands::refresh_models,
             commands::node_available,

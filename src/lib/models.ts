@@ -65,3 +65,23 @@ export async function refreshModels(agent: string): Promise<ModelInfo[]> {
   assertDesktop();
   return invoke<ModelInfo[]>("refresh_models", { agent });
 }
+
+/**
+ * Live provider model list for a BYOK agent (claude → Anthropic, codex →
+ * OpenAI). Only valid when the agent is in API-key mode with a stored key;
+ * rejects with a stable error code from PROVIDER_FETCH_ERRORS otherwise.
+ */
+export async function listProviderModels(agent: string): Promise<ModelInfo[]> {
+  assertDesktop();
+  return invoke<ModelInfo[]>("list_provider_models", { agent });
+}
+
+/** Stable backend error codes → user-facing copy for the provider browse UI. */
+export const PROVIDER_FETCH_ERRORS: Record<string, string> = {
+  "unsupported-agent": "This agent has no API-key model listing.",
+  "not-apikey-mode": "Switch this agent to API-key authentication first.",
+  "no-key": "No API key is stored for this agent.",
+  "bad-key": "The stored API key was rejected by the provider.",
+  network: "Couldn't reach the provider — check your connection.",
+  parse: "Unexpected response from the provider.",
+};
