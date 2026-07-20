@@ -40,6 +40,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { AgentLogo } from "@/components/AgentLogo";
+import { AgentCustomize } from "@/components/AgentCustomize";
 import type { AgentInfo } from "@/lib/models";
 import {
   AGENT_META,
@@ -455,6 +456,8 @@ function AgentRow({
           </div>
         </div>
       )}
+
+      {installed && enabled && <AgentCustomize agentId={meta.id} />}
     </div>
   );
 }
