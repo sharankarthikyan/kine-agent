@@ -30,6 +30,7 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio",
 which = "6"
 dirs = "6"
 tauri-plugin-process = "2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # Desktop-only: in-app self-updater (checks a signed latest.json, downloads +
 # verifies the update, then relaunches). Not available on mobile targets.
