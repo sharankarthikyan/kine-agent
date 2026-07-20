@@ -128,15 +128,24 @@ export function AgentCustomize({ agentId }: AgentCustomizeProps) {
     patch({ modelOrder: order });
   }
 
-  function addCustom(value: string, label: string) {
+  // Returns whether the model was added — false when the trimmed value is
+  // empty or already present, either as a custom entry or a discovered one
+  // (a discovered-colliding id would otherwise store a hidden label-override
+  // entry with no "custom" badge and no way to remove it via the UI).
+  function addCustom(value: string, label: string): boolean {
     const trimmed = value.trim();
-    if (!trimmed || config.customModels.some((m) => m.value === trimmed)) return;
+    if (!trimmed) return false;
+    const alreadyPresent =
+      config.customModels.some((m) => m.value === trimmed) ||
+      (discovered ?? []).some((m) => m.value === trimmed);
+    if (alreadyPresent) return false;
     patch({
       customModels: [
         ...config.customModels,
         { value: trimmed, label: label.trim() === "" ? null : label.trim() },
       ],
     });
+    return true;
   }
 
   function removeCustom(value: string) {
@@ -396,41 +405,56 @@ function ProviderBrowse({
   );
 }
 
-function AddModelForm({ onAdd }: { onAdd: (value: string, label: string) => void }) {
+function AddModelForm({ onAdd }: { onAdd: (value: string, label: string) => boolean }) {
   const [value, setValue] = useState("");
   const [label, setLabel] = useState("");
+  const [rejected, setRejected] = useState(false);
   return (
-    <form
-      className="mt-2 flex items-center gap-2"
-      onSubmit={(e) => {
-        e.preventDefault();
-        onAdd(value, label);
-        setValue("");
-        setLabel("");
-      }}
-    >
-      <Input
-        value={value}
-        onChange={(e) => setValue(e.target.value)}
-        placeholder="model id (e.g. claude-opus-4-8)"
-        className="h-8 w-56 text-xs"
-      />
-      <Input
-        value={label}
-        onChange={(e) => setLabel(e.target.value)}
-        placeholder="label (optional)"
-        className="h-8 w-36 text-xs"
-      />
-      <Button
-        type="submit"
-        variant="outline"
-        size="sm"
-        className="h-8 gap-1 text-xs"
-        disabled={value.trim() === ""}
+    <div className="mt-2">
+      <form
+        className="flex items-center gap-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          const added = onAdd(value, label);
+          if (added) {
+            setValue("");
+            setLabel("");
+            setRejected(false);
+          } else {
+            setRejected(true);
+          }
+        }}
       >
-        <Plus className="size-3.5" />
-        Add model
-      </Button>
-    </form>
+        <Input
+          value={value}
+          onChange={(e) => {
+            setValue(e.target.value);
+            setRejected(false);
+          }}
+          placeholder="model id (e.g. claude-opus-4-8)"
+          className="h-8 w-56 text-xs"
+        />
+        <Input
+          value={label}
+          onChange={(e) => {
+            setLabel(e.target.value);
+            setRejected(false);
+          }}
+          placeholder="label (optional)"
+          className="h-8 w-36 text-xs"
+        />
+        <Button
+          type="submit"
+          variant="outline"
+          size="sm"
+          className="h-8 gap-1 text-xs"
+          disabled={value.trim() === ""}
+        >
+          <Plus className="size-3.5" />
+          Add model
+        </Button>
+      </form>
+      {rejected && <p className="mt-2 text-xs text-destructive">Already in the list.</p>}
+    </div>
   );
 }

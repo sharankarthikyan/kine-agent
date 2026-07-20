@@ -124,6 +124,32 @@ test("adding a custom model appends it with a custom badge and remove button", a
   expect(screen.getByRole("button", { name: "Remove claude-opus-4-6" })).toBeInTheDocument();
 });
 
+test("adding a value that matches a discovered model is rejected with inline feedback", async () => {
+  render(<AgentCustomize agentId="claude" />);
+  await userEvent.click(screen.getByRole("button", { name: "Customize" }));
+  await screen.findByRole("list");
+  await userEvent.type(screen.getByPlaceholderText("model id (e.g. claude-opus-4-8)"), "opus");
+  await userEvent.click(screen.getByRole("button", { name: "Add model" }));
+  expect(readAgentConfigs().claude?.customModels ?? []).toEqual([]);
+  expect(screen.getByText("Already in the list.")).toBeInTheDocument();
+});
+
+test("adding the same custom value twice is rejected and keeps the inputs", async () => {
+  render(<AgentCustomize agentId="claude" />);
+  await userEvent.click(screen.getByRole("button", { name: "Customize" }));
+  await screen.findByRole("list");
+  const input = screen.getByPlaceholderText("model id (e.g. claude-opus-4-8)");
+  await userEvent.type(input, "claude-opus-4-6");
+  await userEvent.click(screen.getByRole("button", { name: "Add model" }));
+  expect(readAgentConfigs().claude?.customModels).toHaveLength(1);
+
+  await userEvent.type(input, "claude-opus-4-6");
+  await userEvent.click(screen.getByRole("button", { name: "Add model" }));
+  expect(readAgentConfigs().claude?.customModels).toHaveLength(1);
+  expect(screen.getByText("Already in the list.")).toBeInTheDocument();
+  expect(input).toHaveValue("claude-opus-4-6");
+});
+
 // NOTE: this project's `ui/select.tsx` is a styled native <select> (not Radix —
 // there is no @radix-ui/react-select dependency in this repo), so the
 // interaction follows the project's established convention for it
