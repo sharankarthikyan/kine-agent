@@ -127,13 +127,16 @@ const PATH_MARKER: &str = "__KINE_AGENT_PATH__";
 pub fn adopt_login_shell_path() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
-        // If the inherited PATH already resolves `node`, this process was launched from a
-        // shell that already sourced the user's profile (a terminal or `tauri dev`), so
-        // there is nothing to adopt. Skipping avoids spawning the user's shell — which, on
-        // macOS, runs their profile and can trigger a burst of Desktop/Documents/Downloads
-        // access prompts attributed to this app (see `login_shell_path`).
+        // If the inherited PATH already resolves node AND an agent CLI, this process was
+        // launched from a shell that already sourced the user's profile (a terminal or
+        // `tauri dev`), so there is nothing to adopt. Skipping avoids spawning the user's
+        // shell — which, on macOS, runs their profile and can trigger a burst of
+        // Desktop/Documents/Downloads access prompts attributed to this app (see
+        // `login_shell_path`). Node alone is NOT sufficient evidence: GUI launch contexts
+        // can carry a launchctl-set PATH that finds node but none of the agent CLIs, and
+        // skipping there left every agent "Not installed" (field bug, v0.3.0).
         let current = std::env::var("PATH").unwrap_or_default();
-        if resolves_node(&current) {
+        if path_covers_agent_tooling(&current) {
             return;
         }
         let Some(login) = login_shell_path() else {
@@ -171,8 +174,24 @@ fn login_shell_path() -> Option<String> {
     capture_shell_path(&["-l", "-i"]).or(login)
 }
 
-/// Whether `node` resolves on the given colon-separated `$PATH`. Used both to short-circuit
-/// PATH adoption when the inherited env is already rich and to decide whether the quiet
+/// Whether the given `$PATH` covers the tooling the app actually launches: `node` (the
+/// ACP engine runs the vendors' agents via `npx`) plus at least one spawnable agent CLI.
+/// This — not node alone — is the "already adopted, skip the shell spawn" signal:
+/// node is a poor proxy because GUI environments can carry a node-bearing PATH (e.g. a
+/// launchctl-set `/opt/homebrew/opt/node@20/bin:...`) that still misses every agent dir.
+#[cfg(unix)]
+fn path_covers_agent_tooling(path: &str) -> bool {
+    if !resolves_node(path) {
+        return false;
+    }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+    ["claude", "codex", "agy"]
+        .iter()
+        .any(|cli| which::which_in(cli, Some(path), &cwd).is_ok())
+}
+
+/// Whether `node` resolves on the given colon-separated `$PATH`. Used both as part of the
+/// adoption gate (see [`path_covers_agent_tooling`]) and to decide whether the quiet
 /// login shell was enough. An empty PATH never resolves.
 #[cfg(unix)]
 fn resolves_node(path: &str) -> bool {
@@ -307,5 +326,42 @@ mod tests {
         assert!(!resolves_node("/no/such/kine-agent/dir"));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The adoption gate must NOT skip on a node-only PATH: GUI launch contexts can
+    /// carry a launchctl-set PATH that resolves node but none of the agent CLIs
+    /// (seen in the field: `/opt/homebrew/opt/node@20/bin:/usr/local/bin:/usr/bin:/bin`),
+    /// and skipping there leaves every agent "Not installed". Only a PATH that finds
+    /// node AND at least one agent CLI counts as already-adopted.
+    #[test]
+    fn adoption_gate_requires_node_and_an_agent_cli() {
+        use std::os::unix::fs::PermissionsExt;
+        let write_exe = |dir: &std::path::Path, name: &str| {
+            let p = dir.join(name);
+            std::fs::write(&p, "#!/bin/sh\ntrue\n").unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        let base = std::env::temp_dir().join(format!("kine-gate-probe-{}", std::process::id()));
+
+        let node_only = base.join("node-only");
+        std::fs::create_dir_all(&node_only).unwrap();
+        write_exe(&node_only, "node");
+        assert!(!path_covers_agent_tooling(node_only.to_str().unwrap()));
+
+        let node_and_agent = base.join("node-and-agent");
+        std::fs::create_dir_all(&node_and_agent).unwrap();
+        write_exe(&node_and_agent, "node");
+        write_exe(&node_and_agent, "codex");
+        assert!(path_covers_agent_tooling(node_and_agent.to_str().unwrap()));
+
+        // An agent CLI without node is not enough either — the ACP engine needs npx.
+        let agent_only = base.join("agent-only");
+        std::fs::create_dir_all(&agent_only).unwrap();
+        write_exe(&agent_only, "claude");
+        assert!(!path_covers_agent_tooling(agent_only.to_str().unwrap()));
+
+        assert!(!path_covers_agent_tooling(""));
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
