@@ -90,6 +90,13 @@ pub fn parse_openai_models(json: &str) -> Result<Vec<ModelInfo>, String> {
         .collect())
 }
 
+/// Anthropic paginates GET /v1/models (default page size 20, max 1000, with
+/// a `has_more` cursor). We request the max page instead of following the
+/// cursor — 1000 comfortably covers the realistic active-model list size.
+fn anthropic_models_url() -> String {
+    format!("{ANTHROPIC_MODELS_URL}?limit=1000")
+}
+
 /// Fetch the provider's live model list using the given API key.
 /// Error codes (stable strings the frontend maps to copy):
 /// "unsupported-agent" | "bad-key" | "network" | "parse".
@@ -100,7 +107,7 @@ pub async fn fetch_provider_models(agent: &str, key: &str) -> Result<Vec<ModelIn
         .map_err(|_| "network".to_string())?;
     let request = match agent {
         "claude" => client
-            .get(ANTHROPIC_MODELS_URL)
+            .get(anthropic_models_url())
             .header("x-api-key", key)
             .header("anthropic-version", ANTHROPIC_VERSION),
         "codex" => client
@@ -198,5 +205,10 @@ mod tests {
             fetch_provider_models("antigravity", "sk-x").await.unwrap_err(),
             "unsupported-agent"
         );
+    }
+
+    #[test]
+    fn anthropic_url_requests_max_page_size() {
+        assert!(anthropic_models_url().contains("limit=1000"));
     }
 }
