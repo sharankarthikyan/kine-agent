@@ -145,6 +145,19 @@ jobs:
           security list-keychain -d user -s "$KEYCHAIN_PATH" login.keychain-db
           security find-identity -v -p codesigning "$KEYCHAIN_PATH"
 
+          # Export the signing/notarization env for the build step ONLY here, in
+          # this cert-gated step. Mapping the secrets directly on the build step
+          # sets them to EMPTY STRINGS when unconfigured, and the tauri bundler
+          # treats an empty (but set) APPLE_SIGNING_IDENTITY as a literal
+          # identity "" — codesign then fails with "no identity found" instead
+          # of falling back to ad-hoc signing (broke v0.2.1 and v0.3.0).
+          {
+            echo "APPLE_SIGNING_IDENTITY=${{ secrets.APPLE_SIGNING_IDENTITY }}"
+            echo "APPLE_ID=${{ secrets.APPLE_ID }}"
+            echo "APPLE_PASSWORD=${{ secrets.APPLE_PASSWORD }}"
+            echo "APPLE_TEAM_ID=${{ secrets.APPLE_TEAM_ID }}"
+          } >> "$GITHUB_ENV"
+
       - name: Build + sign + attach to draft release
         uses: tauri-apps/tauri-action@v0
         env:
@@ -153,16 +166,13 @@ jobs:
           # Generate once with: npx tauri signer generate -w ~/.tauri/kineloop.key
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          # macOS Developer-ID signing + notarization. The cert is already imported
-          # (step above), so we deliberately do NOT pass APPLE_CERTIFICATE here —
-          # that would make tauri-action re-import it and hit the same failure. tauri
-          # signs with APPLE_SIGNING_IDENTITY (found in the keychain) and notarizes via
-          # APPLE_ID/APPLE_PASSWORD/APPLE_TEAM_ID. All empty on Linux/Windows and when
-          # unset → ad-hoc build, so the pipeline still passes without secrets.
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # macOS Developer-ID signing + notarization env (APPLE_SIGNING_IDENTITY,
+          # APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID) is exported via GITHUB_ENV by
+          # the cert-import step above, and ONLY when APPLE_CERTIFICATE is
+          # configured. Do NOT map those secrets here: a missing secret becomes an
+          # empty-but-set env var, and the bundler signs with identity "" instead
+          # of falling back to ad-hoc. APPLE_CERTIFICATE is also deliberately not
+          # passed — tauri-action would re-import it.
         with:
           args: ${{ matrix.args }}
           tagName: ${{ github.ref_name }}
