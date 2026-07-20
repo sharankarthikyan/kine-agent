@@ -9,8 +9,24 @@ const CLAUDE_MODELS = [
   { value: "haiku", label: "Claude Haiku", agent: "claude", description: null, disabled: false, contextWindow: 200000 },
 ];
 
-const invoke = vi.fn(async (cmd: string, _args?: unknown) => {
+// Module-scoped switches the tests flip.
+let authStatus: { agent: string; supportsApiKey: boolean; mode: string; hasKey: boolean } = {
+  agent: "claude",
+  supportsApiKey: true,
+  mode: "subscription",
+  hasKey: false,
+};
+let providerResult: unknown[] | { error: string } = [];
+
+const invoke = vi.fn(async (cmd: string, args?: unknown) => {
   if (cmd === "list_models") return CLAUDE_MODELS;
+  if (cmd === "agent_auth_status") {
+    return { ...authStatus, agent: (args as { agent?: string } | undefined)?.agent };
+  }
+  if (cmd === "list_provider_models") {
+    if (!Array.isArray(providerResult)) throw providerResult.error;
+    return providerResult;
+  }
   throw new Error(`unexpected command ${cmd}`);
 });
 vi.mock("@tauri-apps/api/core", () => ({ invoke: (c: string, a?: unknown) => invoke(c, a) }));
@@ -18,6 +34,8 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: (c: string, a?: unknown) => inv
 afterEach(() => {
   window.localStorage.clear();
   invoke.mockClear();
+  authStatus = { agent: "claude", supportsApiKey: true, mode: "subscription", hasKey: false };
+  providerResult = [];
 });
 
 test("collapsed by default; expanding reveals the color swatches", async () => {
@@ -120,4 +138,50 @@ test("default model select persists a choice and offers Auto", async () => {
     "Claude Sonnet",
   );
   expect(readAgentConfigs().claude?.defaultModel).toBe("sonnet");
+});
+
+test("browse button hidden in subscription mode", async () => {
+  authStatus = { agent: "claude", supportsApiKey: true, mode: "subscription", hasKey: false };
+  render(<AgentCustomize agentId="claude" />);
+  await userEvent.click(screen.getByRole("button", { name: "Customize" }));
+  // "Claude Opus" text is ambiguous (also renders as a <select> option — see
+  // the note on "renders discovered models" above); wait on the list instead.
+  await screen.findByRole("list");
+  expect(screen.queryByRole("button", { name: "Browse provider models" })).not.toBeInTheDocument();
+});
+
+test("browse fetches and adds a provider model as custom", async () => {
+  authStatus = { agent: "claude", supportsApiKey: true, mode: "apikey", hasKey: true };
+  providerResult = [
+    { value: "claude-opus-4-8", label: "Claude Opus 4.8", agent: "claude", description: "claude-opus-4-8", disabled: false, contextWindow: null },
+  ];
+  render(<AgentCustomize agentId="claude" />);
+  await userEvent.click(screen.getByRole("button", { name: "Customize" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Browse provider models" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Add claude-opus-4-8" }));
+  expect(readAgentConfigs().claude?.customModels).toEqual([
+    { value: "claude-opus-4-8", label: "Claude Opus 4.8" },
+  ]);
+});
+
+test("already-present values show a disabled Added button", async () => {
+  authStatus = { agent: "claude", supportsApiKey: true, mode: "apikey", hasKey: true };
+  providerResult = [
+    { value: "opus", label: "Claude Opus", agent: "claude", description: null, disabled: false, contextWindow: null },
+  ];
+  render(<AgentCustomize agentId="claude" />);
+  await userEvent.click(screen.getByRole("button", { name: "Customize" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Browse provider models" }));
+  expect(await screen.findByRole("button", { name: "Added" })).toBeDisabled();
+});
+
+test("fetch errors render inline with mapped copy", async () => {
+  authStatus = { agent: "claude", supportsApiKey: true, mode: "apikey", hasKey: true };
+  providerResult = { error: "bad-key" };
+  render(<AgentCustomize agentId="claude" />);
+  await userEvent.click(screen.getByRole("button", { name: "Customize" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Browse provider models" }));
+  expect(
+    await screen.findByText("The stored API key was rejected by the provider."),
+  ).toBeInTheDocument();
 });

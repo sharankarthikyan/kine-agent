@@ -4,7 +4,16 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
-import { ChevronDown, ChevronRight, ChevronUp, Eye, EyeOff, Plus, X } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronRight,
+  ChevronUp,
+  Eye,
+  EyeOff,
+  Plus,
+  RefreshCw,
+  X,
+} from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -20,7 +29,8 @@ import {
   writeAgentConfigs,
   type AgentConfig,
 } from "@/lib/agentConfig";
-import { listModels, type ModelInfo } from "@/lib/models";
+import { getAgentAuthStatus, type AgentAuthStatus } from "@/lib/agentAuth";
+import { listModels, listProviderModels, PROVIDER_FETCH_ERRORS, type ModelInfo } from "@/lib/models";
 
 interface AgentCustomizeProps {
   agentId: string;
@@ -57,6 +67,27 @@ export function AgentCustomize({ agentId }: AgentCustomizeProps) {
       cancelled = true;
     };
   }, [open, discovered, agentId]);
+
+  // Auth status gates the provider-browse section (Task 7) — only fetched
+  // once the area is expanded, and only meaningful for BYOK-capable agents.
+  const [authStatus, setAuthStatus] = useState<AgentAuthStatus | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    getAgentAuthStatus(agentId)
+      .then((s) => {
+        if (!cancelled) setAuthStatus(s);
+      })
+      .catch(() => {
+        if (!cancelled) setAuthStatus(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, agentId]);
+
+  const canBrowse =
+    authStatus !== null && authStatus.mode === "apikey" && authStatus.hasKey;
 
   const swatchRefs = useRef<Map<string | null, HTMLButtonElement>>(new Map());
 
@@ -279,8 +310,87 @@ export function AgentCustomize({ agentId }: AgentCustomizeProps) {
             )}
             <AddModelForm onAdd={addCustom} />
           </div>
-          {/* Provider browse renders here (Task 6). */}
+          {canBrowse && (
+            <ProviderBrowse
+              agentId={agentId}
+              presentValues={
+                new Set([
+                  ...(discovered ?? []).map((m) => m.value),
+                  ...config.customModels.map((m) => m.value),
+                ])
+              }
+              onAdd={(value, label) =>
+                patch({ customModels: [...config.customModels, { value, label }] })
+              }
+            />
+          )}
         </div>
+      )}
+    </div>
+  );
+}
+
+function ProviderBrowse({
+  agentId,
+  presentValues,
+  onAdd,
+}: {
+  agentId: string;
+  presentValues: Set<string>;
+  onAdd: (value: string, label: string | null) => void;
+}) {
+  const [models, setModels] = useState<ModelInfo[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function browse() {
+    setLoading(true);
+    setError(null);
+    try {
+      setModels(await listProviderModels(agentId));
+    } catch (err) {
+      const code = typeof err === "string" ? err : "network";
+      setError(PROVIDER_FETCH_ERRORS[code] ?? PROVIDER_FETCH_ERRORS.network);
+      setModels(null);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div>
+      <Button
+        variant="outline"
+        size="sm"
+        className="h-8 gap-1 text-xs"
+        disabled={loading}
+        onClick={() => void browse()}
+      >
+        <RefreshCw className={cn("size-3.5", loading && "animate-spin")} />
+        {loading ? "Loading…" : "Browse provider models"}
+      </Button>
+      {error !== null && <p className="mt-2 text-xs text-destructive">{error}</p>}
+      {models !== null && (
+        <ul className="mt-2 space-y-1">
+          {models.map((m) => {
+            const present = presentValues.has(m.value);
+            return (
+              <li key={m.value} className="flex items-center gap-2 text-sm">
+                <span className="min-w-0 flex-1 truncate">{m.label}</span>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 px-2 text-xs"
+                  disabled={present}
+                  aria-label={present ? "Added" : `Add ${m.value}`}
+                  onClick={() => onAdd(m.value, m.label === m.value ? null : m.label)}
+                >
+                  {present ? "Added" : "Add"}
+                </Button>
+              </li>
+            );
+          })}
+        </ul>
       )}
     </div>
   );
