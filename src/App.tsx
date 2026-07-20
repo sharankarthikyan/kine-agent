@@ -120,6 +120,13 @@ import {
   type PluginEntry,
 } from "./lib/conductor";
 import { buildTree, type TreeNode } from "./lib/tree";
+import {
+  composeModels,
+  getAgentConfig,
+  pickDefaultModel,
+  readAgentConfigs,
+  useAgentConfigs,
+} from "./lib/agentConfig";
 
 const CustomizationsDialog = lazy(() =>
   import("./components/CustomizationsDialog").then((mod) => ({
@@ -252,6 +259,17 @@ export default function App() {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [selectedModel, setSelectedModel] = useState<ModelInfo | null>(null);
   const [sessionModelValues, setSessionModelValues] = useState<Record<string, string>>({});
+  const agentConfigs = useAgentConfigs();
+  // The picker never renders the raw discovered list — curation applies everywhere.
+  const modelsForAgent = useCallback(
+    (agentId: string) =>
+      composeModels(
+        models.filter((m) => m.agent === agentId),
+        getAgentConfig(agentConfigs, agentId),
+        agentId,
+      ),
+    [models, agentConfigs],
+  );
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [selectedAgent, setSelectedAgent] = useState<AgentInfo | null>(null);
   // Per-agent enable/disable choices (localStorage-backed). Codex ships enabled;
@@ -619,8 +637,19 @@ export default function App() {
         installed.find((a) => isAgentSpawnable(a.id)) ??
         installed[0] ??
         null;
-      const defaultModel =
-        all.find((m) => m.agent === defaultAgent?.id) ?? all[0] ?? null;
+      const configs = readAgentConfigs();
+      const defaultModel = defaultAgent
+        ? (pickDefaultModel(
+            composeModels(
+              all.filter((m) => m.agent === defaultAgent.id),
+              getAgentConfig(configs, defaultAgent.id),
+              defaultAgent.id,
+            ),
+            getAgentConfig(configs, defaultAgent.id),
+          ) ??
+          all[0] ??
+          null)
+        : (all[0] ?? null);
       setAgents(supported);
       setSelectedAgent((prev) => prev ?? defaultAgent);
       setModels(all);
@@ -1926,24 +1955,21 @@ export default function App() {
                 const paneAgent = isAgentSpawnable(importedAgent)
                   ? importedAgent
                   : (selectedModel?.agent ?? models[0]?.agent ?? "claude");
-                const paneModels = models.filter((m) => m.agent === paneAgent);
+                const paneModels = modelsForAgent(paneAgent);
                 const paneModel = paneSession
                   ? modelForSession(paneSession)
                   : selectedModel?.agent === paneAgent
                     ? selectedModel
-                    : (paneModels[0] ?? null);
+                    : pickDefaultModel(paneModels, getAgentConfig(agentConfigs, paneAgent));
                 // New Session pane draft (per-pane, so tabs don't share model/agent/permission).
                 const draft = pane.sessionId === null ? draftFor(pane.id) : null;
                 const draftAgent = draft
                   ? (agents.find((a) => a.id === draft.agentId) ?? null)
                   : null;
-                const draftModels = draft
-                  ? models.filter((m) => m.agent === draft.agentId)
-                  : [];
+                const draftModels = draft ? modelsForAgent(draft.agentId) : [];
                 const draftModel = draft
                   ? (draftModels.find((m) => m.value === draft.modelValue) ??
-                    draftModels[0] ??
-                    null)
+                    pickDefaultModel(draftModels, getAgentConfig(agentConfigs, draft.agentId)))
                   : null;
                 return (
                   <section
