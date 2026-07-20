@@ -35,3 +35,23 @@ test("the Default swatch clears the token", async () => {
   await userEvent.click(screen.getByRole("radio", { name: "Default" }));
   expect(readAgentConfigs().claude?.color).toBeNull();
 });
+
+test("ArrowRight moves the roving tab stop and selects the next swatch, wrapping", async () => {
+  render(<AgentCustomize agentId="claude" />);
+  await userEvent.click(screen.getByRole("button", { name: "Customize" }));
+  await userEvent.click(screen.getByRole("radio", { name: "rose" }));
+
+  expect(screen.getAllByRole("radio").filter((r) => r.tabIndex === 0)).toHaveLength(1);
+
+  screen.getByRole("radio", { name: "rose" }).focus();
+  await userEvent.keyboard("{ArrowRight}");
+
+  expect(readAgentConfigs().claude?.color).toBe("emerald");
+  const emerald = screen.getByRole("radio", { name: "emerald" });
+  expect(emerald).toHaveAttribute("aria-checked", "true");
+  expect(emerald).toHaveFocus();
+  expect(emerald.tabIndex).toBe(0);
+  const tabbableRadios = screen.getAllByRole("radio").filter((r) => r.tabIndex === 0);
+  expect(tabbableRadios).toHaveLength(1);
+  expect(tabbableRadios[0]).toBe(emerald);
+});
