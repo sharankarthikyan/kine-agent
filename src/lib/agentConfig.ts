@@ -6,6 +6,7 @@
 // from one pure function. The stored config never names an invisible default:
 // updateAgentConfig clears defaultModel when the patch hides or removes it.
 
+import { useSyncExternalStore } from "react";
 import type { ModelInfo } from "./models";
 
 export interface CustomModel {
@@ -198,4 +199,39 @@ export function pickDefaultModel(
       ? composed.find((m) => m.value === config.defaultModel && !m.disabled)
       : undefined;
   return configured ?? composed.find((m) => !m.disabled) ?? composed[0] ?? null;
+}
+
+// ---- reactive read (module tail) ----------------------------------------
+
+// Cache keyed on the raw string so getSnapshot returns a stable reference
+// between writes (useSyncExternalStore requires referential stability).
+let snapshotRaw: string | null | undefined;
+let snapshotMap: AgentConfigMap = {};
+
+function getSnapshot(): AgentConfigMap {
+  let raw: string | null = null;
+  try {
+    raw = window.localStorage.getItem(STORAGE_KEY);
+  } catch {
+    raw = null;
+  }
+  if (raw !== snapshotRaw) {
+    snapshotRaw = raw;
+    snapshotMap = readAgentConfigs();
+  }
+  return snapshotMap;
+}
+
+function subscribe(onChange: () => void): () => void {
+  window.addEventListener(CONFIG_CHANGED_EVENT, onChange);
+  window.addEventListener("storage", onChange);
+  return () => {
+    window.removeEventListener(CONFIG_CHANGED_EVENT, onChange);
+    window.removeEventListener("storage", onChange);
+  };
+}
+
+/** Reactive view of all agent configs; updates on any writeAgentConfigs call. */
+export function useAgentConfigs(): AgentConfigMap {
+  return useSyncExternalStore(subscribe, getSnapshot, () => snapshotMap);
 }

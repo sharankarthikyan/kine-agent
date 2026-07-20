@@ -1,5 +1,10 @@
 import { Bot } from "lucide-react";
 import { cn } from "@/lib/utils";
+import {
+  AGENT_COLOR_CLASSES,
+  getAgentConfig,
+  useAgentConfigs,
+} from "@/lib/agentConfig";
 
 // Human-readable names, used for the glyph's accessible label / tooltip.
 const AGENT_LABELS: Record<string, string> = {
@@ -32,15 +37,14 @@ interface AgentLogoProps {
  * next to this glyph almost everywhere, so agents stay identifiable.
  */
 export function AgentLogo({ agent, className }: AgentLogoProps) {
+  const configs = useAgentConfigs();
   const label = AGENT_LABELS[agent] ?? agent;
+  const token = getAgentConfig(configs, agent).color;
+  const colorClass =
+    (token !== null ? AGENT_COLOR_CLASSES[token] : undefined) ??
+    AGENT_COLORS[agent] ??
+    "text-muted-foreground";
   return (
-    <Bot
-      aria-label={label}
-      className={cn(
-        "shrink-0",
-        AGENT_COLORS[agent] ?? "text-muted-foreground",
-        className,
-      )}
-    />
+    <Bot aria-label={label} className={cn("shrink-0", colorClass, className)} />
   );
 }
