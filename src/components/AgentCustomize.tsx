@@ -15,6 +15,7 @@ import {
   X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { AGENT_COLORS } from "@/components/AgentLogo";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -203,7 +204,12 @@ export function AgentCustomize({ agentId }: AgentCustomizeProps) {
                 tabIndex={config.color === null ? 0 : -1}
                 onClick={() => setColor(null)}
                 className={cn(
-                  "size-5 rounded-full bg-muted-foreground/40",
+                  "size-5 rounded-full",
+                  // "Default" reverts to the built-in tint, so show that tint —
+                  // a neutral grey here would misstate the effective icon color.
+                  AGENT_COLORS[agentId]
+                    ? cn("bg-current", AGENT_COLORS[agentId])
+                    : "bg-muted-foreground/40",
                   config.color === null && "ring-2 ring-ring ring-offset-2 ring-offset-background",
                 )}
               />

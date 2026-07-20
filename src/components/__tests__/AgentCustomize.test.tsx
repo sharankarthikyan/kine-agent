@@ -60,6 +60,14 @@ test("the Default swatch clears the token", async () => {
   expect(readAgentConfigs().claude?.color).toBeNull();
 });
 
+test("the Default swatch shows the agent's built-in tint, not neutral grey", async () => {
+  render(<AgentCustomize agentId="claude" />);
+  await userEvent.click(screen.getByRole("button", { name: "Customize" }));
+  const defaultSwatch = screen.getByRole("radio", { name: "Default" });
+  expect(defaultSwatch).toHaveClass("text-amber-500", "bg-current");
+  expect(defaultSwatch).not.toHaveClass("bg-muted-foreground/40");
+});
+
 test("ArrowRight moves the roving tab stop and selects the next swatch, wrapping", async () => {
   render(<AgentCustomize agentId="claude" />);
   await userEvent.click(screen.getByRole("button", { name: "Customize" }));

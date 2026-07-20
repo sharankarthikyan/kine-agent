@@ -17,7 +17,7 @@ const AGENT_LABELS: Record<string, string> = {
 // A distinct tint per agent so the neutral Bot glyphs stay tellable apart at a
 // glance — no vendor logo artwork, just a color plus the label beside it. Chosen
 // to read on both light and dark grounds; an unknown agent falls back to muted.
-const AGENT_COLORS: Record<string, string> = {
+export const AGENT_COLORS: Record<string, string> = {
   claude: "text-amber-500",
   codex: "text-teal-500",
   gemini: "text-blue-500",
