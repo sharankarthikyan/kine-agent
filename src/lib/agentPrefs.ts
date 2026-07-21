@@ -60,7 +60,7 @@ export const AGENT_META: AgentMeta[] = [
     installDocsUrl: "https://antigravity.google/docs/cli-install",
     consent: {
       title: "Before you enable Antigravity",
-      body: "Antigravity signs in with your Google account. Google's terms don't cover automated use through third-party tools like Kine Agent, and Google has enforced this — it could affect your access. Antigravity's CLI has no API-key alternative, so enable it only if you accept that risk for your own account.",
+      body: "Antigravity signs in with your Google account. Google's terms don't cover automated use through third-party tools like Kine Agent, and Google actively enforces this: paid subscribers have had their accounts permanently banned, without warning, for using third-party tools. Antigravity's CLI has no API-key alternative, so enable it only if you accept that risk for your own Google account.",
     },
   },
 ];

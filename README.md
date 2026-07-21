@@ -11,8 +11,8 @@ Instead of juggling several agent CLIs across terminal tabs, you drive them all 
 one window. Each session runs in its own git worktree, so the edits agents make
 land on a dedicated branch for you to review before anything merges into your repo.
 
-> Formerly "agent-editor". Existing `~/.agent-editor/` data is migrated to
-> `~/.kine-agent/` automatically on first launch.
+> Formerly "agent-editor" (and briefly "Kineloop"). Existing `~/.agent-editor/` or
+> `~/.kineloop/` data is migrated to `~/.kine-agent/` automatically on first launch.
 
 ## Highlights
 
@@ -106,8 +106,13 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets
 
 ## Data & privacy
 
-Kine Agent is local-only and makes **no network calls of its own** — no telemetry, no
-analytics, no accounts. Each agent CLI uses its own login by default; the only credential
+Kine Agent is local-first with **no telemetry, no analytics, and no accounts**. It makes
+exactly three kinds of network calls of its own, all to fixed endpoints: checking this
+repository's GitHub Releases for app updates, downloading the pinned agent-adapter
+packages from the npm registry on first ACP use (integrity-verified against lockfiles
+shipped in the app), and — only if you add an API key — fetching that vendor's model list
+directly from the vendor's API with your key. Session content is never transmitted.
+Each agent CLI uses its own login by default; the only credential
 Kine Agent ever stores is an **optional** API key you choose to add for Claude or Codex,
 held in your **OS keychain** (never in the database or logs) and used only to authenticate
 that agent's own CLI.

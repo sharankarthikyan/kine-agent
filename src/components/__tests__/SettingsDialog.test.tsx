@@ -105,7 +105,7 @@ test("the About section carries the non-affiliation disclaimer and local-data di
   expect(
     screen.getByText(/not affiliated with, sponsored by, or endorsed by/i),
   ).toBeInTheDocument();
-  expect(screen.getByText(/no network calls of its own/i)).toBeInTheDocument();
+  expect(screen.getByText(/no telemetry, analytics, or accounts/i)).toBeInTheDocument();
 });
 
 test("the About section shows the app version", async () => {

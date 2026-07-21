@@ -570,10 +570,13 @@ function AboutSection() {
       <div className="flex flex-col gap-1.5">
         <h3 className="text-sm font-medium">Your data stays on this machine</h3>
         <p className="text-xs leading-relaxed text-muted-foreground">
-          Kine Agent makes no network calls of its own and includes no telemetry. Your prompts,
-          the agents' replies, the commands they run, and those commands' output are recorded
-          verbatim in a local SQLite database under <span className="font-mono">~/.kine-agent</span>{" "}
-          so you can review and resume sessions — nothing is sent anywhere. Deleting a session,
+          Kine Agent includes no telemetry, analytics, or accounts. Its only network calls are
+          the app-update check against GitHub, a one-time integrity-verified download of the
+          agent adapter packages, and — if you add an API key — fetching that vendor's model
+          list with your key. Your prompts, the agents' replies, the commands they run, and
+          those commands' output are recorded verbatim in a local SQLite database under{" "}
+          <span className="font-mono">~/.kine-agent</span> so you can review and resume
+          sessions — none of it is sent anywhere. Deleting a session,
           or the <span className="font-mono">~/.kine-agent</span> folder, removes that history.
           If you add an API key for an agent, it is stored in your OS keychain — never in that
           database or in logs — and used only to authenticate that agent's own CLI.
