@@ -29,11 +29,11 @@ import { ChangesPanel } from "./components/ChangesPanel";
 import { FilesTree } from "./components/FilesTree";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
-  Sheet,
-  SheetContent,
-  SheetHeader,
-  SheetTitle,
-} from "@/components/ui/sheet";
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Toaster } from "@/components/ui/sonner";
 import { UpdaterHost } from "./components/UpdaterHost";
@@ -2328,26 +2328,28 @@ export default function App() {
         </main>
       </div>
 
-      {/* Rule viewer Sheet — rendered once, controlled by ruleView state. */}
-      <Sheet
+      {/* Rule/config viewer — a centered dialog (matches DiffReviewDialog chrome),
+          rendered once and controlled by ruleView state. */}
+      <Dialog
         open={ruleView !== null}
         onOpenChange={(o) => {
           if (!o) setRuleView(null);
         }}
       >
-        <SheetContent className="w-[min(480px,calc(100vw-1rem))] sm:max-w-none flex flex-col rounded-l-xl">
-          <SheetHeader>
-            <SheetTitle className="font-mono text-sm">
-              {ruleView?.label}
-            </SheetTitle>
-          </SheetHeader>
+        <DialogContent className="w-[min(720px,90vw)] h-[min(560px,80vh)] max-w-none flex flex-col p-0 gap-0 overflow-hidden rounded-2xl border border-border shadow-2xl">
+          <DialogTitle className="flex h-12 shrink-0 items-center border-b border-border px-4 font-mono text-sm font-medium">
+            {ruleView?.label}
+          </DialogTitle>
+          <DialogDescription className="sr-only">
+            Read-only view of this rules or configuration file.
+          </DialogDescription>
           <ScrollArea className="flex-1 min-h-0">
-            <pre className="font-mono text-xs whitespace-pre-wrap p-4">
+            <pre className="select-text font-mono text-xs leading-relaxed whitespace-pre-wrap p-4">
               {ruleView?.content}
             </pre>
           </ScrollArea>
-        </SheetContent>
-      </Sheet>
+        </DialogContent>
+      </Dialog>
 
       <DiffReviewDialog
         open={diffDialog !== null}
