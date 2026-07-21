@@ -21,8 +21,10 @@ test("renders multiple turns with their prompts and events", () => {
 });
 
 test("does not render an empty user bubble for event-only turns", () => {
+  // status events no longer render in the transcript, so the turn's visible
+  // content is a durable notice instead.
   const turns: Turn[] = [
-    { prompt: "", events: [{ kind: "status", data: { text: "Compacted" } }] },
+    { prompt: "", events: [{ kind: "notice", data: { message: "Compacted" } }] },
   ];
   render(<Conversation turns={turns} running={false} />);
   expect(screen.getByText("Compacted")).toBeInTheDocument();

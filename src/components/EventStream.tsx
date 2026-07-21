@@ -91,30 +91,18 @@ export function EventStream({ events, onOpenFile, onOpenAuthLogin, onApprovalRes
     (acc, e, i) => (e.kind === "plan" ? i : acc),
     -1,
   );
-  // Status rows are live progress ("Launching ACP adapter", "Connecting…"),
-  // not transcript: each one hides as soon as any real activity follows it,
-  // so past turns don't accumulate the same plumbing lines forever. Durable
-  // adapter notes use the "notice" kind instead.
-  const lastActivityIndex = events.reduce(
-    (acc, e, i) =>
-      e.kind === "token" ||
-      e.kind === "thought" ||
-      e.kind === "toolCall" ||
-      e.kind === "fileWrite" ||
-      e.kind === "done" ||
-      e.kind === "error"
-        ? i
-        : acc,
-    -1,
-  );
+  // Status events ("Launching ACP adapter", "Connecting…") never render in the
+  // transcript: RunningIndicator already surfaces the LATEST one as its live
+  // spinner title, so a row here is a duplicate while running and stale noise
+  // afterwards. Durable adapter notes use the "notice" kind instead.
   const visible = events.filter(
     (e, i) =>
+      e.kind !== "status" &&
       e.kind !== "toolStatus" &&
       e.kind !== "terminalOutput" &&
       e.kind !== "terminalExit" &&
       e.kind !== "approvalResolved" &&
-      (e.kind !== "plan" || i === lastPlanIndex) &&
-      (e.kind !== "status" || i > lastActivityIndex),
+      (e.kind !== "plan" || i === lastPlanIndex),
   );
   const hasProse = visible.some((e) => e.kind === "token");
   const groups = groupEventRuns(visible);
@@ -333,11 +321,8 @@ function renderEvent(
       return null;
 
     case "status":
-      return (
-        <div className="text-sm font-medium text-muted-foreground">
-          {event.data.text}
-        </div>
-      );
+      // Filtered out above — RunningIndicator owns live status display.
+      return null;
 
     case "toolCall": {
       const summary = describeToolCall(event.data.name, event.data.input);
