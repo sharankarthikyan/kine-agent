@@ -41,6 +41,16 @@ pub struct AcpProfile {
     /// interactively instead of auto-approving. Claude keeps M1–M5 behavior
     /// (false) until revisited.
     pub interactive_escalations: bool,
+    /// Validate the user's model pick against the values the agent advertised
+    /// in its "model" configOptions select, and SKIP the pick when unlisted.
+    /// codex only (verified 2026-07-21): codex-acp accepts an unknown slug via
+    /// set_config_option and then fails the whole turn with -32603 at prompt
+    /// time (`codex debug models` can list models newer than the pinned
+    /// engine, e.g. gpt-5.6-terra vs 0.16.0's gpt-5.5). claude must stay
+    /// false: Kine sends family aliases ("opus") which claude-agent-acp
+    /// resolves fine but does NOT literal-list (it advertises "opus[1m]") —
+    /// strict matching there would skip every valid pick.
+    pub strict_model_values: bool,
 }
 
 pub const CLAUDE_ACP: AcpProfile = AcpProfile {
@@ -51,6 +61,7 @@ pub const CLAUDE_ACP: AcpProfile = AcpProfile {
     login_command: "claude",
     auth_message: "Sign in to Claude Code in a terminal, then retry this message.",
     interactive_escalations: false,
+    strict_model_values: false,
 };
 
 pub const CODEX_ACP: AcpProfile = AcpProfile {
@@ -61,6 +72,7 @@ pub const CODEX_ACP: AcpProfile = AcpProfile {
     login_command: "codex login",
     auth_message: "Sign in to Codex CLI in a terminal, then retry this message.",
     interactive_escalations: true,
+    strict_model_values: true,
 };
 
 impl AcpProfile {
@@ -711,8 +723,28 @@ pub async fn drive_session(
     // a process restart, so the pick is re-asserted on EVERY turn — fresh or
     // resumed. Best-effort: a failure means the turn runs on the agent's default
     // model, never that it dies.
+    //
+    // Strict-validation profiles (codex): an unlisted pick is skipped instead
+    // of forwarded — the engine accepts the unknown slug and then fails the
+    // whole turn with -32603 at prompt time (the picker lists the CLI's models
+    // via `codex debug models`, which can be newer than the pinned engine's).
+    // See `AcpProfile::strict_model_values` for why claude must not do this.
     if let Some(model) = prompt.model.as_deref() {
-        if let Err(e) =
+        if profile.strict_model_values
+            && !modes.model_values.is_empty()
+            && !modes.model_values.iter().any(|v| v == model)
+        {
+            let fallback = modes
+                .model_current
+                .clone()
+                .unwrap_or_else(|| "its default model".to_string());
+            sink.emit(AgentEvent::Notice {
+                message: format!(
+                    "Model {model} isn't supported by this agent's engine yet (supported: {}) — running on {fallback}",
+                    modes.model_values.join(", ")
+                ),
+            });
+        } else if let Err(e) =
             client::session_set_config_option(&peer, &acp_session_id, "model", model).await
         {
             eprintln!(
@@ -1543,6 +1575,22 @@ mod tests {
         F: FnOnce(AgentReader, AgentWriter, PathBuf) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = ()> + Send,
     {
+        run_agent_fixture_with_profile(CLAUDE_ACP, prompt, resume_session, resolver, agent).await
+    }
+
+    /// Like [`run_agent_fixture`] but with an explicit profile — for behavior
+    /// that branches on profile flags (e.g. `strict_model_values`).
+    async fn run_agent_fixture_with_profile<F, Fut>(
+        profile: AcpProfile,
+        prompt: Prompt,
+        resume_session: Option<String>,
+        resolver: Option<Resolver>,
+        agent: F,
+    ) -> Harness
+    where
+        F: FnOnce(AgentReader, AgentWriter, PathBuf) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send,
+    {
         let worktree = unique_worktree();
         let (ours, theirs) = tokio::io::duplex(64 * 1024);
         let (read, write) = tokio::io::split(ours);
@@ -1574,7 +1622,7 @@ mod tests {
             Arc::clone(&captured),
             approvals.clone(),
             "app-session".to_string(),
-            CLAUDE_ACP,
+            profile,
             cancel_rx,
         )
         .await
@@ -2124,6 +2172,116 @@ mod tests {
         assert!(
             events.iter().any(|e| matches!(e, AgentEvent::Done { .. })),
             "resume turn must complete normally, got {events:?}"
+        );
+    }
+
+    /// A pick the agent did NOT list in its "model" configOptions select is
+    /// skipped, not forwarded: codex-acp 0.16.0 accepts an unknown slug via
+    /// set_config_option and then fails the whole turn with -32603 at prompt
+    /// time (observed live 2026-07-21 with gpt-5.6-terra — the picker's list
+    /// comes from `codex debug models`, which can outrun the pinned engine).
+    /// The fixture proves no set_config_option is sent (the request after
+    /// session/new must already be session/prompt) and a Status names the
+    /// supported models.
+    #[tokio::test]
+    async fn drive_session_skips_model_pick_the_agent_did_not_advertise() {
+        let prompt = Prompt {
+            text: "hello".into(),
+            model: Some("gpt-5.6-terra".into()),
+            ..Default::default()
+        };
+        let h = run_agent_fixture_with_profile(CODEX_ACP, prompt, None, None, |mut lines, mut w, _wt| async move {
+            let req = next_request(&mut lines, "initialize").await;
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":false}}}),
+            )
+            .await;
+            let req = next_request(&mut lines, "session/new").await;
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"sessionId":"acp-abc","modes":{"currentModeId":"default",
+                    "availableModes":[{"id":"default"}]},
+                    "configOptions":[{"id":"model","type":"select","currentValue":"gpt-5.5",
+                        "options":[{"value":"gpt-5.5"},{"value":"gpt-5.4-mini"}]}]}}),
+            )
+            .await;
+            // No set_config_option may arrive: the unsupported pick is dropped,
+            // so the very next request is the prompt itself.
+            let req = next_request(&mut lines, "session/prompt").await;
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"stopReason":"end_turn"}}),
+            )
+            .await;
+        })
+        .await;
+        let events = h.events.lock().unwrap();
+        assert!(
+            events.iter().any(|e| matches!(e, AgentEvent::Done { .. })),
+            "turn must complete on the fallback model, got {events:?}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, AgentEvent::Notice { message }
+                if message.contains("gpt-5.6-terra") && message.contains("gpt-5.5, gpt-5.4-mini"))),
+            "a notice must name the unsupported pick and the supported models, got {events:?}"
+        );
+    }
+
+    /// Claude must NOT get strict validation: Kine sends family aliases
+    /// ("opus") that claude-agent-acp resolves but does not literal-list in
+    /// its advertised values ("opus[1m]", verified live 2026-07-21). The pick
+    /// must still be forwarded even though it isn't in the advertised list.
+    #[tokio::test]
+    async fn drive_session_forwards_claude_alias_absent_from_advertised_values() {
+        let prompt = Prompt {
+            text: "hello".into(),
+            model: Some("opus".into()),
+            ..Default::default()
+        };
+        let h = run_agent_fixture(prompt, None, None, |mut lines, mut w, _wt| async move {
+            let req = next_request(&mut lines, "initialize").await;
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"protocolVersion":1,"agentCapabilities":{"loadSession":false}}}),
+            )
+            .await;
+            let req = next_request(&mut lines, "session/new").await;
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"sessionId":"acp-abc","modes":{"currentModeId":"default",
+                    "availableModes":[{"id":"default"}]},
+                    "configOptions":[{"id":"model","type":"select","currentValue":"default",
+                        "options":[{"value":"default"},{"value":"opus[1m]"},{"value":"sonnet"}]}]}}),
+            )
+            .await;
+            let req = next_request(&mut lines, "session/set_config_option").await;
+            assert_eq!(req["params"]["configId"], "model");
+            assert_eq!(req["params"]["value"], "opus");
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"configOptions":[]}}),
+            )
+            .await;
+            let req = next_request(&mut lines, "session/prompt").await;
+            send_line(
+                &mut w,
+                serde_json::json!({"jsonrpc":"2.0","id":req["id"],
+                "result":{"stopReason":"end_turn"}}),
+            )
+            .await;
+        })
+        .await;
+        let events = h.events.lock().unwrap();
+        assert!(
+            events.iter().any(|e| matches!(e, AgentEvent::Done { .. })),
+            "turn must complete with the alias forwarded, got {events:?}"
         );
     }
 

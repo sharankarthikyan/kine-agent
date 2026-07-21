@@ -94,14 +94,29 @@ pub async fn initialize(peer: &RpcPeer) -> Result<bool, RpcError> {
 
 /// Session-mode state advertised by session/new (and session/load) responses.
 /// Absent/malformed fields degrade to empty — mode syncing is best-effort.
+/// `model_values`/`model_current` mirror the "model" entry of the response's
+/// `configOptions` select, when advertised: codex-acp's bundled engine only
+/// supports the models it lists there, and silently accepting an unknown slug
+/// makes the TURN die later with -32603 (observed live 2026-07-21 with
+/// gpt-5.6-terra on codex-acp 0.16.0). Empty = not advertised; the pick is
+/// forwarded unvalidated as before (claude-agent-acp resolves aliases itself).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct SessionModes {
     pub current: Option<String>,
     pub available: Vec<String>,
+    pub model_values: Vec<String>,
+    pub model_current: Option<String>,
 }
 
 pub fn parse_modes(result: &Value) -> SessionModes {
     let modes = result.get("modes");
+    let model_option = result
+        .get("configOptions")
+        .and_then(Value::as_array)
+        .and_then(|opts| {
+            opts.iter()
+                .find(|o| o.get("id").and_then(Value::as_str) == Some("model"))
+        });
     SessionModes {
         current: modes
             .and_then(|m| m.get("currentModeId"))
@@ -116,6 +131,19 @@ pub fn parse_modes(result: &Value) -> SessionModes {
                     .collect()
             })
             .unwrap_or_default(),
+        model_values: model_option
+            .and_then(|o| o.get("options"))
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|o| o.get("value").and_then(Value::as_str).map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        model_current: model_option
+            .and_then(|o| o.get("currentValue"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
     }
 }
 
