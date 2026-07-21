@@ -479,7 +479,7 @@ function renderEvent(
 
     case "error":
       return (
-        <Alert variant="destructive" className="w-full">
+        <Alert variant="destructive" className="w-full select-text">
           <AlertDescription>{event.data.message}</AlertDescription>
         </Alert>
       );
@@ -563,7 +563,7 @@ function renderEvent(
       // Adapter-surfaced note (e.g. resume fallback). Quiet by design — it is
       // context, not an error.
       return (
-        <p className="text-xs italic text-muted-foreground">{event.data.message}</p>
+        <p className="select-text text-xs italic text-muted-foreground">{event.data.message}</p>
       );
 
     case "usage":
@@ -712,7 +712,7 @@ function ToolDetails({
             details !== summary &&
             // An empty "{}" input under a terminal is noise — the terminal IS the output.
             !(terminalText !== undefined && details === "{}") && (
-              <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-md border border-border/70 bg-muted/60 p-2 font-mono text-[11px] leading-relaxed text-foreground shadow-inner dark:bg-background/70">
+              <pre className="select-text mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-md border border-border/70 bg-muted/60 p-2 font-mono text-[11px] leading-relaxed text-foreground shadow-inner dark:bg-background/70">
                 {details}
               </pre>
             )

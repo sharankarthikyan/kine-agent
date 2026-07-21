@@ -40,7 +40,7 @@ export function TerminalView({ text, running, exitCode, signal, droppedBytes, ma
       {clamped && (
         <div className="border-b px-2 py-0.5 text-[10px] text-muted-foreground">earlier output trimmed</div>
       )}
-      <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-all px-2 py-1.5 font-mono text-xs leading-relaxed">
+      <pre className="select-text max-h-72 overflow-auto whitespace-pre-wrap break-all px-2 py-1.5 font-mono text-xs leading-relaxed">
         {display}
       </pre>
       {(exitLabel || droppedBytes !== undefined) && (

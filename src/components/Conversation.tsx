@@ -152,7 +152,9 @@ export function Conversation({
               <div className="text-xs font-medium text-muted-foreground">
                 You
               </div>
-              <div className="self-end min-w-0 max-w-prose [overflow-wrap:anywhere] rounded-lg bg-muted px-4 py-3 text-foreground whitespace-pre-wrap">
+              {/* select-text: body is select-none for native-chrome feel, so
+                  every content surface must opt back in. */}
+              <div className="select-text self-end min-w-0 max-w-prose [overflow-wrap:anywhere] rounded-lg bg-muted px-4 py-3 text-foreground whitespace-pre-wrap">
                 {turn.prompt}
               </div>
             </section>

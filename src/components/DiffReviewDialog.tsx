@@ -269,7 +269,7 @@ export function DiffReviewDialog({
                         <span className="select-none text-right text-muted-foreground">
                           {lineMarker(line.kind)}
                         </span>
-                        <span className="min-w-0 whitespace-pre-wrap break-words">
+                        <span className="select-text min-w-0 whitespace-pre-wrap break-words">
                           {lineText(line.kind, line.text)}
                         </span>
                       </div>
