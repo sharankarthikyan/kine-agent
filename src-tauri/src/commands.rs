@@ -1379,7 +1379,11 @@ pub async fn cleanup_session(
         .await
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "session not found".to_string())?;
-    let repo_path = canonical_repo_path(repo)?;
+    // A deleted/moved repo must not make the session undeletable: without this
+    // fallback, canonical_repo_path errors first and the session becomes a
+    // permanent ghost. With no repo there is no git bookkeeping to reconcile —
+    // just remove the (validated) worktree directory itself.
+    let repo_path = canonical_repo_path(repo).ok();
     let root = worktree_root_for(&session_id);
     let cleanup_id = session_id.clone();
     // Resolve+validate the session→worktree mapping, then remove off the async runtime.
@@ -1387,7 +1391,16 @@ pub async fn cleanup_session(
     // so a prior partial cleanup or a manual deletion still succeeds here.
     tokio::task::spawn_blocking(move || {
         let wt = worktree::worktree_for(&root, &cleanup_id)?;
-        worktree::remove(&repo_path, &wt)
+        match repo_path {
+            Some(repo_path) => worktree::remove(&repo_path, &wt),
+            None => {
+                if wt.path.exists() {
+                    std::fs::remove_dir_all(&wt.path)
+                        .map_err(crate::worktree::WorktreeError::from)?;
+                }
+                Ok(())
+            }
+        }
     })
     .await
     .map_err(|e| e.to_string())?

@@ -225,6 +225,8 @@ function safeErrorMessage(err: unknown): string {
 
 export default function App() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  // Pending delete-session confirmation (in-app dialog — see handleCleanupSession).
+  const [cleanupTarget, setCleanupTarget] = useState<{ id: string; title: string } | null>(null);
   const [turnsBySession, setTurnsBySession] = useState<Record<string, Turn[]>>({});
   const [eventsBySession, setEventsBySession] = useState<Record<string, StoredEvent[]>>({});
   const [eventPagesBySession, setEventPagesBySession] = useState<
@@ -1676,27 +1678,44 @@ export default function App() {
   // Clean up a SPECIFIC session's worktree (pane-scoped, not the globally-active one) so
   // the Trash button in a non-focused split pane acts on that pane's session. Cleanup now
   // also deletes the session, so any pane showing it is reset to the New Session view.
-  async function handleCleanupSession(sessionId: string) {
+  //
+  // Confirmation is an in-app dialog, NOT window.confirm: wry's WKWebView has no
+  // JS-dialog delegate, so window.confirm returns false without ever rendering on
+  // macOS — the old flow silently did nothing there.
+  function handleCleanupSession(sessionId: string) {
     const session = sessions.find((s) => s.id === sessionId) ?? null;
     if (!session || session.source === "external") return;
-    const confirmed = window.confirm(
-      `Remove the worktree and branch for "${session.title}"? This does not touch the original repository.`,
-    );
-    if (!confirmed) return;
+    setCleanupTarget({ id: sessionId, title: session.title });
+  }
+
+  async function confirmCleanupSession() {
+    const target = cleanupTarget;
+    if (!target) return;
+    setCleanupTarget(null);
     try {
-      await cleanupSession(sessionId);
-      toast.success("Session worktree cleaned up");
+      await cleanupSession(target.id);
+      toast.success("Session deleted and worktree cleaned up");
       // Blank every pane that was showing the now-deleted session.
       setPanes((prev) =>
         prev.map((pane) =>
-          pane.sessionId === sessionId ? { ...pane, sessionId: null } : pane,
+          pane.sessionId === target.id ? { ...pane, sessionId: null } : pane,
         ),
       );
-      if (activeSessionIdRef.current === sessionId) {
+      if (activeSessionIdRef.current === target.id) {
         setActive(null);
         resetFocusedSessionState();
         closeRight();
       }
+      // Drop the cached transcript so a later session reusing memory isn't
+      // seeded with the deleted session's events.
+      setEventsBySession((prev) => {
+        const { [target.id]: _removed, ...rest } = prev;
+        return rest;
+      });
+      setTurnsBySession((prev) => {
+        const { [target.id]: _removed, ...rest } = prev;
+        return rest;
+      });
       await refreshSessions();
     } catch (err) {
       toast.error(safeErrorMessage(err));
@@ -2327,6 +2346,36 @@ export default function App() {
           )}
         </main>
       </div>
+
+      {/* Delete-session confirmation — in-app dialog because window.confirm never
+          renders under wry's WKWebView (no JS-dialog delegate). */}
+      <Dialog
+        open={cleanupTarget !== null}
+        onOpenChange={(o) => {
+          if (!o) setCleanupTarget(null);
+        }}
+      >
+        <DialogContent className="w-[min(440px,90vw)] rounded-2xl border border-border p-6 shadow-2xl">
+          <DialogTitle className="text-base font-semibold">
+            Delete this session?
+          </DialogTitle>
+          <DialogDescription className="text-sm text-muted-foreground">
+            Removes the worktree, its branch, and the recorded transcript for{" "}
+            <span className="font-medium text-foreground">
+              "{cleanupTarget?.title}"
+            </span>
+            . Your original repository is not touched. This cannot be undone.
+          </DialogDescription>
+          <div className="mt-2 flex justify-end gap-2">
+            <Button variant="ghost" onClick={() => setCleanupTarget(null)}>
+              Cancel
+            </Button>
+            <Button variant="destructive" onClick={() => void confirmCleanupSession()}>
+              Delete session
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {/* Rule/config viewer — a centered dialog (matches DiffReviewDialog chrome),
           rendered once and controlled by ruleView state. */}
