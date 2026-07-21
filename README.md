@@ -2,10 +2,17 @@
 
 > Keep every agent loop under control.
 
-Kine Agent is a local-first desktop app that spawns and supervises AI coding-agent
-CLIs — Claude Code, OpenAI Codex, and Antigravity — as subprocesses, and presents
-them in one structured orchestrator UI: a session list, live status, diff viewer,
-and approval gates, with per-session git-worktree isolation.
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Latest release](https://img.shields.io/github/v/release/sharankarthikyan/kine-agent)](https://github.com/sharankarthikyan/kine-agent/releases/latest)
+[![Open source](https://img.shields.io/badge/Open%20Source-%E2%9D%A4-brightgreen)](https://github.com/sharankarthikyan/kine-agent)
+![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey)
+
+Kine Agent is an **open-source (MIT)**, local-first desktop app that spawns and
+supervises AI coding-agent CLIs — Claude Code, OpenAI Codex, and Antigravity — as
+subprocesses, and presents them in one structured orchestrator UI: a session list,
+live status, diff viewer, and approval gates, with per-session git-worktree isolation.
+
+![Kine Agent — multi-pane sessions with live approval gates, diff review, and per-agent model pickers](docs/media/kine-agent-ui.png)
 
 Instead of juggling several agent CLIs across terminal tabs, you drive them all from
 one window. Each session runs in its own git worktree, so the edits agents make
