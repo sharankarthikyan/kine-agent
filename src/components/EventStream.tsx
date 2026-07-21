@@ -91,13 +91,30 @@ export function EventStream({ events, onOpenFile, onOpenAuthLogin, onApprovalRes
     (acc, e, i) => (e.kind === "plan" ? i : acc),
     -1,
   );
+  // Status rows are live progress ("Launching ACP adapter", "Connecting…"),
+  // not transcript: each one hides as soon as any real activity follows it,
+  // so past turns don't accumulate the same plumbing lines forever. Durable
+  // adapter notes use the "notice" kind instead.
+  const lastActivityIndex = events.reduce(
+    (acc, e, i) =>
+      e.kind === "token" ||
+      e.kind === "thought" ||
+      e.kind === "toolCall" ||
+      e.kind === "fileWrite" ||
+      e.kind === "done" ||
+      e.kind === "error"
+        ? i
+        : acc,
+    -1,
+  );
   const visible = events.filter(
     (e, i) =>
       e.kind !== "toolStatus" &&
       e.kind !== "terminalOutput" &&
       e.kind !== "terminalExit" &&
       e.kind !== "approvalResolved" &&
-      (e.kind !== "plan" || i === lastPlanIndex),
+      (e.kind !== "plan" || i === lastPlanIndex) &&
+      (e.kind !== "status" || i > lastActivityIndex),
   );
   const hasProse = visible.some((e) => e.kind === "token");
   const groups = groupEventRuns(visible);

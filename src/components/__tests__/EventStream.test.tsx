@@ -36,6 +36,31 @@ test("renders a transcript status event as inline text", () => {
   expect(screen.getByText("Compacted")).toBeInTheDocument();
 });
 
+test("hides status events once real activity follows — they are live progress, not transcript", () => {
+  const events: AgentEvent[] = [
+    { kind: "status", data: { text: "Launching ACP adapter" } },
+    { kind: "status", data: { text: "Connecting to ACP agent" } },
+    { kind: "token", data: { text: "Hi there" } },
+    { kind: "done", data: { summary: "" } },
+  ];
+  render(<EventStream events={events} />);
+  expect(screen.queryByText("Launching ACP adapter")).not.toBeInTheDocument();
+  expect(screen.queryByText("Connecting to ACP agent")).not.toBeInTheDocument();
+  expect(screen.getByText("Hi there")).toBeInTheDocument();
+});
+
+test("keeps a trailing status visible while nothing has followed it yet", () => {
+  const events: AgentEvent[] = [
+    { kind: "token", data: { text: "Earlier turn" } },
+    { kind: "done", data: { summary: "" } },
+    { kind: "status", data: { text: "Downloading the codex adapter (one-time, integrity-verified)" } },
+  ];
+  render(<EventStream events={events} />);
+  expect(
+    screen.getByText("Downloading the codex adapter (one-time, integrity-verified)"),
+  ).toBeInTheDocument();
+});
+
 test("renders agent token text as Markdown (bold, code)", () => {
   const events: AgentEvent[] = [
     { kind: "token", data: { text: "Use **bold** and `code` here" } },
