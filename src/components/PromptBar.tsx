@@ -5,6 +5,7 @@ import {
   Check,
   GitBranchPlus,
   Paperclip,
+  Settings2,
   Square,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -52,6 +53,8 @@ interface PromptBarProps {
   onStop?: () => void;
   /** External CLI history is read-only; sending forks it into a writable continuation. */
   mode?: "default" | "external-continuation";
+  /** Opens Settings (agent customization) — rendered as the picker's "Manage models…" footer. */
+  onManageModels?: () => void;
 }
 
 /** Capitalize the first letter of an agent id for use as a group label. */
@@ -85,6 +88,7 @@ export function PromptBar({
   onSandboxTerminalChange,
   onStop,
   mode = "default",
+  onManageModels,
 }: PromptBarProps) {
   const [text, setText] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -246,6 +250,19 @@ export function PromptBar({
                 <DropdownMenuGroup>
                   <DropdownMenuItem disabled>No models available</DropdownMenuItem>
                 </DropdownMenuGroup>
+              )}
+              {onManageModels && (
+                <>
+                  <DropdownMenuSeparator />
+                  {/* Footer action, not an option — the picker stays a picker;
+                      adding/hiding/reordering (incl. custom model ids) lives in
+                      Settings → agent customization, per the VS Code/Cursor/Zed
+                      "Manage models…" pattern. */}
+                  <DropdownMenuItem onSelect={onManageModels} className="gap-2">
+                    <Settings2 data-icon className="shrink-0 opacity-70" />
+                    <span>Manage models…</span>
+                  </DropdownMenuItem>
+                </>
               )}
             </DropdownMenuContent>
           </DropdownMenu>

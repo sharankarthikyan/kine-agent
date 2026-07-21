@@ -2145,6 +2145,7 @@ export default function App() {
                           onSandboxTerminalChange={(v) =>
                             setSessionSandbox(pane.sessionId!, v)
                           }
+                          onManageModels={() => setSettingsOpen(true)}
                           mode={
                             paneSession?.source === "external"
                               ? "external-continuation"

@@ -308,6 +308,15 @@ export function NewSession({
                     <DropdownMenuItem disabled>No models available</DropdownMenuItem>
                   </DropdownMenuGroup>
                 )}
+                <DropdownMenuSeparator />
+                {/* Footer action, not an option — adding/hiding/reordering
+                    (incl. custom model ids) lives in Settings → agent
+                    customization, per the VS Code/Cursor/Zed "Manage models…"
+                    pattern. */}
+                <DropdownMenuItem onSelect={onOpenSettings} className="gap-2">
+                  <Settings2 data-icon className="shrink-0 opacity-70" />
+                  <span>Manage models…</span>
+                </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
 
