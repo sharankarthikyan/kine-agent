@@ -2009,11 +2009,16 @@ pub async fn list_capabilities(
 #[tauri::command]
 pub async fn customizations_counts(
     session_id: Option<String>,
+    agent: Option<String>,
 ) -> Result<CustomizationCounts, String> {
     let root = worktree_root_for_opt(session_id.as_deref());
     tokio::task::spawn_blocking(move || {
         let path = inspect_scope(&root, session_id)?;
-        Ok::<CustomizationCounts, String>(inspect::customizations_counts(&path))
+        // Same agent scoping as list_capabilities: skills/subagents are Claude
+        // constructs, so non-claude sessions count 0 and the badge matches the
+        // listing. No agent (global sidebar scope) counts the claude view.
+        let agent = agent.as_deref().unwrap_or("claude");
+        Ok::<CustomizationCounts, String>(inspect::customizations_counts(&path, agent))
     })
     .await
     .map_err(|e| e.to_string())?

@@ -1154,14 +1154,19 @@ export default function App() {
     const sessionId = activeSessionId;
     (async () => {
       try {
-        const c = await customizationsCounts(sessionId);
+        // Same agent derivation as the capabilities fetch: the badge and the
+        // listing must agree (skills/subagents count 0 for non-claude agents).
+        const session = sessions.find((s) => s.id === sessionId) ?? null;
+        const agentId = session?.agent ?? selectedModel?.agent ?? "claude";
+        const c = await customizationsCounts(sessionId, agentId);
         if (activeSessionIdRef.current === sessionId) setCounts(c);
       } catch {
         if (activeSessionIdRef.current === sessionId) setCounts(null);
       }
     })();
     // custReloadKey: refresh counts after a create/edit/delete in the dialog.
-  }, [activeSessionId, custReloadKey]);
+    // sessions/selectedModel: the derived agent feeds the count scoping.
+  }, [activeSessionId, custReloadKey, sessions, selectedModel]);
 
   // closeRight keeps the "reset both flags together" invariant structural.
   const closeRight = () => {
@@ -2375,6 +2380,11 @@ export default function App() {
           capabilities={capabilities}
           rules={rules}
           sessionId={activeSessionId}
+          agent={
+            sessions.find((s) => s.id === activeSessionId)?.agent ??
+            selectedModel?.agent ??
+            "claude"
+          }
           hooks={hooks}
           mcpServers={mcpServers}
           plugins={plugins}

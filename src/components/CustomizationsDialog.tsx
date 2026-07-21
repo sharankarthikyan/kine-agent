@@ -16,6 +16,7 @@ import {
 import { toast } from "sonner";
 
 import { cn } from "@/lib/utils";
+import { agentMeta } from "@/lib/agentPrefs";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -51,6 +52,10 @@ export interface CustomizationsDialogProps {
   rules: RuleFile[];
   /** Active session worktree, or `null` to browse the user's global ~/.claude scope. */
   sessionId: string | null;
+  /** The agent whose capabilities are shown — skills/subagents are Claude-only,
+      so other agents get an explanatory empty state instead of "none found".
+      Defaults to "claude" (the global-scope view). */
+  agent?: string;
   hooks: HookEntry[];
   mcpServers: McpServerEntry[];
   plugins: PluginEntry[];
@@ -1374,12 +1379,19 @@ export function CustomizationsDialog({
   capabilities,
   rules,
   sessionId,
+  agent = "claude",
   hooks,
   mcpServers,
   plugins,
   onChanged,
 }: CustomizationsDialogProps) {
   const notifyChanged = onChanged ?? (() => {});
+  // Skills/subagents/slash-commands are Claude Code constructs; for any other
+  // agent the honest empty state names the reason instead of "none found".
+  const claudeOnlyEmpty = (what: string) =>
+    agent === "claude"
+      ? `No ${what} found.`
+      : `${what[0].toUpperCase()}${what.slice(1)} are a Claude Code feature — this ${agentMeta(agent)?.label ?? agent} session doesn't use them.`;
   const [activeSection, setActiveSection] = useState<CustomizationSection>(initialSection);
 
   // Per-section search query — resets when section changes.
@@ -1560,7 +1572,7 @@ export function CustomizationsDialog({
                     description="Subagents available to the active agent in this session."
                     kind="agent"
                     items={capabilities?.subagents ?? []}
-                    emptyLabel="No agents found."
+                    emptyLabel={claudeOnlyEmpty("agents")}
                     search={search}
                     onSearchChange={setSearch}
                     sessionId={sessionId}
@@ -1575,7 +1587,7 @@ export function CustomizationsDialog({
                     description="Slash commands and reusable skill scripts available in this session."
                     kind="skill"
                     items={capabilities?.skills ?? []}
-                    emptyLabel="No skills found."
+                    emptyLabel={claudeOnlyEmpty("skills")}
                     search={search}
                     onSearchChange={setSearch}
                     sessionId={sessionId}

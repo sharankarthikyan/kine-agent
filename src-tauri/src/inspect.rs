@@ -1059,15 +1059,23 @@ pub struct CustomizationCounts {
 
 /// Count customizations for a worktree + the user's ~/.claude home. Best-effort:
 /// any parse failure silently contributes 0 to the relevant field.
-pub fn customizations_counts(worktree: &Path) -> CustomizationCounts {
+/// `agent` scopes the subagent/skill counts the same way `list_capabilities`
+/// scopes the listings: those are Claude Code constructs, so a codex or
+/// antigravity session must count 0 — otherwise the sidebar/dialog badge says
+/// "Skills 24" while the panel (correctly) lists none.
+pub fn customizations_counts(worktree: &Path, agent: &str) -> CustomizationCounts {
     let home = crate::agent_paths::home_dir();
-    customizations_counts_with_home(worktree, home.as_deref())
+    customizations_counts_with_home(worktree, home.as_deref(), agent)
 }
 
 /// Inner implementation that accepts an explicit `home` path, enabling tests to
 /// inject a fake empty directory without mutating the global environment.
-fn customizations_counts_with_home(worktree: &Path, home: Option<&Path>) -> CustomizationCounts {
-    let caps = list_capabilities("claude", worktree);
+fn customizations_counts_with_home(
+    worktree: &Path,
+    home: Option<&Path>,
+    agent: &str,
+) -> CustomizationCounts {
+    let caps = list_capabilities(agent, worktree);
     let instructions = rule_candidates(worktree)
         .into_iter()
         .filter(|r| r.exists)
@@ -1437,13 +1445,23 @@ mod tests {
         )
         .unwrap();
 
-        let counts = customizations_counts_with_home(&dir, Some(&fake_home));
+        let counts = customizations_counts_with_home(&dir, Some(&fake_home), "claude");
         assert!(
             counts.agents >= 1,
             "expected at least 1 agent, got {}",
             counts.agents
         );
         assert_eq!(counts.mcp_servers, 1, "expected exactly 1 MCP server");
+
+        // Skills/subagents are Claude constructs: a codex session must count 0
+        // for both, so the badge always matches the (empty) listing.
+        let codex_counts = customizations_counts_with_home(&dir, Some(&fake_home), "codex");
+        assert_eq!(codex_counts.agents, 0);
+        assert_eq!(codex_counts.skills, 0);
+        assert_eq!(
+            codex_counts.mcp_servers, 1,
+            "agent-agnostic counts must be unaffected"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&fake_home);

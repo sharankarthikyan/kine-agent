@@ -145,12 +145,15 @@ export async function listPlugins(sessionId: string | null): Promise<PluginEntry
 }
 
 /** Return customization file counts (agents, skills, instructions, hooks, MCP servers)
- *  for a session, or — when `sessionId` is `null` — for the user's global ~/.claude scope. */
+ *  for a session, or — when `sessionId` is `null` — for the user's global ~/.claude scope.
+ *  `agent` scopes the skill/subagent counts the same way listCapabilities scopes the
+ *  listings (Claude-only constructs count 0 for other agents); omit for the claude view. */
 export async function customizationsCounts(
   sessionId: string | null,
+  agent?: string,
 ): Promise<CustomizationCounts> {
   assertDesktop();
-  return invoke<CustomizationCounts>("customizations_counts", { sessionId });
+  return invoke<CustomizationCounts>("customizations_counts", { sessionId, agent: agent ?? null });
 }
 
 /** Return the aggregate additions/deletions/files-changed diffstat for a session's worktree. */

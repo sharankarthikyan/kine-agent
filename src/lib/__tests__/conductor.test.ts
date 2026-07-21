@@ -71,9 +71,12 @@ describe("customizationsCounts", () => {
     const counts: CustomizationCounts = { agents: 2, skills: 5, instructions: 1, hooks: 0, mcpServers: 3 };
     vi.mocked(invoke).mockResolvedValue(counts);
 
-    const result = await customizationsCounts("sess-abc");
+    const result = await customizationsCounts("sess-abc", "codex");
 
-    expect(invoke).toHaveBeenCalledWith("customizations_counts", { sessionId: "sess-abc" });
+    expect(invoke).toHaveBeenCalledWith("customizations_counts", {
+      sessionId: "sess-abc",
+      agent: "codex",
+    });
     expect(result).toEqual(counts);
   });
 });
