@@ -355,13 +355,25 @@ fn route_line(line: &str, pending: &Pending, inbound: &mpsc::UnboundedSender<Inb
                 return;
             };
             let outcome = if let Some(err) = v.get("error") {
+                // codex-acp wraps the REAL backend failure ("model requires a
+                // newer version", "usage limit reached", …) in error.data.message
+                // and puts only "Internal error" in error.message — surface the
+                // useful one (bounded: it feeds toasts/transcript directly).
+                let data_message = err
+                    .pointer("/data/message")
+                    .and_then(Value::as_str)
+                    .map(|s| s.chars().take(400).collect::<String>())
+                    .filter(|s| !s.trim().is_empty());
+                let wire_message = err
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown error");
                 Err(RpcError::Remote {
                     code: err.get("code").and_then(Value::as_i64).unwrap_or(0),
-                    message: err
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("unknown error")
-                        .to_string(),
+                    message: match data_message {
+                        Some(d) => format!("{wire_message} — {d}"),
+                        None => wire_message.to_string(),
+                    },
                 })
             } else {
                 Ok(v.get("result").cloned().unwrap_or(Value::Null))
@@ -495,6 +507,38 @@ mod tests {
         });
         let err = fut.await.unwrap_err();
         assert!(err.to_string().contains("method not found"));
+        agent_task.await.unwrap();
+    }
+
+    /// codex-acp buries the real backend failure in error.data.message and puts
+    /// only "Internal error" in error.message (observed live 2026-07-21: model
+    /// rejection and usage-limit messages) — the useful text must surface.
+    #[tokio::test]
+    async fn error_data_message_is_surfaced_alongside_the_wire_message() {
+        let (peer, agent) = harness();
+        let (r, mut agent_tx) = tokio::io::split(agent);
+        let mut agent_rx = BufReader::new(r).lines();
+        let fut = peer.request("x", serde_json::json!({}));
+        let agent_task = tokio::spawn(async move {
+            let line = agent_rx.next_line().await.unwrap().unwrap();
+            let req: serde_json::Value = serde_json::from_str(&line).unwrap();
+            let resp = serde_json::json!({
+                "jsonrpc": "2.0", "id": req["id"],
+                "error": {"code": -32603, "message": "Internal error",
+                    "data": {"message": "You've hit your usage limit."}}
+            });
+            agent_tx
+                .write_all(format!("{resp}\n").as_bytes())
+                .await
+                .unwrap();
+        });
+        let err = fut.await.unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("Internal error"), "wire message kept: {text}");
+        assert!(
+            text.contains("You've hit your usage limit."),
+            "data.message surfaced: {text}"
+        );
         agent_task.await.unwrap();
     }
 
