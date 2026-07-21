@@ -1,6 +1,6 @@
 [package]
 name = "kine-agent"
-version = "0.3.3"
+version = "0.3.4"
 description = "Local-first desktop orchestrator for AI coding agents"
 authors = ["Sharan Karthikeyan"]
 edition = "2021"
