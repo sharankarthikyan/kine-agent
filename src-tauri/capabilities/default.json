@@ -8,7 +8,13 @@
     "core:window:allow-start-dragging",
     "updater:default",
     "process:allow-restart",
-    "opener:allow-open-url",
-    "opener:allow-default-urls"
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        { "url": "https://developers.openai.com/*" },
+        { "url": "https://code.claude.com/*" },
+        { "url": "https://antigravity.google/*" }
+      ]
+    }
   ]
 }

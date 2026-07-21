@@ -2158,9 +2158,21 @@ fn open_terminal_at(dir: &Path) -> Result<(), String> {
     }
 }
 
+/// Fixed set of command strings `open_terminal_command_at` is allowed to run. The function
+/// interpolates `command` unquoted into a shell string (`sh -lc "…"`, an AppleScript `do
+/// script`, or `cmd /K`), so anything reaching it must be a literal that has already been
+/// reviewed for shell metacharacters — never a caller-assembled string or one built from
+/// session/user-controlled data. Add a new literal here (and nowhere else) if a new caller
+/// needs one.
+const KNOWN_TERMINAL_COMMANDS: &[&str] = &["agy --prompt-interactive \"Sign in to Antigravity\""];
+
 /// Spawn the platform's terminal at `dir` and run a shell command. Used for CLI
-/// authentication flows that require a real interactive terminal/TTY.
+/// authentication flows that require a real interactive terminal/TTY. `command` must be a
+/// member of `KNOWN_TERMINAL_COMMANDS` — see that const's doc comment for why.
 fn open_terminal_command_at(dir: &Path, command: &str) -> Result<(), String> {
+    if !KNOWN_TERMINAL_COMMANDS.contains(&command) {
+        return Err(format!("command not allowed: {command}"));
+    }
     #[cfg(target_os = "macos")]
     {
         let script = format!("cd {} && {}", shell_quote(&dir.to_string_lossy()), command);
@@ -2304,9 +2316,10 @@ pub async fn commit_session(session_id: String, message: String) -> Result<Commi
 #[cfg(test)]
 mod tests {
     use super::{
-        build_resume_transcript, default_engine_for, normalize_title, resolve_worktree_root,
-        truncate_transcript_tail, validate_engine, validate_permission_mode, validate_prompt,
-        StoredEvent, MAX_PROMPT_BYTES, MAX_TRANSCRIPT_BYTES,
+        build_resume_transcript, default_engine_for, normalize_title, open_terminal_command_at,
+        resolve_worktree_root, truncate_transcript_tail, validate_engine,
+        validate_permission_mode, validate_prompt, StoredEvent, MAX_PROMPT_BYTES,
+        MAX_TRANSCRIPT_BYTES,
     };
     use crate::store;
 
@@ -2743,6 +2756,18 @@ mod tests {
         assert!(
             dropped.load(std::sync::atomic::Ordering::Acquire),
             "a serve_fut win must drop the run future, not leave it running unsupervised"
+        );
+    }
+
+    #[test]
+    fn open_terminal_command_at_rejects_non_allowlisted_commands() {
+        // The allowlist check runs before any terminal is spawned, so this never opens a
+        // real window even on a machine with a terminal emulator installed.
+        let dir = std::env::temp_dir();
+        let err = open_terminal_command_at(&dir, "rm -rf ~").unwrap_err();
+        assert!(
+            err.contains("not allowed"),
+            "expected a not-allowed error, got: {err}"
         );
     }
 }
