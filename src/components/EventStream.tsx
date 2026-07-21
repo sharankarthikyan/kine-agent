@@ -61,10 +61,19 @@ export function EventStream({ events, onOpenFile, onOpenAuthLogin, onApprovalRes
     );
   }
   // Last-write-wins status per tool call id; toolStatus rows never render
-  // themselves — they upgrade the chip with the matching id.
+  // themselves — they upgrade the chip with the matching id. Status-less
+  // updates can still carry a late input/title upgrade (claude-agent-acp
+  // sends the real rawInput AFTER an initial tool_call with rawInput {}),
+  // so those overlay the chip's name/input instead of leaving `{}`.
   const statusById = new Map<string, string>();
+  const inputById = new Map<string, string>();
+  const titleById = new Map<string, string>();
   for (const e of events) {
-    if (e.kind === "toolStatus") statusById.set(e.data.toolCallId, e.data.status);
+    if (e.kind === "toolStatus") {
+      if (e.data.status) statusById.set(e.data.toolCallId, e.data.status);
+      if (e.data.input) inputById.set(e.data.toolCallId, e.data.input);
+      if (e.data.detail) titleById.set(e.data.toolCallId, e.data.detail);
+    }
   }
   // Ordered concat of terminal output per tool call; exit metadata last-write-wins.
   const terminalTextById = new Map<string, string>();
@@ -104,8 +113,25 @@ export function EventStream({ events, onOpenFile, onOpenAuthLogin, onApprovalRes
       e.kind !== "approvalResolved" &&
       (e.kind !== "plan" || i === lastPlanIndex),
   );
-  const hasProse = visible.some((e) => e.kind === "token");
-  const groups = groupEventRuns(visible);
+  // Apply the late name/input upgrades BEFORE grouping/rendering so every
+  // downstream consumer (chip label, file-open target, expanded details)
+  // sees the real values with zero per-renderer plumbing.
+  const upgraded = visible.map((e) => {
+    if (e.kind !== "toolCall" || !e.data.toolCallId) return e;
+    const input = inputById.get(e.data.toolCallId);
+    const title = titleById.get(e.data.toolCallId);
+    if (input === undefined && title === undefined) return e;
+    return {
+      ...e,
+      data: {
+        ...e.data,
+        input: input ?? e.data.input,
+        name: title ?? e.data.name,
+      },
+    };
+  });
+  const hasProse = upgraded.some((e) => e.kind === "token");
+  const groups = groupEventRuns(upgraded);
   return (
     <div className="flex flex-col items-start gap-3">
       {groups.map((group, i) =>

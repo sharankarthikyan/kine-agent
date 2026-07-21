@@ -20,10 +20,15 @@ pub enum SessionUpdate {
         raw_input: String,
         tool_call_id: Option<String>,
     },
+    /// `status` may be empty: claude-agent-acp sends the REAL rawInput (and an
+    /// upgraded title) on a status-less tool_call_update after an initial
+    /// tool_call whose rawInput is `{}` (verified on the wire 2026-07-21) —
+    /// dropping those updates left every chip showing an empty `{}` input.
     ToolCallUpdate {
         tool_call_id: String,
         status: String,
         detail: String,
+        raw_input: Option<String>,
     },
     Plan {
         entries_json: String,
@@ -388,13 +393,22 @@ pub fn parse_session_updates(params: &Value) -> Vec<SessionUpdate> {
                     None => eprintln!("acp: terminal_output _meta without string data — skipped"),
                 }
             }
-            // Updates may carry only content/locations; without a status
-            // transition there is no ToolCallUpdate to surface.
-            if let Some(status) = update.get("status").and_then(Value::as_str) {
+            // Surface an update when it carries a status transition, an
+            // upgraded title, or a late-arriving rawInput (claude-agent-acp
+            // sends the real input on a status-less update — see enum docs).
+            // Content/locations-only updates still yield nothing.
+            let status = update.get("status").and_then(Value::as_str);
+            let title = update.get("title").and_then(Value::as_str);
+            let raw_input = update
+                .get("rawInput")
+                .map(|v| v.to_string())
+                .filter(|s| s != "{}" && s != "null");
+            if status.is_some() || title.is_some() || raw_input.is_some() {
                 updates.push(SessionUpdate::ToolCallUpdate {
                     tool_call_id: tool_call_id.to_string(),
-                    status: status.to_string(),
-                    detail: update.get("title").and_then(Value::as_str).unwrap_or("").to_string(),
+                    status: status.unwrap_or("").to_string(),
+                    detail: title.unwrap_or("").to_string(),
+                    raw_input,
                 });
             }
             if let Some(exit) = update.pointer("/_meta/terminal_exit") {
@@ -900,8 +914,40 @@ mod tests {
                 tool_call_id: "t1".into(),
                 status: "completed".into(),
                 detail: "Read main.rs".into(),
+                raw_input: None,
             }]
         );
+    }
+
+    /// The live claude-agent-acp shape (wire-verified 2026-07-21): the real
+    /// rawInput and upgraded title arrive on a STATUS-LESS update after an
+    /// initial tool_call with rawInput {}. It must surface, not drop.
+    #[test]
+    fn tool_call_update_without_status_still_surfaces_raw_input_and_title() {
+        let params = serde_json::json!({"update": {
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "t1",
+            "title": "Read README.md",
+            "rawInput": {"file_path": "/repo/README.md"}
+        }});
+        assert_eq!(
+            parse_session_updates(&params),
+            vec![SessionUpdate::ToolCallUpdate {
+                tool_call_id: "t1".into(),
+                status: "".into(),
+                detail: "Read README.md".into(),
+                raw_input: Some(r#"{"file_path":"/repo/README.md"}"#.into()),
+            }]
+        );
+        // An empty rawInput upgrade is useless — content-only updates still
+        // yield nothing.
+        let noop = serde_json::json!({"update": {
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "t1",
+            "rawInput": {},
+            "content": []
+        }});
+        assert_eq!(parse_session_updates(&noop), vec![]);
     }
 
     #[test]
@@ -951,7 +997,7 @@ mod tests {
         assert_eq!(
             parse_session_updates(&params),
             vec![
-                SessionUpdate::ToolCallUpdate { tool_call_id: "t1".into(), status: "completed".into(), detail: "".into() },
+                SessionUpdate::ToolCallUpdate { tool_call_id: "t1".into(), status: "completed".into(), detail: "".into(), raw_input: None },
                 SessionUpdate::TerminalExit { tool_call_id: "t1".into(), exit_code: Some(0), signal: None },
             ]
         );
@@ -971,7 +1017,7 @@ mod tests {
         assert_eq!(
             parse_session_updates(&params),
             vec![
-                SessionUpdate::ToolCallUpdate { tool_call_id: "c1".into(), status: "failed".into(), detail: "".into() },
+                SessionUpdate::ToolCallUpdate { tool_call_id: "c1".into(), status: "failed".into(), detail: "".into(), raw_input: None },
                 SessionUpdate::TerminalExit { tool_call_id: "c1".into(), exit_code: Some(127), signal: None },
             ]
         );
@@ -991,7 +1037,7 @@ mod tests {
         });
         assert_eq!(
             parse_session_updates(&params),
-            vec![SessionUpdate::ToolCallUpdate { tool_call_id: "x".into(), status: "in_progress".into(), detail: "".into() }]
+            vec![SessionUpdate::ToolCallUpdate { tool_call_id: "x".into(), status: "in_progress".into(), detail: "".into(), raw_input: None }]
         );
         // exit_code non-numeric → None, event still emitted (exit is still real).
         let params = serde_json::json!({

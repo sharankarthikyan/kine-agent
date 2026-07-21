@@ -1072,11 +1072,13 @@ fn handle_notification(
                 tool_call_id,
                 status,
                 detail,
+                raw_input,
             } => {
                 sink.emit(AgentEvent::ToolStatus {
                     tool_call_id,
                     status,
                     detail,
+                    input: raw_input,
                 });
             }
             SessionUpdate::Plan { entries_json } => {
@@ -1103,6 +1105,7 @@ fn handle_notification(
                         tool_call_id: tool_call_id.clone(),
                         status: "in_progress".to_string(),
                         detail: String::new(),
+                        input: None,
                     });
                 }
                 coalescer.push(&tool_call_id, &data, sink);
@@ -4385,12 +4388,14 @@ mod tests {
                 AgentEvent::ToolStatus {
                     tool_call_id: "c1".into(),
                     status: "in_progress".into(),
-                    detail: "".into()
+                    detail: "".into(),
+                    input: None,
                 },
                 AgentEvent::ToolStatus {
                     tool_call_id: "c1".into(),
                     status: "completed".into(),
-                    detail: "".into()
+                    detail: "".into(),
+                    input: None,
                 },
                 // finish() flushes the buffered sub-threshold delta before the exit event.
                 AgentEvent::TerminalOutput {
@@ -4450,7 +4455,8 @@ mod tests {
             vec![AgentEvent::ToolStatus {
                 tool_call_id: "c1".into(),
                 status: "in_progress".into(),
-                detail: "".into()
+                detail: "".into(),
+                input: None,
             }],
             "first output byte for a new tool_call_id must synthesize in_progress \
              before the (sub-threshold, still-buffered) data is emitted"
@@ -4475,7 +4481,8 @@ mod tests {
                 AgentEvent::ToolStatus {
                     tool_call_id: "c1".into(),
                     status: "in_progress".into(),
-                    detail: "".into()
+                    detail: "".into(),
+                    input: None,
                 },
                 AgentEvent::TerminalOutput {
                     tool_call_id: "c1".into(),
@@ -4523,12 +4530,14 @@ mod tests {
                 AgentEvent::ToolStatus {
                     tool_call_id: "t1".into(),
                     status: "in_progress".into(),
-                    detail: "".into()
+                    detail: "".into(),
+                    input: None,
                 },
                 AgentEvent::ToolStatus {
                     tool_call_id: "t1".into(),
                     status: "completed".into(),
-                    detail: "".into()
+                    detail: "".into(),
+                    input: None,
                 },
                 AgentEvent::TerminalOutput {
                     tool_call_id: "t1".into(),
@@ -4622,12 +4631,14 @@ mod tests {
                 AgentEvent::ToolStatus {
                     tool_call_id: "c1".into(),
                     status: "in_progress".into(),
-                    detail: "".into()
+                    detail: "".into(),
+                    input: None,
                 },
                 AgentEvent::ToolStatus {
                     tool_call_id: "c1".into(),
                     status: "completed".into(),
-                    detail: "".into()
+                    detail: "".into(),
+                    input: None,
                 },
                 AgentEvent::TerminalOutput {
                     tool_call_id: "c1".into(),

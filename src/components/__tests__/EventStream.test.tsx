@@ -30,6 +30,31 @@ test("coalesces consecutive token chunks into one prose block", () => {
   expect(screen.queryByText("Hello")).not.toBeInTheDocument();
 });
 
+test("late toolStatus input/title upgrades replace an empty {} tool input (claude ACP shape)", () => {
+  // Wire-verified sequence: tool_call arrives with rawInput {} and a generic
+  // title; the real input + upgraded title ride a later status-less update.
+  const events: AgentEvent[] = [
+    { kind: "toolCall", data: { name: "Read File", input: "{}", toolCallId: "t1" } },
+    {
+      kind: "toolStatus",
+      data: {
+        toolCallId: "t1",
+        status: "",
+        detail: "Read README.md",
+        input: '{"file_path":"/repo/README.md"}',
+      },
+    },
+    { kind: "toolStatus", data: { toolCallId: "t1", status: "completed", detail: "" } },
+  ];
+  render(<EventStream events={events} />);
+  // Chip label normalizes the upgraded title back to "Read", and with a real
+  // file_path the chip gains a summary instead of dangling with {} input.
+  const chip = screen.getByTestId("tool-status-t1");
+  expect(chip).toHaveAttribute("data-status", "completed");
+  expect(chip.textContent).toContain("Read");
+  expect(chip.textContent).toContain("README.md");
+});
+
 test("never renders status events in the transcript — RunningIndicator owns live progress", () => {
   const events: AgentEvent[] = [
     { kind: "status", data: { text: "Launching ACP adapter" } },

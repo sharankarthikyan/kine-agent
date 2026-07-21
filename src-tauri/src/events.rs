@@ -37,13 +37,19 @@ pub enum AgentEvent {
         tool_call_id: Option<String>,
     },
     /// Status transition for an earlier ToolCall (ACP `tool_call_update`):
-    /// pending | in_progress | completed | failed. `detail` is the update's
-    /// human-readable title ("" when the update carried none).
+    /// pending | in_progress | completed | failed — or "" when the update
+    /// carried no status (claude-agent-acp sends status-less updates bearing
+    /// the REAL rawInput after an initial tool_call whose rawInput was `{}`).
+    /// `detail` is the update's human-readable title ("" when absent);
+    /// `input` is the late-arriving rawInput JSON. The frontend overlays
+    /// both onto the matching chip.
     #[serde(rename_all = "camelCase")]
     ToolStatus {
         tool_call_id: String,
         status: String,
         detail: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        input: Option<String>,
     },
     /// Live terminal output for an execute tool call (ACP vendor
     /// `_meta.terminal_output`, display-only). Adapter-coalesced and capped
@@ -224,10 +230,23 @@ mod tests {
             tool_call_id: "t1".into(),
             status: "completed".into(),
             detail: "Read main.rs".into(),
+            input: None,
         };
         assert_eq!(
             serde_json::to_string(&ev).unwrap(),
             r#"{"kind":"toolStatus","data":{"toolCallId":"t1","status":"completed","detail":"Read main.rs"}}"#
+        );
+        // A late-arriving rawInput upgrade rides the same event; absent input
+        // keeps the legacy shape above byte-identical.
+        let ev = AgentEvent::ToolStatus {
+            tool_call_id: "t1".into(),
+            status: "".into(),
+            detail: "Read README.md".into(),
+            input: Some(r#"{"file_path":"/repo/README.md"}"#.into()),
+        };
+        assert_eq!(
+            serde_json::to_string(&ev).unwrap(),
+            r#"{"kind":"toolStatus","data":{"toolCallId":"t1","status":"","detail":"Read README.md","input":"{\"file_path\":\"/repo/README.md\"}"}}"#
         );
     }
 

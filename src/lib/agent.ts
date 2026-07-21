@@ -26,7 +26,12 @@ export type AgentEvent =
   | { kind: "thought"; data: { text: string } }
   | { kind: "status"; data: { text: string } }
   | { kind: "toolCall"; data: { name: string; input: string; toolCallId?: string } }
-  | { kind: "toolStatus"; data: { toolCallId: string; status: string; detail: string } }
+  | {
+      kind: "toolStatus";
+      // status may be "" and detail/input may carry a late-arriving title/rawInput
+      // upgrade (claude-agent-acp sends the real input on a status-less update).
+      data: { toolCallId: string; status: string; detail: string; input?: string };
+    }
   | { kind: "terminalOutput"; data: { toolCallId: string; data: string } }
   | { kind: "terminalExit"; data: { toolCallId: string; exitCode: number | null; signal: string | null; droppedBytes?: number } }
   | { kind: "plan"; data: { entriesJson: string } }
