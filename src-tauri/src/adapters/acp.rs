@@ -19,14 +19,19 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, BufReader};
 
-/// Per-agent ACP launch profile. Packages are VERSION-PINNED: unpinned npx
-/// drifts to @latest, and a silent protocol bump must be a deliberate, tested
-/// upgrade — not a runtime surprise. `login_hint` is appended to auth_required
-/// failures so the toast tells the user exactly what to run.
+/// Per-agent ACP launch profile. Packages are VERSION-PINNED and installed
+/// via the embedded lockfiles in [`super::acp_install`] (`npm ci
+/// --ignore-scripts` with sha512 integrity for the whole dependency tree) —
+/// a silent protocol bump must be a deliberate, tested upgrade, and a
+/// hijacked transitive dependency must not reach execution. `login_hint` is
+/// appended to auth_required failures so the toast tells the user exactly
+/// what to run.
 #[derive(Clone, Copy)]
 pub struct AcpProfile {
     pub agent: &'static str,
     pub package: &'static str,
+    /// Embedded lockfile bundle used to install and locate the wrapper.
+    pub lock: super::acp_install::AcpLock,
     pub login_hint: &'static str,
     pub login_command: &'static str,
     pub auth_message: &'static str,
@@ -41,6 +46,7 @@ pub struct AcpProfile {
 pub const CLAUDE_ACP: AcpProfile = AcpProfile {
     agent: "claude",
     package: "@agentclientprotocol/claude-agent-acp@0.54.1",
+    lock: super::acp_install::CLAUDE_LOCK,
     login_hint: "log in with the Claude CLI first (`claude`, then /login)",
     login_command: "claude",
     auth_message: "Sign in to Claude Code in a terminal, then retry this message.",
@@ -50,6 +56,7 @@ pub const CLAUDE_ACP: AcpProfile = AcpProfile {
 pub const CODEX_ACP: AcpProfile = AcpProfile {
     agent: "codex",
     package: "@zed-industries/codex-acp@0.16.0",
+    lock: super::acp_install::CODEX_LOCK,
     login_hint: "run `codex login` in a terminal, then retry",
     login_command: "codex login",
     auth_message: "Sign in to Codex CLI in a terminal, then retry this message.",
@@ -444,15 +451,24 @@ async fn spawn_and_drive(
     // resolve_program falls back to the bare name on lookup failure, which would
     // yield a generic "No such file" from spawn — check explicitly so the user
     // gets an actionable message instead.
-    if which::which("npx").is_err() {
+    if which::which("node").is_err() {
         return Err(SessionError::Spawn(
-            "Node.js (npx) is required for the ACP engine — install Node or switch the session back to the default engine".into(),
+            "Node.js is required for the ACP engine — install Node or switch the session back to the default engine".into(),
         ));
     }
-    let npx = crate::agent_paths::resolve_program("npx");
-    let mut cmd = crate::proc::tokio_command(&npx);
-    cmd.arg("--yes")
-        .arg(profile.package)
+    // Lockfile-verified install (first run downloads; afterwards offline) —
+    // see acp_install.rs for why this replaced `npx --yes`.
+    if !super::acp_install::is_installed(profile.lock) {
+        sink.emit(AgentEvent::Status {
+            text: format!("Downloading the {} adapter (one-time, integrity-verified)", profile.agent),
+        });
+    }
+    let bin = super::acp_install::ensure_installed(profile.lock)
+        .await
+        .map_err(SessionError::Spawn)?;
+    let node = crate::agent_paths::resolve_program("node");
+    let mut cmd = crate::proc::tokio_command(&node);
+    cmd.arg(&bin)
         .current_dir(&cwd)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -463,16 +479,17 @@ async fn spawn_and_drive(
     // in subscription mode this strips inherited key vars instead. Agent-agnostic — the
     // resolved value already encodes the correct var for this session's agent.
     prompt.auth.apply(&mut cmd);
-    // The child must lead its own process group: npx's descendants (the node
-    // shim and codex-acp's native binary) don't die with npx — SIGKILL doesn't
-    // propagate — and codex-acp doesn't exit on stdin EOF either (observed
-    // live: one orphaned node+binary pair leaked per turn). Group-kill below
-    // is the only reliable teardown for the whole tree.
+    // The child must lead its own process group: the wrapper's descendants
+    // (codex-acp's native binary; claude-agent-acp's spawned CLI) don't die
+    // with the direct node child — SIGKILL doesn't propagate — and codex-acp
+    // doesn't exit on stdin EOF either (observed live: one orphaned
+    // node+binary pair leaked per turn). Group-kill below is the only
+    // reliable teardown for the whole tree.
     #[cfg(unix)]
     cmd.process_group(0);
     let mut child = cmd
         .spawn()
-        .map_err(|e| SessionError::Spawn(format!("npx {}: {e}", profile.package)))?;
+        .map_err(|e| SessionError::Spawn(format!("node {}: {e}", profile.package)))?;
     let stdin = child
         .stdin
         .take()

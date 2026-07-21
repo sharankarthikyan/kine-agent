@@ -1,4 +1,5 @@
 pub mod acp;
+pub mod acp_install;
 pub mod antigravity;
 pub mod claude;
 pub mod codex;
