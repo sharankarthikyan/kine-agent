@@ -576,7 +576,9 @@ function AboutSection() {
           list with your key. Your prompts, the agents' replies, the commands they run, and
           those commands' output are recorded verbatim in a local SQLite database under{" "}
           <span className="font-mono">~/.kine-agent</span> so you can review and resume
-          sessions — none of it is sent anywhere. Deleting a session,
+          sessions — Kine Agent itself sends none of it anywhere. The agent CLI you are
+          driving still sends your prompts to its own vendor, exactly as it does when you
+          run it in a terminal. Deleting a session,
           or the <span className="font-mono">~/.kine-agent</span> folder, removes that history.
           If you add an API key for an agent, it is stored in your OS keychain — never in that
           database or in logs — and used only to authenticate that agent's own CLI.

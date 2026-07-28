@@ -1,7 +1,9 @@
 // Per-agent enablement preferences (frontend-only, like recents.ts / acpNotice.ts).
 //
 // Kine Agent drives each vendor's official CLI under the user's OWN subscription
-// login — it never handles a token or calls a vendor API itself. For OpenAI Codex
+// login — on that path it never handles a token or calls a vendor API itself. (The
+// opt-in BYOK path does hold a key, in the OS keychain, and uses it to fetch that
+// vendor's model list — see auth.rs / provider_models.rs.) For OpenAI Codex
 // that is an officially supported, scriptable path. For Claude Code, Anthropic has
 // stated that `claude -p` / ACP / third-party apps built on the Agent SDK keep
 // working with subscriptions (June 2026) — a stated position, not a guarantee.

@@ -23,8 +23,9 @@ land on a dedicated branch for you to review before anything merges into your re
 
 ## Highlights
 
-- **Multiple agents, one UI.** Start a session with Claude, Codex, or Antigravity;
-  the session list, diff viewer, and approval flow are identical across agents.
+- **Multiple agents, one UI.** Start a session with Claude, Codex, or Antigravity; the
+  session list and diff viewer are identical across agents. Approval gates arrive for
+  Claude and Codex over ACP — Antigravity's headless CLI exposes no approval hook.
 - **Per-session review boundary.** Every session gets its own git worktree
   (`~/KineAgent/worktrees/<id>`) on a dedicated branch, so every change is diffable
   and revertible before it reaches your repo. Review the diff, then merge or discard.
@@ -52,8 +53,10 @@ land on a dedicated branch for you to review before anything merges into your re
 The engine is derived automatically — there is no engine picker. Claude and Codex run
 over [ACP](https://agentclientprotocol.com/) when Node is available (the pinned adapter
 packages are installed once, integrity-verified against lockfiles shipped in the app);
-without Node they fall back to the pipe transports above. Only ACP carries live tool,
-file, and usage events.
+without Node they fall back to the pipe transports above, which still carry tool calls
+and usage (and file writes, for Codex). ACP adds tool status, terminal output, and
+in-protocol approvals. Antigravity's `--print` returns final text only — no live events
+of any kind.
 
 Codex is enabled out of the box. Claude Code and Antigravity are opt-in behind a one-time
 notice in **Settings → Agents**, because driving a *consumer subscription* through a
@@ -71,9 +74,9 @@ or go to **System Settings → Privacy & Security** and click **Open Anyway**. Y
 need to do this once. (Windows SmartScreen shows a similar one-time "More info → Run
 anyway" prompt.)
 
-**On signing, precisely:** in-app updates *are* signed — every release artifact is
-minisign-signed in CI and verified against a public key compiled into the app before
-it relaunches. The bundles are **not** OS code-signed or Apple-notarized, which is what
+**On signing, precisely:** in-app updates *are* signed — every **updater** artifact is
+minisign-signed in CI and verified against a public key compiled into the app before it
+relaunches. (The macOS `.dmg` is not an updater artifact and carries no signature.) The bundles are **not** OS code-signed or Apple-notarized, which is what
 the one-time Gatekeeper/SmartScreen prompt above is about. Those are two different
 things; "signed builds" on its own would be misleading.
 
@@ -100,8 +103,11 @@ React UI  ──Tauri IPC──▶  Rust core
                           └─ SessionStore     SQLite: sessions + append-only events
 ```
 
-The frontend cannot call arbitrary FS/shell — IPC is capability-allowlisted. Adding a
-new agent means writing one adapter; the UI is untouched.
+The WebView has no filesystem or shell plugin — it can only call the specific Rust
+commands the app defines, each validating its own inputs. Writes are confined to the
+worktree and the customization allowlist; the `@`-mention browser reads files you point
+it at, minus a denylist of sensitive directories. Adding a new agent means writing one
+adapter; the UI is untouched.
 
 ## Getting started
 
@@ -160,10 +166,13 @@ intentionally deferred to later phases.
 
 ## Vendor terms
 
-Kine Agent spawns each vendor's **own official CLI** on your machine. It never handles
-a vendor credential, never offers a vendor login, and never calls a vendor API on your
-behalf — the CLI authenticates itself, exactly as it does when you run it in a terminal.
-That distinction is the one the vendors' rules turn on, and it lands differently for each:
+Kine Agent spawns each vendor's **own official CLI** on your machine. On the default
+subscription path it never handles a vendor credential, never offers a vendor login, and
+never calls a vendor API on your behalf — the CLI authenticates itself, exactly as it does
+when you run it in a terminal. (If you opt into an API key instead, Kine Agent holds that
+key in your OS keychain, hands it to the CLI at spawn, and uses it for one call of its
+own: fetching that vendor's model list.) That distinction is the one the vendors' rules
+turn on, and it lands differently for each:
 
 - **OpenAI Codex** — supported. `codex exec` is official automation and signing in with
   your ChatGPT plan is a documented path. Enabled by default.
