@@ -7,3 +7,6 @@ target/
 # Internal AI-assisted development notes — kept local, not published.
 .claude/
 docs/superpowers/
+
+# Browser-automation scratch output (console logs, page snapshots).
+.playwright-mcp/
