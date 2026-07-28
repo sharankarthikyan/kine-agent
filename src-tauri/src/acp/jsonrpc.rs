@@ -323,6 +323,27 @@ async fn handle_oversized(
     }
 }
 
+/// Reduce one `error.data.message` payload to the sentence a human should read.
+///
+/// codex-acp forwards the vendor's rejection verbatim, and for backend errors
+/// that payload is itself a JSON envelope
+/// (`{"type":"error","status":400,"error":{"message":"…"}}`). Dumping the
+/// envelope into the transcript buries the one line that tells the user what to
+/// do, so unwrap it when it parses; anything else (already-plain text, or JSON
+/// carrying no message) passes through untouched.
+fn readable_error_detail(raw: &str) -> String {
+    let Ok(parsed) = serde_json::from_str::<Value>(raw) else {
+        return raw.to_string();
+    };
+    parsed
+        .pointer("/error/message")
+        .or_else(|| parsed.pointer("/message"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map_or_else(|| raw.to_string(), str::to_string)
+}
+
 /// Route one incoming line: a response (has `id`, no `method`) resolves a pending
 /// request; a request (has both) or notification (method only) goes to the inbound
 /// channel. Anything unparseable is logged and skipped — never fatal.
@@ -362,6 +383,7 @@ fn route_line(line: &str, pending: &Pending, inbound: &mpsc::UnboundedSender<Inb
                 let data_message = err
                     .pointer("/data/message")
                     .and_then(Value::as_str)
+                    .map(readable_error_detail)
                     .map(|s| s.chars().take(400).collect::<String>())
                     .filter(|s| !s.trim().is_empty());
                 let wire_message = err
@@ -540,6 +562,66 @@ mod tests {
             "data.message surfaced: {text}"
         );
         agent_task.await.unwrap();
+    }
+
+    /// When the backend rejects the request, codex-acp puts the vendor's whole
+    /// JSON error ENVELOPE into error.data.message (observed live 2026-07-27:
+    /// gpt-5.6-sol rejected because codex-acp's vendored core is older than the
+    /// model requires). Dumping that envelope at the user is unreadable — only
+    /// the human sentence inside it should reach the transcript.
+    #[tokio::test]
+    async fn nested_json_error_envelope_is_unwrapped_to_its_message() {
+        let (peer, agent) = harness();
+        let (r, mut agent_tx) = tokio::io::split(agent);
+        let mut agent_rx = BufReader::new(r).lines();
+        let fut = peer.request("x", serde_json::json!({}));
+        let agent_task = tokio::spawn(async move {
+            let line = agent_rx.next_line().await.unwrap().unwrap();
+            let req: serde_json::Value = serde_json::from_str(&line).unwrap();
+            let envelope = r#"{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"The 'gpt-5.6-sol' model requires a newer version of Codex. Please upgrade to the latest app or CLI and try again."}}"#;
+            let resp = serde_json::json!({
+                "jsonrpc": "2.0", "id": req["id"],
+                "error": {"code": -32603, "message": "Internal error",
+                    "data": {"message": envelope}}
+            });
+            agent_tx
+                .write_all(format!("{resp}\n").as_bytes())
+                .await
+                .unwrap();
+        });
+        let err = fut.await.unwrap_err();
+        let text = err.to_string();
+        assert!(
+            text.contains("The 'gpt-5.6-sol' model requires a newer version of Codex."),
+            "human sentence surfaced: {text}"
+        );
+        assert!(
+            !text.contains("invalid_request_error"),
+            "raw envelope must not reach the user: {text}"
+        );
+        agent_task.await.unwrap();
+    }
+
+    #[test]
+    fn readable_detail_unwraps_nested_envelopes_and_passes_plain_text_through() {
+        // Plain text: unchanged.
+        assert_eq!(
+            readable_error_detail("You've hit your usage limit."),
+            "You've hit your usage limit."
+        );
+        // Vendor envelope: inner error.message wins.
+        assert_eq!(
+            readable_error_detail(r#"{"error":{"message":"model unavailable"}}"#),
+            "model unavailable"
+        );
+        // Flat JSON object with a message: that message wins.
+        assert_eq!(
+            readable_error_detail(r#"{"message":"bad request"}"#),
+            "bad request"
+        );
+        // JSON without any message: fall back to the raw payload rather than
+        // silently dropping the only evidence there is.
+        assert_eq!(readable_error_detail(r#"{"status":400}"#), r#"{"status":400}"#);
     }
 
     #[tokio::test]
