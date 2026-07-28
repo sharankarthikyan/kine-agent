@@ -1,15 +1,16 @@
 # Design System
 
 > Kine Agent is a local-first Tauri 2 desktop app that supervises AI coding-agent CLIs.
-> **Design direction (user, 2026-06-28): minimalistic shadcn/ui aesthetic — ALWAYS.**
-> This supersedes the original custom near-black token palette (`src/styles/tokens.css`),
-> which the user explicitly disliked (too harsh/raw). Calm, neutral, low-contrast.
+> **Direction: a minimal shadcn/ui aesthetic — calm, neutral, low-contrast.**
+> An earlier custom near-black palette (`src/styles/tokens.css`) was dropped for reading
+> too harsh over long sessions; the interface is meant to sit in the background while
+> several agents run in the foreground.
 
 ## UX Defaults
 - Target users: expert developers / power users, keyboard-driven, running many agent sessions in parallel.
 - Default interaction model: keyboard-friendly desktop; 3-zone master-detail (session list | chat | diff pane).
 - Tone: calm and restrained — "felt, not seen". Whitespace and subtle surfaces over borders and color.
-- **No decorative emoji:** UI uses Lucide icons (`data-icon`) exclusively — never emoji glyphs. All labels are normal-case (no uppercase / title-case forcing). Explicit user preference.
+- **No decorative emoji:** UI uses Lucide icons (`data-icon`) exclusively — never emoji glyphs. All labels are normal-case (no uppercase / title-case forcing).
 
 ## Tokens (shadcn/ui, zinc base)
 - **Colors:** shadcn CSS variables (`--background`, `--foreground`, `--card`, `--popover`, `--primary`,
@@ -41,14 +42,15 @@
 - Composition: every component accepts `className` and merges via `cn()` (`src/lib/utils.ts`).
 
 ## Patterns
-- **Layout:** 3-zone master-detail — session list (left, ~`w-72`, collapsible, state in `localStorage`) | chat (center, bottom-anchored composer) | context/changes/files pane (right, collapsible + expand-to-fullscreen). **Inset rounded-panel chrome:** all 3 columns are inset from the window edges with a gap; each is a `rounded-xl border border-border bg-card` surface on a darker window `background` — floating-card look (per Conductor screenshots / user feedback).
+- **Layout:** 3-zone master-detail — session list (left, ~`w-72`, collapsible, state in `localStorage`) | chat (center, bottom-anchored composer) | context/changes/files pane (right, collapsible + expand-to-fullscreen). **Inset rounded-panel chrome:** all 3 columns are inset from the window edges with a gap; each is a `rounded-xl border border-border bg-card` surface on a darker window `background` — the inset floating-card treatment conventional to multi-pane desktop agent tools, chosen so a pane reads as a self-contained workspace rather than a region of one window.
 - **Composer (prompt bar):** modern AI-chat input — a roomy `rounded-xl` bordered card with a `Textarea`
   ("Message the agent…"), bottom-left a **model/agent selector** (Lucide icon + model name + tier `Badge` +
   chevron, via `DropdownMenu`/`Select`), bottom-right an attach icon button + a circular `rounded-full` send
-  button (Lucide `ArrowUp`). Enter sends, Shift+Enter newline. (Reference: ChatGPT/Cursor composer.)
+  button (Lucide `ArrowUp`). Enter sends, Shift+Enter newline — the composer layout users
+  already know from mainstream AI chat clients, so nothing here needs to be learned.
 - **Session row:** status dot + title + textual status; active row = subtle `bg-accent` + left accent + `aria-current`.
 - **Tool calls / file writes:** compact muted chips inside the assistant turn (not bordered rows).
-- **Review entry point:** "N files changed" chip in the conversation opens the diff side-pane (per Design Ledger).
+- **Review entry point:** "N files changed" chip in the conversation opens the diff side-pane.
 - **Loading:** `Skeleton` matching row geometry for lists; inline typing indicator for streaming output.
 - **Errors:** inline, scoped to the turn/session (`destructive` accent); never blank the whole view.
 - **Empty state:** centered icon + short heading + one CTA ("Start a session").
