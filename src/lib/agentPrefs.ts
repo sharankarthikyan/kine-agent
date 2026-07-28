@@ -1,11 +1,13 @@
 // Per-agent enablement preferences (frontend-only, like recents.ts / acpNotice.ts).
 //
 // Kine Agent drives each vendor's official CLI under the user's OWN subscription
-// login. For OpenAI Codex that is an officially supported, scriptable path; for
-// Claude Code and Antigravity, driving a CONSUMER subscription non-interactively
-// through a third-party wrapper may breach the vendor's terms and, in rare cases,
-// affect the user's account. So the app ships with only Codex enabled and asks
-// the user to make a deliberate, informed choice before enabling the other two.
+// login — it never handles a token or calls a vendor API itself. For OpenAI Codex
+// that is an officially supported, scriptable path. For Claude Code, Anthropic has
+// stated that `claude -p` / ACP / third-party apps built on the Agent SDK keep
+// working with subscriptions (June 2026) — a stated position, not a guarantee.
+// For Antigravity, Google's terms flatly bar third-party access and Google has
+// permanently banned paid subscribers for it. So the app ships with only Codex
+// enabled and asks for a deliberate, informed choice before enabling the other two.
 //
 // This is a user preference, not a security boundary: the backend still validates
 // which agents are spawnable. Disabling an agent only governs starting NEW sessions
@@ -49,7 +51,7 @@ export const AGENT_META: AgentMeta[] = [
     installDocsUrl: "https://code.claude.com/docs/en/setup",
     consent: {
       title: "Before you enable Claude Code",
-      body: "Anthropic's Consumer Terms only cover automated access to Claude through an official API key. Using your Pro/Max subscription login here relies on OAuth, which those terms don't cover for third-party tools like Kine Agent — Anthropic has begun enforcing this, so it could affect your account. Switching to the API key option keeps you on the supported path. You can still use your subscription login if you accept that risk.",
+      body: "Anthropic's Consumer Terms bar third-party tools from routing subscription requests themselves — taking your OAuth token and calling the API as if they were Claude Code. Kine Agent does not do that: it spawns the official claude binary, which authenticates itself, and Anthropic has said that claude -p, ACP, and third-party apps built on the Agent SDK continue to work with Claude subscriptions, with advance notice before any change. That is a stated position, not a guarantee — terms and limits can change. Adding an API key in Settings puts you on the path Anthropic documents for developers.",
     },
   },
   {

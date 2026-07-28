@@ -44,10 +44,20 @@ land on a dedicated branch for you to review before anything merges into your re
 
 | Agent | New sessions | History (read-only) | Notes |
 |-------|:---:|:---:|-------|
-| **Claude Code** | ✅ full | ✅ | `claude -p --output-format stream-json` |
-| **OpenAI Codex** | ✅ full | ✅ | `codex exec --json`; resumes by captured thread id |
+| **Claude Code** | ✅ full | ✅ | ACP by default (needs Node); falls back to piping `claude -p --output-format stream-json` |
+| **OpenAI Codex** | ✅ full | ✅ | ACP by default (needs Node); falls back to piping `codex exec --json`. Resumes by captured thread id |
 | **Antigravity** (`agy`) | ✅ text-only | ✅ | `agy --print` emits final text only — no live tool/file/usage events; scoped to the worktree via `--add-dir` |
 | **Gemini CLI** | — | ✅ | deprecated upstream (succeeded by Antigravity); history listed, spawning gated |
+
+The engine is derived automatically — there is no engine picker. Claude and Codex run
+over [ACP](https://agentclientprotocol.com/) when Node is available (the pinned adapter
+packages are installed once, integrity-verified against lockfiles shipped in the app);
+without Node they fall back to the pipe transports above. Only ACP carries live tool,
+file, and usage events.
+
+Codex is enabled out of the box. Claude Code and Antigravity are opt-in behind a one-time
+notice in **Settings → Agents**, because driving a *consumer subscription* through a
+third-party tool sits differently with each vendor — see [Vendor terms](#vendor-terms).
 
 ## Installing
 
@@ -60,6 +70,12 @@ software"). To open it, **right-click (or Control-click) the app icon → Open �
 or go to **System Settings → Privacy & Security** and click **Open Anyway**. You only
 need to do this once. (Windows SmartScreen shows a similar one-time "More info → Run
 anyway" prompt.)
+
+**On signing, precisely:** in-app updates *are* signed — every release artifact is
+minisign-signed in CI and verified against a public key compiled into the app before
+it relaunches. The bundles are **not** OS code-signed or Apple-notarized, which is what
+the one-time Gatekeeper/SmartScreen prompt above is about. Those are two different
+things; "signed builds" on its own would be misleading.
 
 ## Stack
 
@@ -142,16 +158,38 @@ that agent's own CLI.
 MVP, local-only. Cloud/remote control, live-terminal attach, and mobile are
 intentionally deferred to later phases.
 
+## Vendor terms
+
+Kine Agent spawns each vendor's **own official CLI** on your machine. It never handles
+a vendor credential, never offers a vendor login, and never calls a vendor API on your
+behalf — the CLI authenticates itself, exactly as it does when you run it in a terminal.
+That distinction is the one the vendors' rules turn on, and it lands differently for each:
+
+- **OpenAI Codex** — supported. `codex exec` is official automation and signing in with
+  your ChatGPT plan is a documented path. Enabled by default.
+- **Claude Code** — Anthropic's
+  [Consumer Terms](https://code.claude.com/docs/en/legal-and-compliance) prohibit
+  third-party developers from offering a Claude.ai login or *routing requests through*
+  Free/Pro/Max credentials on behalf of users — i.e. lifting an OAuth token and calling
+  the API as if you were Claude Code. Kine Agent does neither. Anthropic has separately
+  stated that `claude -p`, ACP, and third-party apps built on the Agent SDK continue to
+  work with Claude subscriptions, with advance notice before any change. A stated
+  position is not a guarantee, so Claude is opt-in behind a one-time notice.
+- **Antigravity** — Google's
+  [Additional Terms](https://antigravity.google/terms) state that using third-party
+  software to access the Service is a breach of the agreement and grounds for
+  termination, and Google **has permanently banned paid subscribers** for it, without
+  warning. `agy` has no API-key alternative. Antigravity is opt-in behind a notice that
+  says exactly this. Enable it only if you accept that risk for your own Google account.
+
+If you'd rather not rely on a subscription login at all, add your own API key for Claude
+or Codex in **Settings → Agents** — that is the path those vendors document for
+developers. Either way, your use of these CLIs is governed by each vendor's terms and
+you are responsible for complying with them.
+
 ## Disclaimer
 
 Kine Agent is an independent project and is **not affiliated with, sponsored by, or
 endorsed by** Anthropic, OpenAI, or Google. "Claude", "Claude Code", "Codex",
 "Gemini", and "Antigravity" are trademarks of their respective owners; they are
 referenced here only to describe compatibility.
-
-Kine Agent orchestrates each vendor's own CLI on your machine. **Your use of those
-CLIs is governed by each vendor's Terms of Service** — including how they are
-authenticated. Some vendors restrict driving their tools programmatically under a
-consumer subscription; review the applicable terms and use a permitted
-authentication method (e.g. your own API key) for your situation. You are
-responsible for ensuring your usage complies.
